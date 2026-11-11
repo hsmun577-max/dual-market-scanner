@@ -30,16 +30,36 @@ KR_SYMBOL_NAMES = {
     "122630.KS": "KODEX 레버리지",
 }
 
+US_SYMBOL_NAMES = {
+    "AAPL": "애플",
+    "MSFT": "마이크로소프트",
+    "NVDA": "엔비디아",
+    "AMD": "어드밴스드 마이크로 디바이시스",
+    "AVGO": "브로드컴",
+    "AMZN": "아마존",
+    "META": "메타 플랫폼스",
+    "GOOGL": "알파벳 A",
+    "TSLA": "테슬라",
+    "PLTR": "팔란티어",
+    "MU": "마이크론 테크놀로지",
+    "MRVL": "마벨 테크놀로지",
+    "SMCI": "슈퍼 마이크로 컴퓨터",
+    "QQQ": "인베스코 QQQ",
+    "SPY": "SPDR S&P 500 ETF",
+    "IWM": "아이셰어즈 러셀 2000 ETF",
+    "SOXX": "아이셰어즈 반도체 ETF",
+    "SOXL": "디렉시온 반도체 3배 ETF",
+    "SOXS": "디렉시온 반도체 인버스 3배 ETF",
+    "TQQQ": "프로셰어즈 나스닥100 3배 ETF",
+    "SQQQ": "프로셰어즈 나스닥100 인버스 3배 ETF",
+    "SPXL": "디렉시온 S&P 500 3배 ETF",
+    "SPXS": "디렉시온 S&P 500 인버스 3배 ETF",
+    "TLT": "아이셰어즈 미국 장기국채 ETF",
+}
+
 WATCHLIST = {
     "KR": list(KR_SYMBOL_NAMES),
-    "US": [
-        "AAPL", "MSFT", "NVDA", "AMD", "AVGO",
-        "AMZN", "META", "GOOGL", "TSLA",
-        "PLTR", "MU", "MRVL", "SMCI",
-        "QQQ", "SPY", "IWM", "SOXX",
-        "SOXL", "SOXS", "TQQQ", "SQQQ",
-        "SPXL", "SPXS", "TLT"
-    ]
+    "US": list(US_SYMBOL_NAMES),
 }
 
 BENCHMARKS = {
@@ -102,7 +122,7 @@ def parse_us_master(lines):
         security_type, product_type = fields[8].strip(), fields[22].strip()
         if security_type == "2" or (security_type == "3" and product_type in {"001", "005"}):
             symbol = fields[4].strip().replace(".", "-")
-            name = fields[6].strip() or fields[7].strip()
+            name = US_SYMBOL_NAMES.get(symbol) or fields[6].strip() or fields[7].strip()
             if symbol and name:
                 names[symbol] = name
     return names
@@ -548,7 +568,7 @@ def main():
         names = load_universe()
         watchlist = {market: list(items) for market, items in names.items()}
     else:
-        names = {"KR": KR_SYMBOL_NAMES, "US": {}}
+        names = {"KR": KR_SYMBOL_NAMES, "US": US_SYMBOL_NAMES}
         watchlist = WATCHLIST
 
     benchmarks = {}
