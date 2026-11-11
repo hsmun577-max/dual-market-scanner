@@ -3,7 +3,9 @@ import math
 import os
 import time
 import argparse
+from io import BytesIO
 from pathlib import Path
+from zipfile import ZipFile
 from datetime import datetime, timezone
 
 import numpy as np
@@ -58,6 +60,65 @@ LEVERAGED_ETFS = {
 
 REPORT_DIR = Path("reports")
 
+MASTER_URL = "https://new.real.download.dws.co.kr/common/master/"
+KR_SECURITY_GROUPS = {"ST", "MF", "RT", "SC", "IF", "DR", "EF", "FE", "FS"}
+FULL_SCOPE = "한국투자증권 종목정보 기준 코스피·코스닥·NASDAQ·NYSE·AMEX 주식 및 ETF"
+
+
+def load_master(filename):
+    response = requests.get(f"{MASTER_URL}{filename}.zip", timeout=30)
+    response.raise_for_status()
+    with ZipFile(BytesIO(response.content)) as archive:
+        return archive.read(filename).decode("cp949").splitlines()
+
+
+def parse_kr_master(lines, suffix, tail_width):
+    names = {}
+    for line in lines:
+        if len(line) <= 21 + tail_width:
+            continue
+        head, tail = line[:-tail_width], line[-tail_width:]
+        symbol, name = head[:9].strip(), head[21:].strip()
+        if tail[:2] in KR_SECURITY_GROUPS and symbol and name:
+            names[f"{symbol}.{suffix}"] = name
+    return names
+
+
+def parse_us_master(lines):
+    names = {}
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) < 23:
+            continue
+        security_type, product_type = fields[8].strip(), fields[22].strip()
+        if security_type == "2" or (security_type == "3" and product_type in {"001", "005"}):
+            symbol = fields[4].strip().replace(".", "-")
+            name = fields[6].strip() or fields[7].strip()
+            if symbol and name:
+                names[symbol] = name
+    return names
+
+
+def load_universe():
+    names = {"KR": {}, "US": {}}
+    # Tail widths exclude the newline counted by the KIS examples.
+    for filename, suffix, width in [
+        ("kospi_code.mst", "KS", 227),
+        ("kosdaq_code.mst", "KQ", 221),
+    ]:
+        instruments = parse_kr_master(load_master(filename), suffix, width)
+        if not instruments:
+            raise ValueError(f"종목 목록을 읽을 수 없음: {filename}")
+        names["KR"].update(instruments)
+
+    for filename in ("nasmst.cod", "nysmst.cod", "amsmst.cod"):
+        instruments = parse_us_master(load_master(filename))
+        if not instruments:
+            raise ValueError(f"종목 목록을 읽을 수 없음: {filename}")
+        names["US"].update(instruments)
+    return names
+
+
 def safe_float(value):
     try:
         value = float(value)
@@ -86,24 +147,7 @@ def download_prices(symbol, period="1y", retries=3):
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = data.columns.get_level_values(0)
 
-            required = ["Open", "High", "Low", "Close", "Volume"]
-
-            for column in required:
-                if column not in data.columns:
-                    raise ValueError(f"{column} 누락")
-
-            data = data[required].copy()
-            data = data.replace([np.inf, -np.inf], np.nan).dropna()
-            prices = ["Open", "High", "Low", "Close"]
-            data = data.loc[data[prices].gt(0).all(axis=1) & data["Volume"].ge(0)]
-            data = data.loc[~data.index.duplicated(keep="last")].sort_index()
-
-            if len(data) < 65:
-                raise ValueError(
-                    f"데이터 부족: {len(data)}거래일"
-                )
-
-            return data
+            return clean_prices(data)
 
         except Exception as exc:
             last_error = str(exc)
@@ -112,6 +156,43 @@ def download_prices(symbol, period="1y", retries=3):
                 time.sleep(2 ** attempt)
 
     raise RuntimeError(last_error)
+
+def clean_prices(data):
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    for column in required:
+        if column not in data.columns:
+            raise ValueError(f"{column} 누락")
+    data = data[required].replace([np.inf, -np.inf], np.nan).dropna()
+    data = data.loc[data[required[:4]].gt(0).all(axis=1) & data["Volume"].ge(0)]
+    data = data.loc[~data.index.duplicated(keep="last")].sort_index()
+    if len(data) < 65:
+        raise ValueError(f"데이터 부족: {len(data)}거래일")
+    return data
+
+
+def scan_batches(market, names, benchmark):
+    symbols = list(names)
+    results, errors = [], []
+    for start in range(0, len(symbols), 100):
+        batch = symbols[start:start + 100]
+        try:
+            prices = yf.download(
+                batch, period="1y", interval="1d", auto_adjust=True,
+                progress=False, threads=8, timeout=15, group_by="ticker",
+                multi_level_index=True,
+            )
+        except Exception as exc:
+            errors.extend(
+                {"market": market, "symbol": symbol, "error": str(exc)}
+                for symbol in batch
+            )
+            continue
+        found, failed = scan_market(market, batch, benchmark, names=names, prices=prices)
+        results.extend(found)
+        errors.extend(failed)
+        print(f"{market}: {len(results) + len(errors)}/{len(symbols)}")
+    return results, errors
+
 
 def calculate_obv(close, volume):
     direction = np.sign(close.diff().fillna(0))
@@ -311,13 +392,14 @@ def build_risk_plan(price, stop_pct=0.02,
         )
     }
 
-def scan_market(market, tickers, benchmark):
+def scan_market(market, tickers, benchmark, names=None, prices=None):
+    names = names or {}
     results = []
     errors = []
 
     for symbol in dict.fromkeys(tickers):
         try:
-            data = download_prices(symbol)
+            data = download_prices(symbol) if prices is None else clean_prices(prices[symbol])
 
             indicators = calculate_indicators(
                 data, benchmark
@@ -331,6 +413,7 @@ def scan_market(market, tickers, benchmark):
             result = {
                 "market": market,
                 "symbol": symbol,
+                "name": names.get(symbol),
                 "asset_type": (
                     "inverse_etf"
                     if symbol in INVERSE_ETFS
@@ -352,10 +435,8 @@ def scan_market(market, tickers, benchmark):
             }
 
             results.append(result)
-            print(
-                f"{market} {symbol}: "
-                f"{signal['stage']}"
-            )
+            if prices is None:
+                print(f"{market} {symbol}: {signal['stage']}")
 
         except Exception as exc:
             errors.append({
@@ -363,9 +444,24 @@ def scan_market(market, tickers, benchmark):
                 "symbol": symbol,
                 "error": str(exc)
             })
-            print(f"ERROR {market} {symbol}: {exc}")
+            if prices is None:
+                print(f"ERROR {market} {symbol}: {exc}")
 
     return results, errors
+
+def telegram_candidate_line(item):
+    signal = item["signal"]
+    data_date = item["indicators"]["data_date"]
+    reasons = ", ".join(signal["reasons"][:2])
+    symbol = item["symbol"]
+    name = item.get("name") or KR_SYMBOL_NAMES.get(symbol)
+    code = symbol.split(".")[0] if item["market"] == "KR" else symbol
+    label = f"{name} ({code})" if name else code
+    return (
+        f"{item['market']} {label} · {data_date} · "
+        f"{signal['stage']} ({signal['score']}점) · {reasons}"
+    )
+
 
 def send_telegram_summary(report):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -388,17 +484,13 @@ def send_telegram_summary(report):
         "듀얼스캐너 일봉 관찰 후보",
         f"조회 성공 {report['successful']}/{report['attempted']} · 후보 {len(candidates)}개",
     ]
-    for item in candidates:
-        signal = item["signal"]
-        data_date = item["indicators"]["data_date"]
-        reasons = ", ".join(signal["reasons"][:2])
-        symbol = item["symbol"]
-        name = KR_SYMBOL_NAMES.get(symbol) if item["market"] == "KR" else None
-        label = f"{name} ({symbol.split('.')[0]})" if name else symbol
-        lines.append(
-            f"{item['market']} {label} · {data_date} · "
-            f"{signal['stage']} ({signal['score']}점) · {reasons}"
+    for market in ("KR", "US"):
+        ranked = sorted(
+            (item for item in candidates if item["market"] == market),
+            key=lambda item: (-item["signal"]["score"], item["symbol"]),
         )
+        lines.extend(telegram_candidate_line(item) for item in ranked[:5])
+    lines.append("시장별 최대 5개 표시 · 전체 결과는 GitHub 실행 보고서")
 
     try:
         response = requests.post(
@@ -422,8 +514,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["sample"],
-        default="sample"
+        choices=["sample", "full", "universe"],
+        default="full"
     )
     args = parser.parse_args()
 
@@ -431,6 +523,22 @@ def main():
         parents=True,
         exist_ok=True
     )
+
+    if args.mode == "universe":
+        names = load_universe()
+        output = REPORT_DIR / "universe.json"
+        output.write_text(json.dumps(names, ensure_ascii=False, indent=2), encoding="utf-8")
+        for market, symbols in names.items():
+            print(f"{market} universe: {len(symbols)} instruments")
+        return
+
+    full_scan = args.mode == "full"
+    if full_scan:
+        names = load_universe()
+        watchlist = {market: list(items) for market, items in names.items()}
+    else:
+        names = {"KR": KR_SYMBOL_NAMES, "US": {}}
+        watchlist = WATCHLIST
 
     benchmarks = {}
     benchmark_errors = []
@@ -451,19 +559,18 @@ def main():
     all_results = []
     all_errors = []
 
-    for market, tickers in WATCHLIST.items():
-        results, errors = scan_market(
-            market,
-            tickers,
-            benchmarks[market]
-        )
+    for market, tickers in watchlist.items():
+        if full_scan:
+            results, errors = scan_batches(market, names[market], benchmarks[market])
+        else:
+            results, errors = scan_market(market, tickers, benchmarks[market], names=names[market])
 
         all_results.extend(results)
         all_errors.extend(errors)
 
     attempted = sum(
         len(set(tickers))
-        for tickers in WATCHLIST.values()
+        for tickers in watchlist.values()
     )
 
     report = {
@@ -471,8 +578,8 @@ def main():
             timezone.utc
         ).isoformat(),
         "scan_mode": args.mode,
-        "universe_scope": "고정 관심종목 표본",
-        "full_market_scan": False,
+        "universe_scope": FULL_SCOPE if full_scan else "고정 관심종목 표본",
+        "full_market_scan": full_scan,
         "attempted": attempted,
         "successful": len(all_results),
         "failed": len(all_errors),
@@ -489,12 +596,12 @@ def main():
                     if item["market"] == market
                 )
             }
-            for market, tickers in WATCHLIST.items()
+            for market, tickers in watchlist.items()
         },
         "results": all_results,
         "errors": all_errors,
         "limitations": [
-            "전 종목 스캔 아님",
+            "시세 미지원 또는 이력 부족 종목은 오류로 기록",
             "일봉 기반이며 실시간 매수 확정 불가",
             "당일 미완성 봉 포함 가능",
             "실시간 VWAP 미구현",
