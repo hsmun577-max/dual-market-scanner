@@ -79,6 +79,19 @@ LEVERAGED_ETFS = {
 }
 
 REPORT_DIR = Path("reports")
+SECTOR_ETFS = {
+    "KR": {
+        "091160.KS": "반도체", "305720.KS": "2차전지", "244580.KS": "바이오",
+        "091180.KS": "자동차", "091170.KS": "은행", "102970.KS": "증권",
+    },
+    "US": {
+        "XLK": "기술", "XLF": "금융", "XLE": "에너지", "XLV": "헬스케어",
+        "XLI": "산업재", "XLB": "소재", "XLC": "커뮤니케이션",
+        "XLY": "경기소비재", "XLP": "필수소비재", "XLU": "유틸리티",
+        "XLRE": "부동산",
+    },
+}
+SECTOR_TURNOVER_THRESHOLD = 2.0
 
 MASTER_URL = "https://new.real.download.dws.co.kr/common/master/"
 KR_SECURITY_GROUPS = {"ST", "MF", "RT", "SC", "IF", "DR", "EF", "FE", "FS"}
@@ -492,6 +505,56 @@ def telegram_candidate_line(item):
     )
 
 
+def sector_metrics(prices, benchmark):
+    data = prices[["Close", "Adj Close", "Volume"]].replace([np.inf, -np.inf], np.nan).dropna()
+    data = data.sort_index()
+    if len(data) < 21:
+        raise ValueError("섹터 일봉 21개 미만")
+
+    turnover = data["Close"] * data["Volume"]
+    average_turnover = float(turnover.iloc[-21:-1].mean())
+    if average_turnover <= 0:
+        raise ValueError("유효한 거래대금 기준 없음")
+    dates = data.index[-2:]
+    if benchmark is None or len(benchmark) < 2 or not dates.equals(benchmark.index[-2:]):
+        raise ValueError("섹터와 시장 기준 지표의 최근 거래일 불일치")
+
+    change = float(data["Adj Close"].iloc[-1] / data["Adj Close"].iloc[-2] - 1)
+    market_change = float(benchmark["Close"].iloc[-1] / benchmark["Close"].iloc[-2] - 1)
+    ratio = float(turnover.iloc[-1] / average_turnover)
+    relative = change - market_change
+    return {
+        "data_date": dates[-1].date().isoformat(),
+        "return_pct": safe_float(change * 100),
+        "market_excess_pct": safe_float(relative * 100),
+        "estimated_turnover": safe_float(turnover.iloc[-1]),
+        "turnover_ratio": safe_float(ratio),
+        "active": change > 0 and relative > 0 and ratio >= SECTOR_TURNOVER_THRESHOLD,
+    }
+
+
+def scan_sectors(benchmarks):
+    results, errors = [], []
+    for market, sectors in SECTOR_ETFS.items():
+        try:
+            prices = yf.download(
+                list(sectors), period="3mo", interval="1d", auto_adjust=False,
+                progress=False, group_by="ticker", threads=6, timeout=15,
+                multi_level_index=True,
+            )
+        except Exception as exc:
+            errors.append({"market": market, "error": str(exc)})
+            continue
+        for symbol, name in sectors.items():
+            try:
+                metrics = sector_metrics(prices[symbol], benchmarks.get(market))
+                results.append({"market": market, "symbol": symbol, "name": name, **metrics})
+            except (KeyError, ValueError) as exc:
+                errors.append({"market": market, "symbol": symbol, "error": str(exc)})
+    print(f"Sector ETFs: {len(results)} analyzed, {len(errors)} errors")
+    return results, errors
+
+
 def send_telegram_summary(report):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -505,7 +568,8 @@ def send_telegram_summary(report):
         item for item in report["results"]
         if item["signal"]["stage"] in {"장전 관찰 후보", "장중 조건부 진입 후보"}
     ]
-    if not candidates:
+    sectors = [item for item in report.get("sectors", []) if item["active"]]
+    if not candidates and not sectors:
         print("Telegram skipped: no watch candidates")
         return
 
@@ -519,7 +583,20 @@ def send_telegram_summary(report):
             key=lambda item: (-item["signal"]["score"], item["symbol"]),
         )
         lines.extend(telegram_candidate_line(item) for item in ranked[:5])
-    lines.append("시장별 최대 5개 표시 · 전체 결과는 GitHub 실행 보고서")
+    if sectors:
+        lines.append("\n섹터 거래 집중 (대표 ETF 기준)")
+        for market in ("KR", "US"):
+            ranked = sorted(
+                (item for item in sectors if item["market"] == market),
+                key=lambda item: (-item["turnover_ratio"], item["symbol"]),
+            )
+            for item in ranked[:3]:
+                lines.append(
+                    f"{market} {item['name']} ({item['symbol']}) · {item['data_date']} · "
+                    f"거래대금 약 {item['turnover_ratio']:.2f}배 · "
+                    f"등락 {item['return_pct']:+.2f}% · 시장 대비 {item['market_excess_pct']:+.2f}%p"
+                )
+    lines.append("전체 결과는 GitHub 실행 보고서")
 
     try:
         response = requests.post(
@@ -603,6 +680,7 @@ def main():
         len(set(tickers))
         for tickers in watchlist.values()
     )
+    sectors, sector_errors = scan_sectors(benchmarks) if all_results else ([], [])
 
     report = {
         "generated_at": datetime.now(
@@ -615,6 +693,8 @@ def main():
         "successful": len(all_results),
         "failed": len(all_errors),
         "benchmark_errors": benchmark_errors,
+        "sectors": sectors,
+        "sector_errors": sector_errors,
         "market_summary": {
             market: {
                 "attempted": len(set(tickers)),
@@ -633,6 +713,7 @@ def main():
         "errors": all_errors,
         "limitations": [
             "시세 미지원 또는 이력 부족 종목은 오류로 기록",
+            "섹터 거래대금은 대표 ETF 종가×거래량 추정치이며 투자자 순매수·ETF 순유입은 미수집",
             "일봉 기반이며 실시간 매수 확정 불가",
             "당일 미완성 봉 포함 가능",
             "실시간 VWAP 미구현",
