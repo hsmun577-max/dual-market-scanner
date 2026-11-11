@@ -69,7 +69,16 @@ def load_master(filename):
     response = requests.get(f"{MASTER_URL}{filename}.zip", timeout=30)
     response.raise_for_status()
     with ZipFile(BytesIO(response.content)) as archive:
-        return archive.read(filename).decode("cp949").splitlines()
+        members = [entry for entry in archive.infolist() if not entry.is_dir()]
+        member = next(
+            (entry for entry in members if Path(entry.filename).name.casefold() == filename.casefold()),
+            None,
+        )
+        if member is None and len(members) == 1:
+            member = members[0]
+        if member is None:
+            raise ValueError(f"종목 목록 ZIP에서 파일을 찾을 수 없음: {filename}")
+        return archive.read(member).decode("cp949").splitlines()
 
 
 def parse_kr_master(lines, suffix, tail_width):
@@ -530,6 +539,8 @@ def main():
         output.write_text(json.dumps(names, ensure_ascii=False, indent=2), encoding="utf-8")
         for market, symbols in names.items():
             print(f"{market} universe: {len(symbols)} instruments")
+        for market, symbol in [("KR", "069500.KS"), ("US", "AAPL"), ("US", "QQQ")]:
+            print(f"{market} {symbol}: {names[market][symbol]}")
         return
 
     full_scan = args.mode == "full"
