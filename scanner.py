@@ -11,14 +11,25 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+KR_SYMBOL_NAMES = {
+    "005930.KS": "삼성전자",
+    "000660.KS": "SK하이닉스",
+    "035420.KS": "NAVER",
+    "035720.KS": "카카오",
+    "005380.KS": "현대차",
+    "068270.KS": "셀트리온",
+    "000270.KS": "기아",
+    "012450.KS": "한화에어로스페이스",
+    "042700.KS": "한미반도체",
+    "069500.KS": "KODEX 200",
+    "229200.KS": "KODEX 코스닥150",
+    "114800.KS": "KODEX 인버스",
+    "252670.KS": "KODEX 200선물인버스2X",
+    "122630.KS": "KODEX 레버리지",
+}
+
 WATCHLIST = {
-    "KR": [
-        "005930.KS", "000660.KS", "035420.KS",
-        "035720.KS", "005380.KS", "068270.KS",
-        "000270.KS", "012450.KS", "042700.KS",
-        "069500.KS", "229200.KS", "114800.KS",
-        "252670.KS", "122630.KS"
-    ],
+    "KR": list(KR_SYMBOL_NAMES),
     "US": [
         "AAPL", "MSFT", "NVDA", "AMD", "AVGO",
         "AMZN", "META", "GOOGL", "TSLA",
@@ -381,8 +392,11 @@ def send_telegram_summary(report):
         signal = item["signal"]
         data_date = item["indicators"]["data_date"]
         reasons = ", ".join(signal["reasons"][:2])
+        symbol = item["symbol"]
+        name = KR_SYMBOL_NAMES.get(symbol) if item["market"] == "KR" else None
+        label = f"{name} ({symbol.split('.')[0]})" if name else symbol
         lines.append(
-            f"{item['market']} {item['symbol']} · {data_date} · "
+            f"{item['market']} {label} · {data_date} · "
             f"{signal['stage']} ({signal['score']}점) · {reasons}"
         )
 
