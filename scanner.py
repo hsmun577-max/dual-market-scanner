@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import time
 import argparse
 from pathlib import Path
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 
 WATCHLIST = {
@@ -354,6 +356,54 @@ def scan_market(market, tickers, benchmark):
 
     return results, errors
 
+def send_telegram_summary(report):
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token and not chat_id:
+        print("Telegram skipped: configuration not set")
+        return
+    if not token or not chat_id:
+        raise RuntimeError("Telegram requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
+
+    candidates = [
+        item for item in report["results"]
+        if item["signal"]["stage"] in {"장전 관찰 후보", "장중 조건부 진입 후보"}
+    ]
+    if not candidates:
+        print("Telegram skipped: no watch candidates")
+        return
+
+    lines = [
+        "듀얼스캐너 일봉 관찰 후보",
+        f"조회 성공 {report['successful']}/{report['attempted']} · 후보 {len(candidates)}개",
+    ]
+    for item in candidates:
+        signal = item["signal"]
+        data_date = item["indicators"]["data_date"]
+        reasons = ", ".join(signal["reasons"][:2])
+        lines.append(
+            f"{item['market']} {item['symbol']} · {data_date} · "
+            f"{signal['stage']} ({signal['score']}점) · {reasons}"
+        )
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": "\n".join(lines)},
+            timeout=10,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Telegram returned HTTP {response.status_code}")
+        body = response.json()
+        if not isinstance(body, dict) or body.get("ok") is not True:
+            raise RuntimeError("Telegram did not confirm delivery")
+    except (requests.RequestException, ValueError):
+        raise RuntimeError("Telegram request failed or returned invalid JSON") from None
+
+    print("Telegram sent: daily watch candidates")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -464,6 +514,11 @@ def main():
         raise SystemExit(
             "전체 데이터 수집 실패"
         )
+
+    try:
+        send_telegram_summary(report)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from None
 
 if __name__ == "__main__":
     main()
