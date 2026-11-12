@@ -134,14 +134,20 @@ async def collect(approval, market, symbols, opens):
 def notify(market, candidates, closes, token, chat_id):
     overseas = market.startswith("US-")
     if overseas:
-        lines = [f"미장 프리장 관찰 후보 · {closes:%m/%d %H:%M} ET"]
+        title = "미장 프리장 갱신" if market == "US-late" else "미장 프리장 관찰 후보"
+        lines = [title, f"{closes:%m/%d %H:%M} ET · {closes.astimezone(KST):%H:%M} KST"]
     else:
-        lines = [f"국장 {market} 장중 관찰 후보 · {closes:%m/%d %H:%M} KST"]
+        session = "NXT 프리장" if market == "NXT" else "KRX 정규장"
+        lines = [f"국장 {session} 관찰 후보", f"{closes:%m/%d %H:%M} KST"]
+    lines.append("")
     for symbol, ratio, spread, price in candidates[:5]:
         ticker = symbol[4:] if overseas else symbol
         name = US_SYMBOL_NAMES[ticker] if overseas else KR_SYMBOL_NAMES[f"{symbol}.KS"]
         price_label = f"${price:,.2f}" if overseas else f"{price:,}원"
-        lines.append(f"{name} ({ticker}) · {price_label} · 거래량 {ratio:.2f}배 · 호가 간격 {spread:.2f}%")
+        lines.append(
+            f"• {name} ({ticker})  {price_label}\n"
+            f"  5분봉 고점 돌파 · 거래량 {ratio:.2f}배 · 호가 간격 {spread:.2f}%"
+        )
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",

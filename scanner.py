@@ -493,15 +493,20 @@ def scan_market(market, tickers, benchmark, names=None, prices=None):
 
 def telegram_candidate_line(item):
     signal = item["signal"]
-    data_date = item["indicators"]["data_date"]
-    reasons = ", ".join(signal["reasons"][:2])
+    indicators = item["indicators"]
+    data_date = indicators["data_date"]
+    reasons = " · ".join(signal["reasons"][:2])
     symbol = item["symbol"]
     name = item.get("name") or KR_SYMBOL_NAMES.get(symbol)
     code = symbol.split(".")[0] if item["market"] == "KR" else symbol
     label = f"{name} ({code})" if name else code
+    price = indicators.get("price")
+    if price is not None:
+        price_label = f"{price:,.0f}원" if item["market"] == "KR" else f"${price:,.2f}"
+        label = f"{label}  {price_label}"
     return (
-        f"{item['market']} {label} · {data_date} · "
-        f"{signal['stage']} ({signal['score']}점) · {reasons}"
+        f"• {label}\n"
+        f"  {signal['stage']} {signal['score']}점 · {reasons} · {data_date}"
     )
 
 
@@ -577,26 +582,29 @@ def send_telegram_summary(report):
         "듀얼스캐너 일봉 관찰 후보",
         f"조회 성공 {report['successful']}/{report['attempted']} · 후보 {len(candidates)}개",
     ]
-    for market in ("KR", "US"):
+    for market, market_name in (("KR", "국장"), ("US", "미장")):
         ranked = sorted(
             (item for item in candidates if item["market"] == market),
             key=lambda item: (-item["signal"]["score"], item["symbol"]),
         )
-        lines.extend(telegram_candidate_line(item) for item in ranked[:5])
+        if ranked:
+            lines.append(f"\n[{market_name} 종목 후보]")
+            lines.extend(telegram_candidate_line(item) for item in ranked[:5])
     if sectors:
-        lines.append("\n섹터 거래 집중 (대표 ETF 기준)")
-        for market in ("KR", "US"):
+        for market, market_name in (("KR", "국장"), ("US", "미장")):
             ranked = sorted(
                 (item for item in sectors if item["market"] == market),
                 key=lambda item: (-item["turnover_ratio"], item["symbol"]),
             )
+            if ranked:
+                lines.append(f"\n[{market_name} 섹터 거래 집중 · 대표 ETF]")
             for item in ranked[:3]:
                 lines.append(
-                    f"{market} {item['name']} ({item['symbol']}) · {item['data_date']} · "
-                    f"거래대금 약 {item['turnover_ratio']:.2f}배 · "
-                    f"등락 {item['return_pct']:+.2f}% · 시장 대비 {item['market_excess_pct']:+.2f}%p"
+                    f"• {item['name']} ({item['symbol']})  {item['return_pct']:+.2f}%\n"
+                    f"  거래대금 약 {item['turnover_ratio']:.2f}배 · "
+                    f"시장 대비 {item['market_excess_pct']:+.2f}%p · {item['data_date']}"
                 )
-    lines.append("전체 결과는 GitHub 실행 보고서")
+    lines.append("\n전체 결과는 GitHub 실행 보고서")
 
     try:
         response = requests.post(
