@@ -7,6 +7,7 @@ import math
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from websockets.asyncio.client import connect
@@ -56,25 +57,33 @@ def parse_records(raw, feeds, received_at):
     if len(parts) != 4 or parts[0] != "0" or parts[1] not in feeds:
         return []
     _, tr_id, count_text, payload = parts
-    fields = payload.split("^")
+    fields = payload.removesuffix("^").split("^")
     count = int(count_text)
     if count < 1 or len(fields) % count:
-        raise ValueError("Unexpected KIS frame size")
+        raise ValueError(f"{tr_id}: {len(fields)} fields for {count} records")
     width = len(fields) // count
     kind = feeds[tr_id]
     overseas = tr_id in FEEDS["US"]
     minimum_width = (19 if kind == "trade" else 12) if overseas else (13 if kind == "trade" else 14)
     if width < minimum_width:
-        raise ValueError("Unexpected KIS record width")
+        raise ValueError(f"{tr_id}: received {width} fields, expected at least {minimum_width}")
 
     records = []
     for start in range(0, len(fields), width):
         row = fields[start:start + width]
         if overseas:
             date_index = 5 if kind == "trade" else 4
-            event_time = datetime.strptime(
-                row[date_index] + row[date_index + 1], "%Y%m%d%H%M%S"
-            ).replace(tzinfo=KST)
+            date_text, time_text = row[date_index:date_index + 2]
+            event_zone = KST
+            if len(date_text) != 8 or not date_text.isdigit() or date_text == "00000000":
+                date_text, time_text = row[date_index - 2:date_index]
+                event_zone = ZoneInfo("America/New_York")
+            try:
+                event_time = datetime.strptime(
+                    date_text + time_text.split(".")[0].zfill(6), "%Y%m%d%H%M%S"
+                ).replace(tzinfo=event_zone).astimezone(KST)
+            except ValueError:
+                continue
         else:
             clock = datetime.strptime(row[1], "%H%M%S").time()
             event_time = datetime.combine(received_at.date(), clock, KST)
@@ -84,12 +93,12 @@ def parse_records(raw, feeds, received_at):
             "received_at": received_at.isoformat(), "lag_seconds": round(lag, 3),
         }
         if kind == "trade":
-            price, size = (float(row[10]), int(row[18])) if overseas else (int(row[2]), int(row[12]))
-            if not math.isfinite(price) or price <= 0 or size <= 0:
+            price, size = (float(row[10] or "0"), float(row[18] or "0")) if overseas else (int(row[2]), int(row[12]))
+            if not math.isfinite(price) or not math.isfinite(size) or price <= 0 or size <= 0:
                 continue
             record.update(price=price, size=size)
         else:
-            ask, bid = (float(row[11]), float(row[10])) if overseas else (int(row[3]), int(row[13]))
+            ask, bid = (float(row[11] or "0"), float(row[10] or "0")) if overseas else (int(row[3]), int(row[13]))
             if not math.isfinite(ask) or not math.isfinite(bid) or bid <= 0 or ask < bid:
                 continue
             record.update(bid=bid, ask=ask, spread_pct=round((ask - bid) * 200 / (ask + bid), 4))
@@ -121,11 +130,12 @@ async def probe(approval, market, symbol, seconds):
                 continue
             try:
                 records = parse_records(raw, feeds, datetime.now(KST))
-            except ValueError:
-                raise RuntimeError(f"{market} 시세 응답 형식이 예상과 다릅니다") from None
+            except ValueError as exc:
+                raise RuntimeError(f"{market} 시세 응답 형식 오류: {exc}") from None
             for record in records:
                 kind = record["kind"]
-                if record["symbol"] == symbol and kind not in seen:
+                matches = record["symbol"] == symbol or (market == "US" and record["symbol"] == symbol[4:])
+                if matches and kind not in seen:
                     seen.add(kind)
                     print(json.dumps({"market": market, **record}, ensure_ascii=False))
     missing = set(feeds.values()) - seen
