@@ -1,10 +1,12 @@
-"""Check the first three completed domestic five-minute bars and notify Telegram."""
+"""Check three completed five-minute bars and notify Telegram."""
 
 import argparse
 import asyncio
 import json
 import os
 from datetime import datetime, time, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import exchange_calendars
 import requests
@@ -12,26 +14,27 @@ import yfinance as yf
 from websockets.exceptions import WebSocketException
 
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
-from scanner import KR_SYMBOL_NAMES, calculate_indicators, classify_signal, clean_prices
+from scanner import KR_SYMBOL_NAMES, US_SYMBOL_NAMES, calculate_indicators, classify_signal, clean_prices
 
 
 # Common shares from the current watchlist. NXT subscription acceptance is checked per session.
 SYMBOLS = tuple(symbol.split(".")[0] for symbol in list(KR_SYMBOL_NAMES)[:9])
-OPEN_TIMES = {"NXT": time(8), "KRX": time(9)}
+US_SYMBOLS = ("AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "GOOGL", "TSLA")
+OPEN_TIMES = {"NXT": time(8), "KRX": time(9), "US-early": time(4), "US-late": time(8, 20)}
 BAR_SECONDS = 300
 MAX_QUOTE_AGE = 10
 MAX_SPREAD_PCT = 0.5
 MIN_VOLUME_RATIO = 1.5
 
 
-def daily_candidates(previous_session):
-    tickers = [f"{symbol}.KS" for symbol in SYMBOLS]
+def daily_candidates(previous_session, overseas=False):
+    tickers = list(US_SYMBOLS) if overseas else [f"{symbol}.KS" for symbol in SYMBOLS]
     prices = yf.download(
         tickers, period="1y", interval="1d", auto_adjust=True,
         group_by="ticker", progress=False, threads=6, timeout=15,
     )
     candidates = []
-    for symbol, ticker in zip(SYMBOLS, tickers):
+    for ticker in tickers:
         try:
             history = prices[ticker]
             history = clean_prices(history.loc[history.index.date <= previous_session])
@@ -39,7 +42,7 @@ def daily_candidates(previous_session):
                 continue
             signal = classify_signal(calculate_indicators(history))
             if signal["stage"] in {"장전 관찰 후보", "장중 조건부 진입 후보"}:
-                candidates.append(symbol)
+                candidates.append(f"DNAS{ticker}" if overseas else ticker.split(".")[0])
         except (KeyError, ValueError):
             print(f"일봉 자료 제외: {ticker}")
     return candidates
@@ -102,6 +105,8 @@ async def collect(approval, market, symbols, opens):
                 continue
             for item in parse_records(raw, feeds, received):
                 symbol = item["symbol"]
+                if market == "US" and not symbol.startswith("DNAS"):
+                    symbol = f"DNAS{symbol}"
                 event_time = datetime.fromisoformat(item["event_time"])
                 if symbol not in bars or not opens <= event_time < closes:
                     continue
@@ -127,10 +132,16 @@ async def collect(approval, market, symbols, opens):
 
 
 def notify(market, candidates, closes, token, chat_id):
-    lines = [f"국장 {market} 장중 관찰 후보 · {closes:%m/%d %H:%M} KST"]
+    overseas = market.startswith("US-")
+    if overseas:
+        lines = [f"미장 프리장 관찰 후보 · {closes:%m/%d %H:%M} ET"]
+    else:
+        lines = [f"국장 {market} 장중 관찰 후보 · {closes:%m/%d %H:%M} KST"]
     for symbol, ratio, spread, price in candidates[:5]:
-        name = KR_SYMBOL_NAMES[f"{symbol}.KS"]
-        lines.append(f"{name} ({symbol}) · {price:,}원 · 거래량 {ratio:.2f}배 · 호가 간격 {spread:.2f}%")
+        ticker = symbol[4:] if overseas else symbol
+        name = US_SYMBOL_NAMES[ticker] if overseas else KR_SYMBOL_NAMES[f"{symbol}.KS"]
+        price_label = f"${price:,.2f}" if overseas else f"{price:,}원"
+        lines.append(f"{name} ({ticker}) · {price_label} · 거래량 {ratio:.2f}배 · 호가 간격 {spread:.2f}%")
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
@@ -143,7 +154,22 @@ def notify(market, candidates, closes, token, chat_id):
             raise RuntimeError("Telegram이 발송을 확인하지 않았습니다")
     except (requests.RequestException, ValueError, AttributeError):
         raise RuntimeError("Telegram 발송 응답 오류") from None
-    print("Telegram sent: domestic intraday candidates")
+    print(f"Telegram sent: {market} intraday candidates")
+
+
+def filter_us_updates(candidates, today, path):
+    if not path.is_file():
+        print("04:15 비교 결과 없음: 이번 후보를 첫 관찰로 처리합니다")
+        return candidates
+    early = json.loads(path.read_text(encoding="utf-8"))
+    if early["date"] != today:
+        print("04:15 비교 결과 거래일 불일치: 이번 후보를 첫 관찰로 처리합니다")
+        return candidates
+    earlier = {row[0]: row for row in early["candidates"]}
+    return [
+        row for row in candidates
+        if row[0] not in earlier or (row[3] > earlier[row[0]][3] and row[1] >= earlier[row[0]][1])
+    ]
 
 
 def main():
@@ -151,17 +177,19 @@ def main():
     parser.add_argument("market", choices=OPEN_TIMES)
     args = parser.parse_args()
     market = args.market
-    now = datetime.now(KST)
-    calendar = exchange_calendars.get_calendar("XKRX")
+    overseas = market.startswith("US-")
+    local_zone = ZoneInfo("America/New_York") if overseas else KST
+    now = datetime.now(local_zone)
+    calendar = exchange_calendars.get_calendar("XNYS" if overseas else "XKRX")
     today = now.date().isoformat()
     if not calendar.is_session(today):
-        print("KRX 휴장일")
+        print(f"{market} 휴장일")
         return
-    regular_open = calendar.session_open(today).tz_convert(KST).time()
-    if regular_open != OPEN_TIMES["KRX"]:
+    regular_open = calendar.session_open(today).tz_convert(local_zone).time()
+    if regular_open != (time(9, 30) if overseas else OPEN_TIMES["KRX"]):
         print("개장 시각 변경 거래일은 장중 알림을 건너뜁니다")
         return
-    opens = datetime.combine(now.date(), OPEN_TIMES[market], KST)
+    opens = datetime.combine(now.date(), OPEN_TIMES[market], local_zone)
     if not opens - timedelta(minutes=25) <= now < opens:
         raise SystemExit("개장 전 25분 이내에 시작해야 첫 5분봉부터 수집할 수 있습니다")
 
@@ -171,15 +199,21 @@ def main():
     if not all(keys):
         raise SystemExit("KIS 및 Telegram 비밀값 4개를 설정하세요")
     app_key, app_secret, token, chat_id = keys
+    snapshot = Path("us-early-candidates.json")
     try:
-        symbols = daily_candidates(calendar.previous_session(today).date())
-        if not symbols:
+        symbols = daily_candidates(calendar.previous_session(today).date(), overseas)
+        candidates = []
+        if symbols:
+            approval = request_approval(app_key, app_secret)
+            if datetime.now(local_zone) >= opens:
+                raise RuntimeError("준비가 수집 시작 전에 끝나지 않아 불완전한 봉을 제외했습니다")
+            candidates = asyncio.run(collect(approval, "US" if overseas else market, symbols, opens))
+        else:
             print(f"{market} 직전 거래일 관찰 후보 없음")
-            return
-        approval = request_approval(app_key, app_secret)
-        if datetime.now(KST) >= opens:
-            raise RuntimeError("준비가 개장 전에 끝나지 않아 불완전한 봉을 제외했습니다")
-        candidates = asyncio.run(collect(approval, market, symbols, opens))
+        if market == "US-early":
+            snapshot.write_text(json.dumps({"date": today, "candidates": candidates[:5]}), encoding="utf-8")
+        elif market == "US-late":
+            candidates = filter_us_updates(candidates, today, snapshot)
         if candidates:
             notify(market, candidates, opens + timedelta(minutes=15), token, chat_id)
         else:
