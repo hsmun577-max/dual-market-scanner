@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,7 @@ FEED_URL = "ws://ops.koreainvestment.com:21000/tryitout"
 FEEDS = {
     "NXT": {"H0NXCNT0": "trade", "H0NXASP0": "quote"},
     "KRX": {"H0STCNT0": "trade", "H0STASP0": "quote"},
+    "US": {"HDFSCNT0": "trade", "HDFSASP0": "quote"},
 }
 
 
@@ -60,27 +62,35 @@ def parse_records(raw, feeds, received_at):
         raise ValueError("Unexpected KIS frame size")
     width = len(fields) // count
     kind = feeds[tr_id]
-    if width < (13 if kind == "trade" else 14):
+    overseas = tr_id in FEEDS["US"]
+    minimum_width = (19 if kind == "trade" else 12) if overseas else (13 if kind == "trade" else 14)
+    if width < minimum_width:
         raise ValueError("Unexpected KIS record width")
 
     records = []
     for start in range(0, len(fields), width):
         row = fields[start:start + width]
-        clock = datetime.strptime(row[1], "%H%M%S").time()
-        event_time = datetime.combine(received_at.date(), clock, KST)
+        if overseas:
+            date_index = 5 if kind == "trade" else 4
+            event_time = datetime.strptime(
+                row[date_index] + row[date_index + 1], "%Y%m%d%H%M%S"
+            ).replace(tzinfo=KST)
+        else:
+            clock = datetime.strptime(row[1], "%H%M%S").time()
+            event_time = datetime.combine(received_at.date(), clock, KST)
         lag = (received_at - event_time).total_seconds()
         record = {
             "symbol": row[0], "kind": kind, "event_time": event_time.isoformat(),
             "received_at": received_at.isoformat(), "lag_seconds": round(lag, 3),
         }
         if kind == "trade":
-            price, size = int(row[2]), int(row[12])
-            if price <= 0 or size <= 0:
+            price, size = (float(row[10]), int(row[18])) if overseas else (int(row[2]), int(row[12]))
+            if not math.isfinite(price) or price <= 0 or size <= 0:
                 continue
             record.update(price=price, size=size)
         else:
-            ask, bid = int(row[3]), int(row[13])
-            if bid <= 0 or ask < bid:
+            ask, bid = (float(row[11]), float(row[10])) if overseas else (int(row[3]), int(row[13]))
+            if not math.isfinite(ask) or not math.isfinite(bid) or bid <= 0 or ask < bid:
                 continue
             record.update(bid=bid, ask=ask, spread_pct=round((ask - bid) * 200 / (ask + bid), 4))
         records.append(record)
@@ -126,18 +136,20 @@ async def probe(approval, market, symbol, seconds):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("market", choices=FEEDS)
-    parser.add_argument("--symbol", default="005930")
+    parser.add_argument("--symbol", help="Korean symbol or KIS overseas subscription key")
     parser.add_argument("--seconds", type=int, default=60)
     args = parser.parse_args()
-    if not re.fullmatch(r"[0-9A-Z]{6}", args.symbol) or args.seconds < 1:
-        parser.error("종목코드 6자리와 1초 이상의 수신 시간을 지정하세요")
+    symbol = args.symbol or ("DNASAAPL" if args.market == "US" else "005930")
+    symbol_pattern = r"D(?:NAS|NYS|AMS)[A-Z0-9.\-]+" if args.market == "US" else r"[0-9A-Z]{6}"
+    if not re.fullmatch(symbol_pattern, symbol) or args.seconds < 1:
+        parser.error("시장에 맞는 종목코드와 1초 이상의 수신 시간을 지정하세요")
     app_key = os.getenv("KIS_APP_KEY", "").strip()
     app_secret = os.getenv("KIS_APP_SECRET", "").strip()
     if not app_key or not app_secret:
         parser.exit(1, "KIS_APP_KEY와 KIS_APP_SECRET을 설정하세요.\n")
     try:
         approval = request_approval(app_key, app_secret)
-        asyncio.run(probe(approval, args.market, args.symbol, args.seconds))
+        asyncio.run(probe(approval, args.market, symbol, args.seconds))
     except RuntimeError as exc:
         parser.exit(1, f"{exc}\n")
     except (OSError, TimeoutError, WebSocketException, ValueError) as exc:
