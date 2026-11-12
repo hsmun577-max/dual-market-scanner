@@ -1,0 +1,194 @@
+"""Check the first three completed domestic five-minute bars and notify Telegram."""
+
+import argparse
+import asyncio
+import json
+import os
+from datetime import datetime, time, timedelta
+
+import exchange_calendars
+import requests
+import yfinance as yf
+from websockets.exceptions import WebSocketException
+
+from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
+from scanner import KR_SYMBOL_NAMES, calculate_indicators, classify_signal, clean_prices
+
+
+# Common shares from the current watchlist. NXT subscription acceptance is checked per session.
+SYMBOLS = tuple(symbol.split(".")[0] for symbol in list(KR_SYMBOL_NAMES)[:9])
+OPEN_TIMES = {"NXT": time(8), "KRX": time(9)}
+BAR_SECONDS = 300
+MAX_QUOTE_AGE = 10
+MAX_SPREAD_PCT = 0.5
+MIN_VOLUME_RATIO = 1.5
+
+
+def daily_candidates(previous_session):
+    tickers = [f"{symbol}.KS" for symbol in SYMBOLS]
+    prices = yf.download(
+        tickers, period="1y", interval="1d", auto_adjust=True,
+        group_by="ticker", progress=False, threads=6, timeout=15,
+    )
+    candidates = []
+    for symbol, ticker in zip(SYMBOLS, tickers):
+        try:
+            history = prices[ticker]
+            history = clean_prices(history.loc[history.index.date <= previous_session])
+            if history.index[-1].date() != previous_session:
+                continue
+            signal = classify_signal(calculate_indicators(history))
+            if signal["stage"] in {"장전 관찰 후보", "장중 조건부 진입 후보"}:
+                candidates.append(symbol)
+        except (KeyError, ValueError):
+            print(f"일봉 자료 제외: {ticker}")
+    return candidates
+
+
+def update_bar(bars, slot, event_time, price, size):
+    bar = bars.get(slot)
+    if bar is None:
+        bars[slot] = {"high": price, "close": price, "last": event_time, "volume": size}
+        return
+    bar["high"] = max(bar["high"], price)
+    bar["volume"] += size
+    if event_time >= bar["last"]:
+        bar["close"], bar["last"] = price, event_time
+
+
+def candidate_metrics(bars, quote, close_time):
+    if set(bars) != {0, 1, 2} or quote is None:
+        return None
+    age = (close_time - datetime.fromisoformat(quote["event_time"])).total_seconds()
+    if not 0 <= age <= MAX_QUOTE_AGE or quote["spread_pct"] > MAX_SPREAD_PCT:
+        return None
+    volume_ratio = bars[2]["volume"] / ((bars[0]["volume"] + bars[1]["volume"]) / 2)
+    if volume_ratio < MIN_VOLUME_RATIO or bars[2]["close"] <= max(bars[0]["high"], bars[1]["high"]):
+        return None
+    return volume_ratio, quote["spread_pct"], bars[2]["close"]
+
+
+async def collect(approval, market, symbols, opens):
+    closes = opens + timedelta(minutes=15)
+    feeds = FEEDS[market]
+    pending = {(tr_id, symbol) for tr_id in feeds for symbol in symbols}
+    rejected = set()
+    bars = {symbol: {} for symbol in symbols}
+    quotes = {}
+    async with connect(FEED_URL, open_timeout=15, close_timeout=3) as socket:
+        for tr_id, symbol in sorted(pending):
+            await socket.send(json.dumps(subscription(approval, tr_id, symbol)))
+        while True:
+            received = datetime.now(KST)
+            seconds_left = (closes - received).total_seconds()
+            if seconds_left <= 0:
+                break
+            try:
+                raw = await asyncio.wait_for(socket.recv(decode=True), seconds_left)
+            except TimeoutError:
+                break
+            received = datetime.now(KST)
+            if raw.startswith("{"):
+                status = json.loads(raw)
+                header = status.get("header", {})
+                if header.get("tr_id") == "PINGPONG":
+                    await socket.pong(raw.encode("utf-8"))
+                    continue
+                pair = (header.get("tr_id"), header.get("tr_key"))
+                if pair in pending:
+                    pending.remove(pair)
+                    if status.get("body", {}).get("rt_cd") != "0" or received >= opens:
+                        rejected.add(pair[1])
+                continue
+            for item in parse_records(raw, feeds, received):
+                symbol = item["symbol"]
+                event_time = datetime.fromisoformat(item["event_time"])
+                if symbol not in bars or not opens <= event_time < closes:
+                    continue
+                if not -1 <= item["lag_seconds"] <= MAX_QUOTE_AGE:
+                    continue
+                if item["kind"] == "trade":
+                    slot = int((event_time - opens).total_seconds()) // BAR_SECONDS
+                    update_bar(bars[symbol], slot, event_time, item["price"], item["size"])
+                elif symbol not in quotes or item["event_time"] >= quotes[symbol]["event_time"]:
+                    quotes[symbol] = item
+
+    rejected.update(symbol for _, symbol in pending)
+    print(f"{market} 구독 검증 {len(symbols) - len(rejected)}/{len(symbols)}")
+    if len(rejected) == len(symbols):
+        raise RuntimeError("개장 전 구독 승인에 성공한 종목이 없습니다")
+    candidates = []
+    for symbol in symbols:
+        if symbol not in rejected:
+            metrics = candidate_metrics(bars[symbol], quotes.get(symbol), closes)
+            if metrics:
+                candidates.append((symbol, *metrics))
+    return sorted(candidates, key=lambda row: (-row[1], row[0]))
+
+
+def notify(market, candidates, closes, token, chat_id):
+    lines = [f"국장 {market} 장중 관찰 후보 · {closes:%m/%d %H:%M} KST"]
+    for symbol, ratio, spread, price in candidates[:5]:
+        name = KR_SYMBOL_NAMES[f"{symbol}.KS"]
+        lines.append(f"{name} ({symbol}) · {price:,}원 · 거래량 {ratio:.2f}배 · 호가 간격 {spread:.2f}%")
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": "\n".join(lines)},
+            timeout=10, allow_redirects=False,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Telegram 발송 실패 (HTTP {response.status_code})")
+        if response.json().get("ok") is not True:
+            raise RuntimeError("Telegram이 발송을 확인하지 않았습니다")
+    except (requests.RequestException, ValueError, AttributeError):
+        raise RuntimeError("Telegram 발송 응답 오류") from None
+    print("Telegram sent: domestic intraday candidates")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("market", choices=OPEN_TIMES)
+    args = parser.parse_args()
+    market = args.market
+    now = datetime.now(KST)
+    calendar = exchange_calendars.get_calendar("XKRX")
+    today = now.date().isoformat()
+    if not calendar.is_session(today):
+        print("KRX 휴장일")
+        return
+    regular_open = calendar.session_open(today).tz_convert(KST).time()
+    if regular_open != OPEN_TIMES["KRX"]:
+        print("개장 시각 변경 거래일은 장중 알림을 건너뜁니다")
+        return
+    opens = datetime.combine(now.date(), OPEN_TIMES[market], KST)
+    if not opens - timedelta(minutes=25) <= now < opens:
+        raise SystemExit("개장 전 25분 이내에 시작해야 첫 5분봉부터 수집할 수 있습니다")
+
+    keys = [os.getenv(name, "").strip() for name in (
+        "KIS_APP_KEY", "KIS_APP_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    )]
+    if not all(keys):
+        raise SystemExit("KIS 및 Telegram 비밀값 4개를 설정하세요")
+    app_key, app_secret, token, chat_id = keys
+    try:
+        symbols = daily_candidates(calendar.previous_session(today).date())
+        if not symbols:
+            print(f"{market} 직전 거래일 관찰 후보 없음")
+            return
+        approval = request_approval(app_key, app_secret)
+        if datetime.now(KST) >= opens:
+            raise RuntimeError("준비가 개장 전에 끝나지 않아 불완전한 봉을 제외했습니다")
+        candidates = asyncio.run(collect(approval, market, symbols, opens))
+        if candidates:
+            notify(market, candidates, opens + timedelta(minutes=15), token, chat_id)
+        else:
+            print(f"{market} 장중 알림 조건 충족 없음")
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from None
+    except (OSError, ValueError, TimeoutError, WebSocketException) as exc:
+        raise SystemExit(f"{market} 장중 실행 실패 ({type(exc).__name__})") from None
+
+
+if __name__ == "__main__":
+    main()
