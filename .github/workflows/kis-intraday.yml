@@ -1,0 +1,39 @@
+name: Korea intraday Telegram
+
+on:
+  schedule:
+    - cron: '47 22 * * 0-4'
+    - cron: '47 23 * * 0-4'
+  workflow_dispatch:
+    inputs:
+      market:
+        description: Market to collect at its next opening window
+        type: choice
+        required: true
+        options:
+          - NXT
+          - KRX
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5' 'websockets>=14,<18'
+      - name: Collect opening data and notify
+        env:
+          MARKET: ${{ inputs.market || (github.event.schedule == '47 22 * * 0-4' && 'NXT' || 'KRX') }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python kis_intraday.py "$MARKET"
