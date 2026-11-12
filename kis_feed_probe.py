@@ -72,6 +72,11 @@ def parse_records(raw, feeds, received_at):
     for start in range(0, len(fields), width):
         row = fields[start:start + width]
         if overseas:
+            # Live US frames can include the bare ticker before ZDIV.
+            if not row[1].isdigit() and row[2].isdigit():
+                row.pop(1)
+            if len(row) < minimum_width:
+                raise ValueError(f"{tr_id}: incomplete overseas record")
             date_index = 5 if kind == "trade" else 4
             date_text, time_text = row[date_index:date_index + 2]
             event_zone = KST
@@ -79,8 +84,11 @@ def parse_records(raw, feeds, received_at):
                 date_text, time_text = row[date_index - 2:date_index]
                 event_zone = ZoneInfo("America/New_York")
             try:
+                time_text = time_text.split(".")[0].zfill(6)
+                if not re.fullmatch(r"[0-9]{8}", date_text) or not re.fullmatch(r"[0-9]{6}", time_text):
+                    continue
                 event_time = datetime.strptime(
-                    date_text + time_text.split(".")[0].zfill(6), "%Y%m%d%H%M%S"
+                    date_text + time_text, "%Y%m%d%H%M%S"
                 ).replace(tzinfo=event_zone).astimezone(KST)
             except ValueError:
                 continue
@@ -109,7 +117,6 @@ def parse_records(raw, feeds, received_at):
 async def probe(approval, market, symbol, seconds):
     feeds = FEEDS[market]
     seen = set()
-    inspected = set()
     async with connect(FEED_URL, open_timeout=15, close_timeout=3) as socket:
         for tr_id in feeds:
             await socket.send(json.dumps(subscription(approval, tr_id, symbol)))
@@ -129,11 +136,6 @@ async def probe(approval, market, symbol, seconds):
                 elif tr_id in feeds and status.get("body", {}).get("rt_cd") not in (None, "0"):
                     raise RuntimeError(f"{market} {feeds[tr_id]} 구독이 거절됐습니다")
                 continue
-            if market == "US":
-                frame = raw.split("|", 3)
-                if len(frame) == 4 and frame[1] in feeds and frame[1] not in inspected:
-                    inspected.add(frame[1])
-                    print(f"{frame[1]} market fields: {frame[3].split('^')[:30]}", flush=True)
             try:
                 records = parse_records(raw, feeds, datetime.now(KST))
             except ValueError as exc:
