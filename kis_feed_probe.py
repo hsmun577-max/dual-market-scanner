@@ -109,6 +109,7 @@ def parse_records(raw, feeds, received_at):
 async def probe(approval, market, symbol, seconds):
     feeds = FEEDS[market]
     seen = set()
+    inspected = set()
     async with connect(FEED_URL, open_timeout=15, close_timeout=3) as socket:
         for tr_id in feeds:
             await socket.send(json.dumps(subscription(approval, tr_id, symbol)))
@@ -128,6 +129,11 @@ async def probe(approval, market, symbol, seconds):
                 elif tr_id in feeds and status.get("body", {}).get("rt_cd") not in (None, "0"):
                     raise RuntimeError(f"{market} {feeds[tr_id]} 구독이 거절됐습니다")
                 continue
+            if market == "US":
+                frame = raw.split("|", 3)
+                if len(frame) == 4 and frame[1] in feeds and frame[1] not in inspected:
+                    inspected.add(frame[1])
+                    print(f"{frame[1]} market fields: {frame[3].split('^')[:30]}", flush=True)
             try:
                 records = parse_records(raw, feeds, datetime.now(KST))
             except ValueError as exc:
