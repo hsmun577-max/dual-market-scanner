@@ -26,7 +26,7 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 75
     env:
       WINDOW: ${{ inputs.window || (github.event.schedule == '47 3 * * 1-5' && 'US-early' || 'US-late') }}
     steps:
@@ -68,3 +68,18 @@ jobs:
           path: us-early-candidates.json
           if-no-files-found: ignore
           retention-days: 2
+      - name: Summarize replay without publishing raw quotes
+        if: always() && env.WINDOW != 'check'
+        run: |
+          for sample in ./*.jsonl; do
+            if [[ -s "$sample" ]]; then
+              python backtest_intraday.py "$sample" --fee-bps 10 > "${sample%.jsonl}-replay.json"
+            fi
+          done
+      - name: Save intraday replay summary
+        if: always() && env.WINDOW != 'check'
+        uses: actions/upload-artifact@v4
+        with:
+          name: intraday-replay
+          path: '*-replay.json'
+          if-no-files-found: ignore
