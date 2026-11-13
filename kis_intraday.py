@@ -8,7 +8,6 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import exchange_calendars
 import requests
 import yfinance as yf
 from websockets.exceptions import WebSocketException
@@ -71,25 +70,45 @@ def candidate_metrics(bars, quote, close_time):
     return volume_ratio, quote["spread_pct"], bars[2]["close"]
 
 
-async def collect(approval, market, symbols, opens):
+async def collect(approval, market, symbols, opens, on_signal, samples_path):
     closes = opens + timedelta(minutes=15)
     feeds = FEEDS[market]
     pending = {(tr_id, symbol) for tr_id in feeds for symbol in symbols}
     rejected = set()
     bars = {symbol: {} for symbol in symbols}
     quotes = {}
+    followup = {symbol: [] for symbol in symbols}
+    evaluated = False
+    deadline = closes
     async with connect(FEED_URL, open_timeout=15, close_timeout=3) as socket:
         for tr_id, symbol in sorted(pending):
             await socket.send(json.dumps(subscription(approval, tr_id, symbol)))
         while True:
             received = datetime.now(KST)
-            seconds_left = (closes - received).total_seconds()
+            seconds_left = (deadline - received).total_seconds()
             if seconds_left <= 0:
-                break
+                if evaluated:
+                    break
+                rejected.update(symbol for _, symbol in pending)
+                print(f"{market} 구독 검증 {len(symbols) - len(rejected)}/{len(symbols)}")
+                if len(rejected) == len(symbols):
+                    raise RuntimeError("개장 전 구독 승인에 성공한 종목이 없습니다")
+                candidates = []
+                for symbol in symbols:
+                    if symbol not in rejected:
+                        metrics = candidate_metrics(bars[symbol], quotes.get(symbol), closes)
+                        if metrics:
+                            candidates.append((symbol, *metrics))
+                notification = asyncio.create_task(asyncio.to_thread(
+                    on_signal, sorted(candidates, key=lambda row: (-row[1], row[0]))
+                ))
+                evaluated = True
+                deadline = closes + timedelta(minutes=30, seconds=30)
+                continue
             try:
                 raw = await asyncio.wait_for(socket.recv(decode=True), seconds_left)
             except TimeoutError:
-                break
+                continue
             received = datetime.now(KST)
             if raw.startswith("{"):
                 status = json.loads(raw)
@@ -108,27 +127,41 @@ async def collect(approval, market, symbols, opens):
                 if market == "US" and not symbol.startswith("DNAS"):
                     symbol = f"DNAS{symbol}"
                 event_time = datetime.fromisoformat(item["event_time"])
-                if symbol not in bars or not opens <= event_time < closes:
+                if symbol not in bars or symbol in rejected or not opens <= event_time:
                     continue
                 if not -1 <= item["lag_seconds"] <= MAX_QUOTE_AGE:
                     continue
-                if item["kind"] == "trade":
+                if evaluated:
+                    if item["kind"] == "quote" and event_time >= closes and received <= deadline:
+                        followup[symbol].append({"at": received.isoformat(), "bid": item["bid"], "ask": item["ask"]})
+                elif received < closes and event_time < closes and item["kind"] == "trade":
                     slot = int((event_time - opens).total_seconds()) // BAR_SECONDS
                     update_bar(bars[symbol], slot, event_time, item["price"], item["size"])
-                elif symbol not in quotes or item["event_time"] >= quotes[symbol]["event_time"]:
+                elif received < closes and event_time < closes and item["kind"] == "quote" and (
+                    symbol not in quotes or item["event_time"] >= quotes[symbol]["event_time"]
+                ):
                     quotes[symbol] = item
 
-    rejected.update(symbol for _, symbol in pending)
-    print(f"{market} 구독 검증 {len(symbols) - len(rejected)}/{len(symbols)}")
-    if len(rejected) == len(symbols):
-        raise RuntimeError("개장 전 구독 승인에 성공한 종목이 없습니다")
-    candidates = []
-    for symbol in symbols:
-        if symbol not in rejected:
-            metrics = candidate_metrics(bars[symbol], quotes.get(symbol), closes)
-            if metrics:
-                candidates.append((symbol, *metrics))
-    return sorted(candidates, key=lambda row: (-row[1], row[0]))
+    with samples_path.open("w", encoding="utf-8") as output:
+        for symbol in symbols:
+            if symbol in rejected or set(bars[symbol]) != {0, 1, 2}:
+                continue
+            quote = quotes.get(symbol)
+            before = [{"at": quote["event_time"], "bid": quote["bid"], "ask": quote["ask"]}] if quote else []
+            row = {
+                "market": samples_path.stem,
+                "symbol": symbol,
+                "signal_at": closes.isoformat(),
+                "daily_eligible": True,
+                "bars": [
+                    {"start": (opens + timedelta(minutes=5 * slot)).isoformat(),
+                     **{key: bar[key] for key in ("high", "close", "volume")}}
+                    for slot, bar in sorted(bars[symbol].items())
+                ],
+                "quotes": before + followup[symbol],
+            }
+            output.write(json.dumps(row, allow_nan=False) + "\n")
+    await notification
 
 
 def notify(market, candidates, closes, token, chat_id):
@@ -179,6 +212,8 @@ def filter_us_updates(candidates, today, path):
 
 
 def main():
+    import exchange_calendars
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("market", choices=OPEN_TIMES)
     args = parser.parse_args()
@@ -208,22 +243,24 @@ def main():
     snapshot = Path("us-early-candidates.json")
     try:
         symbols = daily_candidates(calendar.previous_session(today).date(), overseas)
-        candidates = []
+        def publish(candidates):
+            if market == "US-early":
+                snapshot.write_text(json.dumps({"date": today, "candidates": candidates[:5]}), encoding="utf-8")
+            elif market == "US-late":
+                candidates = filter_us_updates(candidates, today, snapshot)
+            if candidates:
+                notify(market, candidates, opens + timedelta(minutes=15), token, chat_id)
+            else:
+                print(f"{market} 장중 알림 조건 충족 없음")
+
         if symbols:
             approval = request_approval(app_key, app_secret)
             if datetime.now(local_zone) >= opens:
                 raise RuntimeError("준비가 수집 시작 전에 끝나지 않아 불완전한 봉을 제외했습니다")
-            candidates = asyncio.run(collect(approval, "US" if overseas else market, symbols, opens))
+            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl")))
         else:
             print(f"{market} 직전 거래일 관찰 후보 없음")
-        if market == "US-early":
-            snapshot.write_text(json.dumps({"date": today, "candidates": candidates[:5]}), encoding="utf-8")
-        elif market == "US-late":
-            candidates = filter_us_updates(candidates, today, snapshot)
-        if candidates:
-            notify(market, candidates, opens + timedelta(minutes=15), token, chat_id)
-        else:
-            print(f"{market} 장중 알림 조건 충족 없음")
+            publish([])
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from None
     except (OSError, ValueError, TimeoutError, WebSocketException) as exc:
