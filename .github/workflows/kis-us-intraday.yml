@@ -1,11 +1,11 @@
 name: US premarket Telegram
-run-name: US premarket ${{ inputs.window || (github.event.schedule == '47 3 * * 1-5' && 'US-early' || 'US-late') }}
+run-name: US premarket ${{ inputs.window || (github.event.schedule == '30 2 * * 1-5' && 'US-early' || 'US-late') }}
 
 on:
   schedule:
-    - cron: '47 3 * * 1-5'
+    - cron: '30 2 * * 1-5'
       timezone: America/New_York
-    - cron: '7 8 * * 1-5'
+    - cron: '50 6 * * 1-5'
       timezone: America/New_York
   workflow_dispatch:
     inputs:
@@ -26,9 +26,9 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 150
     env:
-      WINDOW: ${{ inputs.window || (github.event.schedule == '47 3 * * 1-5' && 'US-early' || 'US-late') }}
+      WINDOW: ${{ inputs.window || (github.event.schedule == '30 2 * * 1-5' && 'US-early' || 'US-late') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -59,7 +59,15 @@ jobs:
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python kis_intraday.py "$WINDOW"
+        run: |
+          set +e
+          python -u kis_intraday.py "$WINDOW" 2>&1 | tee intraday-status.log
+          result=${PIPESTATUS[0]}
+          if [[ $result -ne 0 ]]; then
+            printf '### 장중 수집 실패 (%s)\n\n' "$WINDOW" >> "$GITHUB_STEP_SUMMARY"
+            tail -n 1 intraday-status.log >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$result"
       - name: Save 04:15 candidates
         if: env.WINDOW == 'US-early'
         uses: actions/upload-artifact@v4
