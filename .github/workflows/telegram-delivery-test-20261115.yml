@@ -1,0 +1,35 @@
+name: Telegram delivery test 20261115
+on:
+  push:
+    branches: [codex/telegram-delivery-test-20261115]
+    paths: [.github/workflows/telegram-delivery-test-20261115.yml]
+permissions: {}
+jobs:
+  send:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          token, chat = os.getenv("TG_TOKEN"), os.getenv("TG_CHAT")
+          if not token or not chat:
+              raise SystemExit("Telegram configuration missing")
+          req = urllib.request.Request(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              data=json.dumps({"chat_id": chat, "text": "듀얼스캐너 | 텔레그램 연결 테스트\n발송 확인용 메시지입니다."}).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=15) as res:
+                  result = json.load(res)
+          except Exception as exc:
+              raise SystemExit(f"Telegram send failed ({type(exc).__name__}, HTTP {getattr(exc, 'code', '-')})") from None
+          if result.get("ok") is not True:
+              raise SystemExit("Telegram did not accept message")
+          print("Telegram accepted test message")
+          PY
