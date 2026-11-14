@@ -62,6 +62,24 @@ def protective_stop(bars, entry_limit, bid, overseas):
     return float(stop)
 
 
+def market_evidence(market, previous_session, available_at):
+    """Read the most recent completed index session for the live decision."""
+    benchmark = "^GSPC" if market.startswith("US-") else "^KS11"
+    try:
+        prices = yf.Ticker(benchmark).history(period="3mo", auto_adjust=False, timeout=8)
+        closes = prices.loc[prices.index.date <= previous_session, "Close"].dropna()
+        if len(closes) < 20 or closes.index[-1].date() != previous_session:
+            print(f"{market} market context unavailable: incomplete benchmark history")
+            return []
+        state = "supportive" if closes.iloc[-1] > closes.iloc[-20:].mean() else "neutral"
+    except Exception as exc:
+        print(f"{market} market context unavailable ({type(exc).__name__})")
+        return []
+    print(f"{market} market context: {benchmark} {previous_session} {state}")
+    return [{"kind": "market", "market": market, "symbol": "*",
+             "available_at": available_at.isoformat(), "assessment": state}]
+
+
 def daily_candidates(previous_session, overseas=False):
     tickers = list(US_SYMBOLS) if overseas else [f"{symbol}.KS" for symbol in SYMBOLS]
     prices = yf.download(
@@ -287,7 +305,7 @@ def main():
     parser.add_argument("market", choices=OPEN_TIMES)
     parser.add_argument("--context", type=Path, help="JSON array of timestamped evidence records")
     args = parser.parse_args()
-    evidence = json.loads(args.context.read_text(encoding="utf-8-sig")) if args.context else None
+    evidence = json.loads(args.context.read_text(encoding="utf-8-sig")) if args.context else []
     market = args.market
     overseas = market.startswith("US-")
     local_zone = ZoneInfo("America/New_York") if overseas else KST
@@ -313,7 +331,17 @@ def main():
     app_key, app_secret, token, chat_id = keys
     snapshot = Path("us-early-candidates.json")
     try:
-        symbols = daily_candidates(calendar.previous_session(today).date(), overseas)
+        previous_session = calendar.previous_session(today).date()
+        symbols = daily_candidates(previous_session, overseas)
+        if symbols:
+            observed_market = market_evidence(market, previous_session, datetime.now(local_zone))
+            evidence.extend(observed_market)
+            if args.context or evidence:
+                Path("signal-context.json").write_text(json.dumps(evidence), encoding="utf-8")
+        available_kinds = {row["kind"] for row in evidence if row["market"] in (market, "*")}
+        missing_kinds = {"research", "market", "event"} - available_kinds
+        if missing_kinds:
+            print(f"{market} missing context: {', '.join(sorted(missing_kinds))}; observation alerts only")
         def publish(candidates):
             if market == "US-early":
                 snapshot.write_text(json.dumps({"date": today, "candidates": candidates[:5]}), encoding="utf-8")
@@ -329,7 +357,7 @@ def main():
             approval = request_approval(app_key, app_secret)
             if datetime.now(local_zone) >= opens:
                 raise RuntimeError("준비가 수집 시작 전에 끝나지 않아 불완전한 봉을 제외했습니다")
-            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence))
+            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence if not missing_kinds else None))
         else:
             print(f"{market} 직전 거래일 관찰 후보 없음")
             publish([])
@@ -341,9 +369,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
