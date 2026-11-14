@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+from time import sleep
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,6 +25,29 @@ BAR_SECONDS = 300
 MAX_QUOTE_AGE = 10
 MAX_SPREAD_PCT = 0.5
 MIN_VOLUME_RATIO = 1.5
+MAX_BREAKOUT_EXTENSION = 0.005
+
+
+def wait_for_connection_window(opens):
+    connection_at = opens - timedelta(minutes=3)
+    delay = (connection_at - datetime.now(opens.tzinfo)).total_seconds()
+    if delay > 0:
+        print(f"KIS 연결 예정: {connection_at.isoformat()}", flush=True)
+        sleep(delay)
+    if datetime.now(opens.tzinfo) >= opens:
+        raise RuntimeError("시세 수집 시작 시각을 지나 첫 봉을 확보할 수 없습니다")
+
+
+def breakout_v2(bars, quote, close_time):
+    """Volume confirmation and a capped entry above the broken resistance."""
+    metrics = candidate_metrics(bars, quote, close_time)
+    if metrics is None or metrics[0] < 2.0:
+        return None
+    resistance = max(bars[0]["high"], bars[1]["high"])
+    limit = resistance * (1 + MAX_BREAKOUT_EXTENSION)
+    if not resistance < quote["ask"] <= limit or metrics[2] > limit:
+        return None
+    return limit
 
 
 def daily_candidates(previous_session, overseas=False):
@@ -231,8 +255,8 @@ def main():
         print("개장 시각 변경 거래일은 장중 알림을 건너뜁니다")
         return
     opens = datetime.combine(now.date(), OPEN_TIMES[market], local_zone)
-    if not opens - timedelta(minutes=25) <= now < opens:
-        raise SystemExit("개장 전 25분 이내에 시작해야 첫 5분봉부터 수집할 수 있습니다")
+    if not opens - timedelta(minutes=100) <= now < opens:
+        raise SystemExit(f"수집 창을 놓쳤거나 너무 이릅니다. 현재 {now.isoformat()}, 목표 {opens.isoformat()}")
 
     keys = [os.getenv(name, "").strip() for name in (
         "KIS_APP_KEY", "KIS_APP_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
@@ -254,6 +278,7 @@ def main():
                 print(f"{market} 장중 알림 조건 충족 없음")
 
         if symbols:
+            wait_for_connection_window(opens)
             approval = request_approval(app_key, app_secret)
             if datetime.now(local_zone) >= opens:
                 raise RuntimeError("준비가 수집 시작 전에 끝나지 않아 불완전한 봉을 제외했습니다")

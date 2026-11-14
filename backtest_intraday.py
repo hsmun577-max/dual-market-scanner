@@ -11,10 +11,10 @@ import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from kis_intraday import candidate_metrics
+from kis_intraday import breakout_v2, candidate_metrics
 
 
-def replay(row, fee_bps):
+def replay(row, fee_bps, *, strict=False):
     signal_at = datetime.fromisoformat(row["signal_at"])
     bars = row["bars"]
     quotes = row["quotes"]
@@ -40,18 +40,26 @@ def replay(row, fee_bps):
         return {"status": "missing_signal_quote"}
     at, quote = before[-1]
     spread_pct = 200 * (quote["ask"] - quote["bid"]) / (quote["ask"] + quote["bid"])
-    signal_quote = {"event_time": at.isoformat(), "spread_pct": spread_pct}
+    signal_quote = {"event_time": at.isoformat(), "spread_pct": spread_pct, "ask": quote["ask"]}
     if not candidate_metrics(dict(enumerate(bars)), signal_quote, signal_at):
         return {"status": "no_signal"}
+    limit = breakout_v2(dict(enumerate(bars)), signal_quote, signal_at) if strict else None
+    if strict and limit is None:
+        return {"status": "filtered_by_breakout_v2"}
 
     entry_deadline = signal_at + timedelta(seconds=30)
     exit_at = signal_at + timedelta(minutes=30)
     after = [(at, quote) for at, quote in zip(times, quotes) if at > signal_at]
-    if not after or after[0][0] > entry_deadline:
+    entry_index = next(
+        (i for i, (at, quote) in enumerate(after)
+         if at <= entry_deadline and (limit is None or quote["ask"] <= limit)),
+        None,
+    )
+    if entry_index is None:
         return {"status": "missing_entry_quote"}
-    entry = after[0][1]["ask"]
+    entry = after[entry_index][1]["ask"]
 
-    for at, quote in after[1:]:
+    for at, quote in after[entry_index + 1:]:
         if at > exit_at + timedelta(seconds=30):
             break
         bid = quote["bid"]
@@ -75,17 +83,20 @@ def main():
             if not line.strip():
                 continue
             row = json.loads(line)
-            group = groups.setdefault(row["market"], {"counts": {}, "returns": []})
-            result = replay(row, args.fee_bps)
-            status = result["status"]
-            group["counts"][status] = group["counts"].get(status, 0) + 1
-            if status == "evaluated":
-                group["returns"].append(result["net_return"])
+            market = groups.setdefault(row["market"], {})
+            for strategy, strict in (("baseline", False), ("breakout_v2", True)):
+                group = market.setdefault(strategy, {"counts": {}, "returns": []})
+                result = replay(row, args.fee_bps, strict=strict)
+                status = result["status"]
+                group["counts"][status] = group["counts"].get(status, 0) + 1
+                if status == "evaluated":
+                    group["returns"].append(result["net_return"])
     if not groups:
         parser.error("No samples")
-    for group in groups.values():
-        returns = group.pop("returns")
-        group["mean_net_return_pct"] = 100 * sum(returns) / len(returns) if returns else None
+    for market in groups.values():
+        for group in market.values():
+            returns = group.pop("returns")
+            group["mean_net_return_pct"] = 100 * sum(returns) / len(returns) if returns else None
     print(json.dumps(groups, ensure_ascii=False, indent=2))
 
 
