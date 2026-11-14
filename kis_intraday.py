@@ -6,6 +6,7 @@ import json
 import os
 from time import sleep
 from datetime import datetime, time, timedelta
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -14,6 +15,7 @@ import yfinance as yf
 from websockets.exceptions import WebSocketException
 
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
+from signal_context import context_status
 from scanner import KR_SYMBOL_NAMES, US_SYMBOL_NAMES, calculate_indicators, classify_signal, clean_prices
 
 
@@ -50,6 +52,16 @@ def breakout_v2(bars, quote, close_time):
     return limit
 
 
+def protective_stop(bars, entry_limit, bid, overseas):
+    """Place the stop below the completed breakout candle's low."""
+    support = Decimal(str(bars[2]["low"]))
+    step = Decimal("0.01" if overseas else "1")
+    stop = (support * Decimal("0.999")).quantize(step, rounding=ROUND_DOWN)
+    if not Decimal(str(entry_limit)) * Decimal("0.98") <= stop < Decimal(str(bid)):
+        return None
+    return float(stop)
+
+
 def daily_candidates(previous_session, overseas=False):
     tickers = list(US_SYMBOLS) if overseas else [f"{symbol}.KS" for symbol in SYMBOLS]
     prices = yf.download(
@@ -74,9 +86,10 @@ def daily_candidates(previous_session, overseas=False):
 def update_bar(bars, slot, event_time, price, size):
     bar = bars.get(slot)
     if bar is None:
-        bars[slot] = {"high": price, "close": price, "last": event_time, "volume": size}
+        bars[slot] = {"high": price, "low": price, "close": price, "last": event_time, "volume": size}
         return
     bar["high"] = max(bar["high"], price)
+    bar["low"] = min(bar["low"], price)
     bar["volume"] += size
     if event_time >= bar["last"]:
         bar["close"], bar["last"] = price, event_time
@@ -94,7 +107,7 @@ def candidate_metrics(bars, quote, close_time):
     return volume_ratio, quote["spread_pct"], bars[2]["close"]
 
 
-async def collect(approval, market, symbols, opens, on_signal, samples_path):
+async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None):
     closes = opens + timedelta(minutes=15)
     feeds = FEEDS[market]
     pending = {(tr_id, symbol) for tr_id in feeds for symbol in symbols}
@@ -121,8 +134,19 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path):
                 for symbol in symbols:
                     if symbol not in rejected:
                         metrics = candidate_metrics(bars[symbol], quotes.get(symbol), closes)
+                        entry_limit = None
+                        stop = None
+                        if metrics and evidence is not None:
+                            limit = breakout_v2(bars[symbol], quotes[symbol], closes)
+                            status = context_status(evidence, samples_path.stem, symbol, closes)
+                            if limit is None or status != "supported":
+                                continue
+                            stop = protective_stop(bars[symbol], limit, quotes[symbol]["bid"], market == "US")
+                            if stop is None:
+                                continue
+                            entry_limit = limit
                         if metrics:
-                            candidates.append((symbol, *metrics))
+                            candidates.append((symbol, *metrics, entry_limit, stop))
                 notification = asyncio.create_task(asyncio.to_thread(
                     on_signal, sorted(candidates, key=lambda row: (-row[1], row[0]))
                 ))
@@ -179,7 +203,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path):
                 "daily_eligible": True,
                 "bars": [
                     {"start": (opens + timedelta(minutes=5 * slot)).isoformat(),
-                     **{key: bar[key] for key in ("high", "close", "volume")}}
+                     **{key: bar[key] for key in ("high", "low", "close", "volume")}}
                     for slot, bar in sorted(bars[symbol].items())
                 ],
                 "quotes": before + followup[symbol],
@@ -188,27 +212,46 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path):
     await notification
 
 
-def notify(market, candidates, closes, token, chat_id):
+def format_notification(market, candidates, closes):
     overseas = market.startswith("US-")
-    if overseas:
-        title = "미장 프리장 갱신" if market == "US-late" else "미장 프리장 관찰 후보"
-        lines = [title, f"{closes:%m/%d %H:%M} ET · {closes.astimezone(KST):%H:%M} KST"]
-    else:
-        session = "NXT 프리장" if market == "NXT" else "KRX 정규장"
-        lines = [f"국장 {session} 관찰 후보", f"{closes:%m/%d %H:%M} KST"]
-    lines.append("")
-    for symbol, ratio, spread, price in candidates[:5]:
+    session = {"US-early": "미국 프리장", "US-late": "미국 프리장 갱신",
+               "NXT": "국내 NXT 프리장", "KRX": "국내 KRX 정규장"}[market]
+    headline = "매수 신호" if candidates and candidates[0][4] is not None else "관찰 후보"
+    timestamp = f"{closes:%m/%d %H:%M} ET · {closes.astimezone(KST):%H:%M} KST" if overseas else f"{closes:%m/%d %H:%M} KST"
+    lines = [f"{headline} | {session}", timestamp]
+    for symbol, ratio, spread, price, entry_limit, stop in candidates[:5]:
         ticker = symbol[4:] if overseas else symbol
         name = US_SYMBOL_NAMES[ticker] if overseas else KR_SYMBOL_NAMES[f"{symbol}.KS"]
         price_label = f"${price:,.2f}" if overseas else f"{price:,}원"
-        lines.append(
-            f"• {name} ({ticker})  {price_label}\n"
-            f"  5분봉 고점 돌파 · 거래량 {ratio:.2f}배 · 호가 간격 {spread:.2f}%"
-        )
+        lines.extend(["", f"{name} ({ticker}) · 신호가 {price_label}"])
+        if entry_limit is not None:
+            # Round the display down so it never exceeds the strategy's price cap.
+            step = Decimal("0.01" if overseas else "1")
+            limit = Decimal(str(entry_limit)).quantize(step, rounding=ROUND_DOWN)
+            limit_label = f"${limit:,.2f}" if overseas else f"{limit:,}원"
+            stop_label = f"${stop:,.2f}" if overseas else f"{stop:,.0f}원"
+            risk_pct = (1 - stop / float(limit)) * 100
+            expires = closes + timedelta(seconds=30)
+            lines.extend([
+                f"진입 상한 {limit_label} · {expires:%H:%M:%S}까지 ({'ET' if overseas else 'KST'})",
+                "상한 초과·시간 경과·진입 전 손절선 이탈 시 진입 보류",
+                f"손절선 {stop_label} · 진입 상한 대비 −{risk_pct:.2f}%",
+                "손절 근거 · 돌파 5분봉 저점 아래 0.1% / 매도 가능 호가가 손절선 이하이면 청산",
+                "목표 · 실제 체결가 대비 +2% / 신호 후 30분 경과 시 청산",
+                "확인 · 증권사 리서치·시황 우호 / 이벤트 위험 필터 통과",
+            ])
+        else:
+            lines.append("진입 보류 · 거래량·가격 돌파를 관찰 중")
+        lines.append(f"근거 · 5분봉 고점 돌파 / 거래량 {ratio:.2f}배 / 호가 간격 {spread:.2f}%")
+    return "\n".join(lines)
+
+
+def notify(market, candidates, closes, token, chat_id):
+    message = format_notification(market, candidates, closes)
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": "\n".join(lines)},
+            json={"chat_id": chat_id, "text": message},
             timeout=10, allow_redirects=False,
         )
         if response.status_code != 200:
@@ -231,7 +274,9 @@ def filter_us_updates(candidates, today, path):
     earlier = {row[0]: row for row in early["candidates"]}
     return [
         row for row in candidates
-        if row[0] not in earlier or (row[3] > earlier[row[0]][3] and row[1] >= earlier[row[0]][1])
+        if row[0] not in earlier
+        or (row[4] is not None and (len(earlier[row[0]]) < 5 or earlier[row[0]][4] is None))
+        or (row[3] > earlier[row[0]][3] and row[1] >= earlier[row[0]][1])
     ]
 
 
@@ -240,7 +285,9 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("market", choices=OPEN_TIMES)
+    parser.add_argument("--context", type=Path, help="JSON array of timestamped evidence records")
     args = parser.parse_args()
+    evidence = json.loads(args.context.read_text(encoding="utf-8-sig")) if args.context else None
     market = args.market
     overseas = market.startswith("US-")
     local_zone = ZoneInfo("America/New_York") if overseas else KST
@@ -282,7 +329,7 @@ def main():
             approval = request_approval(app_key, app_secret)
             if datetime.now(local_zone) >= opens:
                 raise RuntimeError("준비가 수집 시작 전에 끝나지 않아 불완전한 봉을 제외했습니다")
-            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl")))
+            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence))
         else:
             print(f"{market} 직전 거래일 관찰 후보 없음")
             publish([])
@@ -294,3 +341,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
