@@ -36,9 +36,14 @@ jobs:
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SIGNAL_CONTEXT_JSON: ${{ vars.SIGNAL_CONTEXT_JSON }}
         run: |
+          context_args=()
+          if python signal_context.py signal-context.json; then
+            context_args=(--context signal-context.json)
+          fi
           set +e
-          python -u kis_intraday.py "$MARKET" 2>&1 | tee intraday-status.log
+          python -u kis_intraday.py "$MARKET" "${context_args[@]}" 2>&1 | tee intraday-status.log
           result=${PIPESTATUS[0]}
           if [[ $result -ne 0 ]]; then
             printf '### 장중 수집 실패 (%s)\n\n' "$MARKET" >> "$GITHUB_STEP_SUMMARY"
@@ -48,9 +53,13 @@ jobs:
       - name: Summarize replay without publishing raw quotes
         if: always()
         run: |
+          context_args=()
+          if [[ -s signal-context.json ]]; then
+            context_args=(--context signal-context.json)
+          fi
           for sample in ./*.jsonl; do
             if [[ -s "$sample" ]]; then
-              python backtest_intraday.py "$sample" --fee-bps 10 > "${sample%.jsonl}-replay.json"
+              python backtest_intraday.py "$sample" --fee-bps 10 "${context_args[@]}" > "${sample%.jsonl}-replay.json"
             fi
           done
       - name: Save intraday replay summary
@@ -60,3 +69,4 @@ jobs:
           name: intraday-replay
           path: '*-replay.json'
           if-no-files-found: ignore
+
