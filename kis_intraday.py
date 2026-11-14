@@ -32,6 +32,15 @@ MIN_VOLUME_RATIO = 1.5
 MAX_BREAKOUT_EXTENSION = 0.005
 
 
+def collection_open(scheduled, ready_at):
+    """Keep the scheduled window or use the next complete five-minute boundary."""
+    for minutes in (0, 5, 10, 15):
+        start = scheduled + timedelta(minutes=minutes)
+        if ready_at + timedelta(minutes=1) <= start:
+            return start
+    raise RuntimeError("개장 후 15분 이내에 완전한 5분봉 수집을 시작하지 못했습니다")
+
+
 def wait_for_connection_window(opens):
     connection_at = opens - timedelta(minutes=3)
     delay = (connection_at - datetime.now(opens.tzinfo)).total_seconds()
@@ -247,6 +256,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 print(f"{market} 구독 검증 {len(symbols) - len(rejected)}/{len(symbols)}")
                 if len(rejected) == len(symbols):
                     raise RuntimeError("개장 전 구독 승인에 성공한 종목이 없습니다")
+                print(f"{market} 완성된 5분봉 3개 확보: {sum(set(b) == {0, 1, 2} for b in bars.values())}/{len(symbols)}")
                 candidates = []
                 for symbol in symbols:
                     if symbol not in rejected:
@@ -419,7 +429,8 @@ def main():
         print("개장 시각 변경 거래일은 장중 알림을 건너뜁니다")
         return
     opens = datetime.combine(now.date(), OPEN_TIMES[market], local_zone)
-    if not opens - timedelta(minutes=100) <= now < opens:
+    scheduled_open = opens
+    if not opens - timedelta(minutes=100) <= now <= opens + timedelta(minutes=14):
         raise SystemExit(f"수집 창을 놓쳤거나 너무 이릅니다. 현재 {now.isoformat()}, 목표 {opens.isoformat()}")
 
     keys = [os.getenv(name, "").strip() for name in (
@@ -432,6 +443,8 @@ def main():
     try:
         previous_session = calendar.previous_session(today).date()
         symbols = daily_candidates(previous_session, overseas)
+        if symbols:
+            opens = collection_open(opens, datetime.now(local_zone))
         if symbols:
             observed_market = market_evidence(market, previous_session, datetime.now(local_zone))
             evidence.extend(observed_market)
@@ -457,8 +470,9 @@ def main():
         if symbols:
             wait_for_connection_window(opens)
             approval = request_approval(app_key, app_secret)
-            if datetime.now(local_zone) >= opens:
-                raise RuntimeError("준비가 수집 시작 전에 끝나지 않아 불완전한 봉을 제외했습니다")
+            opens = collection_open(scheduled_open, datetime.now(local_zone))
+            if opens != scheduled_open:
+                print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=15):%H:%M}")
             asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence if not missing_kinds else None))
         else:
             print(f"{market} 직전 거래일 관찰 후보 없음")
