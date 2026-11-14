@@ -221,19 +221,48 @@ def update_bar(bars, slot, event_time, price, size):
         bar["close"], bar["last"] = price, event_time
 
 
-def candidate_metrics(bars, quote, close_time):
-    if set(bars) != {0, 1, 2} or quote is None:
-        return None
+def evaluate_breakout(bars, quote, close_time):
+    if set(bars) != {0, 1, 2}:
+        return "missing_bars", None
+    if quote is None:
+        return "missing_quote", None
     age = (close_time - datetime.fromisoformat(quote["event_time"])).total_seconds()
-    if not 0 <= age <= MAX_QUOTE_AGE or quote["spread_pct"] > MAX_SPREAD_PCT:
-        return None
-    volume_ratio = bars[2]["volume"] / ((bars[0]["volume"] + bars[1]["volume"]) / 2)
-    if volume_ratio < MIN_VOLUME_RATIO or bars[2]["close"] <= max(bars[0]["high"], bars[1]["high"]):
-        return None
-    return volume_ratio, quote["spread_pct"], bars[2]["close"]
+    if not 0 <= age <= MAX_QUOTE_AGE:
+        return "stale_quote", None
+    if quote["spread_pct"] > MAX_SPREAD_PCT:
+        return "wide_spread", None
+    volume = (bars[0]["volume"] + bars[1]["volume"]) / 2
+    if volume <= 0 or bars[2]["volume"] / volume < MIN_VOLUME_RATIO:
+        return "low_volume", None
+    if bars[2]["close"] <= max(bars[0]["high"], bars[1]["high"]):
+        return "no_price_breakout", None
+    return "base_breakout", (bars[2]["volume"] / volume, quote["spread_pct"], bars[2]["close"])
 
 
-async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None):
+def candidate_metrics(bars, quote, close_time):
+    return evaluate_breakout(bars, quote, close_time)[1]
+
+
+def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False):
+    status, metrics = evaluate_breakout(bars, quote, closes)
+    if metrics is None:
+        return status, None
+    if observation_only or evidence is None:
+        status = context_status(evidence or [], window, symbol, closes)
+        return status if status != "supported" else "observation_only", (symbol, *metrics, None, None)
+    limit = breakout_v2(bars, quote, closes)
+    if limit is None:
+        return "strict_breakout_failed", None
+    status = context_status(evidence, window, symbol, closes)
+    if status != "supported":
+        return status, None
+    stop = protective_stop(bars, limit, quote["bid"], overseas)
+    if stop is None:
+        return "invalid_support_stop", None
+    return "buy_signal", (symbol, *metrics, limit, stop)
+
+
+async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False):
     closes = opens + timedelta(minutes=15)
     feeds = FEEDS[market]
     pending = {(tr_id, symbol) for tr_id in feeds for symbol in symbols}
@@ -254,26 +283,30 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                     break
                 rejected.update(symbol for _, symbol in pending)
                 print(f"{market} 구독 검증 {len(symbols) - len(rejected)}/{len(symbols)}")
+                candidates = []
+                decisions = {}
+                for symbol in symbols:
+                    if symbol in rejected:
+                        decisions[symbol] = "subscription_failed"
+                        continue
+                    status, candidate = evaluate_candidate(
+                        bars[symbol], quotes.get(symbol), closes, samples_path.stem, symbol,
+                        evidence, market == "US", observation_only,
+                    )
+                    decisions[symbol] = status
+                    if candidate is not None:
+                        candidates.append(candidate)
+                counts = {status: sum(value == status for value in decisions.values())
+                          for status in sorted(set(decisions.values()))}
+                print(f"{samples_path.stem} 판정 집계 {json.dumps(counts)}", flush=True)
+                for symbol, status in decisions.items():
+                    print(f"{samples_path.stem} {symbol} 판정 {status}", flush=True)
+                samples_path.with_name(f"{samples_path.stem}-decisions-replay.json").write_text(
+                    json.dumps({"signal_at": closes.isoformat(), "counts": counts, "symbols": decisions},
+                               indent=2), encoding="utf-8",
+                )
                 if len(rejected) == len(symbols):
                     raise RuntimeError("개장 전 구독 승인에 성공한 종목이 없습니다")
-                print(f"{market} 완성된 5분봉 3개 확보: {sum(set(b) == {0, 1, 2} for b in bars.values())}/{len(symbols)}")
-                candidates = []
-                for symbol in symbols:
-                    if symbol not in rejected:
-                        metrics = candidate_metrics(bars[symbol], quotes.get(symbol), closes)
-                        entry_limit = None
-                        stop = None
-                        if metrics and evidence is not None:
-                            limit = breakout_v2(bars[symbol], quotes[symbol], closes)
-                            status = context_status(evidence, samples_path.stem, symbol, closes)
-                            if limit is None or status != "supported":
-                                continue
-                            stop = protective_stop(bars[symbol], limit, quotes[symbol]["bid"], market == "US")
-                            if stop is None:
-                                continue
-                            entry_limit = limit
-                        if metrics:
-                            candidates.append((symbol, *metrics, entry_limit, stop))
                 notification = asyncio.create_task(asyncio.to_thread(
                     on_signal, sorted(candidates, key=lambda row: (-row[1], row[0]))
                 ))
@@ -473,7 +506,7 @@ def main():
             opens = collection_open(scheduled_open, datetime.now(local_zone))
             if opens != scheduled_open:
                 print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=15):%H:%M}")
-            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence if not missing_kinds else None))
+            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds)))
         else:
             print(f"{market} 직전 거래일 관찰 후보 없음")
             publish([])
