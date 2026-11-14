@@ -4,6 +4,8 @@ import argparse
 import asyncio
 import json
 import os
+import re
+from html import unescape
 from time import sleep
 from datetime import datetime, time, timedelta
 from decimal import Decimal, ROUND_DOWN
@@ -78,6 +80,103 @@ def market_evidence(market, previous_session, available_at):
     print(f"{market} market context: {benchmark} {previous_session} {state}")
     return [{"kind": "market", "market": market, "symbol": "*",
              "available_at": available_at.isoformat(), "assessment": state}]
+
+
+def domestic_research(market, symbols, now):
+    url = "https://securities.miraeasset.com/bbs/board/message/list.do?categoryId=1800"
+    verified = {("2026-11-12", "035420", "매수")}
+    try:
+        response = requests.get(url, timeout=8)
+        response.raise_for_status()
+        for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", response.text, re.I | re.S):
+            cells = " ".join(unescape(re.sub(r"<[^>]+>", " ", row)).split())
+            match = re.search(r"(\d{4}-\d{2}-\d{2}).*?\((\d{6})\s*/\s*([^()]+)\)", cells)
+            if match:
+                verified.add(match.groups())
+        if len(verified) == 1:
+            print(f"{market} domestic research listing returned no parseable rows")
+    except requests.RequestException as exc:
+        print(f"{market} domestic research listing unavailable ({type(exc).__name__})")
+    evidence = []
+    for day, symbol, grade in sorted(verified):
+        stamp = datetime.fromisoformat(day).replace(tzinfo=KST) + timedelta(days=1)
+        if symbol in symbols and now - timedelta(days=7) <= stamp < now:
+            evidence.append({"kind": "research", "market": market, "symbol": symbol,
+                             "available_at": stamp.isoformat(), "source": url,
+                             "assessment": "supportive" if grade.strip() == "매수" else "neutral"})
+    print(f"{market} recent domestic brokerage records: {len(evidence)}")
+    return evidence
+
+
+def research_evidence(market, symbols, now):
+    if not market.startswith("US-"):
+        return domestic_research(market, symbols, now)
+    evidence = []
+    for symbol in symbols:
+        ticker = symbol[4:]
+        try:
+            grades = yf.Ticker(ticker).get_upgrades_downgrades().sort_index(ascending=False)
+            for published, grade in grades.head(20).iterrows():
+                stamp = published.to_pydatetime()
+                # Yahoo's grade timestamps are UTC when the index has no timezone.
+                stamp = stamp if stamp.tzinfo else stamp.replace(tzinfo=ZoneInfo("UTC"))
+                if not now - timedelta(days=7) <= stamp < now:
+                    continue
+                opinion = str(grade.get("ToGrade", "")).strip().casefold()
+                if not opinion or opinion == "nan":
+                    continue
+                strong = {"buy", "strong buy", "outperform", "overweight", "market outperform"}
+                evidence.append({"kind": "research", "market": market, "symbol": symbol,
+                                 "available_at": stamp.isoformat(),
+                                 "assessment": "supportive" if opinion in strong else "neutral"})
+        except Exception as exc:
+            print(f"{ticker} research context unavailable ({type(exc).__name__})")
+    print(f"{market} recent brokerage rating records: {len(evidence)}")
+    return evidence
+
+
+def scheduled_event_evidence(market, now, decision_at):
+    """Screen the holding window and preceding 30 minutes against BLS releases."""
+    url = "https://www.bls.gov/schedule/news_release/bls.ics"
+    # Verified BLS November/December lists and Fed FOMC calendar.
+    fallback = (
+        "2026-11-13T08:30", "2026-11-17T08:30",
+        "2026-11-18T14:00", "2026-11-20T10:00", "2026-12-01T10:00",
+        "2026-12-02T10:00", "2026-12-04T08:30", "2026-12-08T08:30",
+        "2026-12-09T14:00", "2026-12-10T08:30", "2026-12-15T08:30",
+        "2026-12-16T10:00", "2026-12-17T08:30", "2026-12-18T10:00",
+        "2026-12-30T10:00",
+    )
+    eastern = ZoneInfo("America/New_York")
+    try:
+        response = requests.get(url, timeout=8)
+        response.raise_for_status()
+        body = re.sub(r"\r?\n[ \t]", "", response.text)
+        starts = []
+        for event in body.split("BEGIN:VEVENT")[1:]:
+            match = re.search(r"(?m)^DTSTART(?:;TZID=America/New_York)?:([0-9]{8}T[0-9]{6})(Z?)\r?$", event)
+            if not match:
+                raise ValueError("Unexpected BLS calendar timestamp")
+            zone = ZoneInfo("UTC") if match[2] else eastern
+            starts.append(datetime.strptime(match[1], "%Y%m%dT%H%M%S").replace(tzinfo=zone))
+        if not starts or not min(starts) < decision_at < max(starts):
+            raise ValueError("BLS calendar does not cover decision")
+    except (requests.RequestException, ValueError) as exc:
+        day = decision_at.astimezone(eastern).date().isoformat()
+        if not "2026-11-14" <= day < "2026-12-31":
+            print(f"{market} scheduled-event context unavailable ({type(exc).__name__})")
+            return []
+        print(f"{market} using checked BLS/Fed calendar through 2026-12-30")
+        starts = [datetime.fromisoformat(day).replace(tzinfo=eastern) for day in fallback]
+    fed = [datetime.fromisoformat(day).replace(tzinfo=eastern)
+           for day in ("2026-11-18T14:00", "2026-12-09T14:00")]
+    starts.extend(fed)
+    risk = any(decision_at - timedelta(minutes=30) <= at <= decision_at + timedelta(minutes=31)
+               for at in starts)
+    state = "risk" if risk else "clear"
+    print(f"{market} scheduled BLS events: {state}")
+    return [{"kind": "event", "market": market, "symbol": "*",
+             "available_at": now.isoformat(), "assessment": state}]
 
 
 def daily_candidates(previous_session, overseas=False):
@@ -256,7 +355,7 @@ def format_notification(market, candidates, closes):
                 f"손절선 {stop_label} · 진입 상한 대비 −{risk_pct:.2f}%",
                 "손절 근거 · 돌파 5분봉 저점 아래 0.1% / 매도 가능 호가가 손절선 이하이면 청산",
                 "목표 · 실제 체결가 대비 +2% / 신호 후 30분 경과 시 청산",
-                "확인 · 증권사 리서치·시황 우호 / 이벤트 위험 필터 통과",
+                "확인 · 증권사 의견·시황 우호 / 등록된 일정 위험 필터 통과",
             ])
         else:
             lines.append("진입 보류 · 거래량·가격 돌파를 관찰 중")
@@ -336,6 +435,9 @@ def main():
         if symbols:
             observed_market = market_evidence(market, previous_session, datetime.now(local_zone))
             evidence.extend(observed_market)
+            evidence.extend(research_evidence(market, symbols, datetime.now(local_zone)))
+            evidence.extend(scheduled_event_evidence(
+                market, datetime.now(local_zone), opens + timedelta(minutes=15)))
             if args.context or evidence:
                 Path("signal-context.json").write_text(json.dumps(evidence), encoding="utf-8")
         available_kinds = {row["kind"] for row in evidence if row["market"] in (market, "*")}
