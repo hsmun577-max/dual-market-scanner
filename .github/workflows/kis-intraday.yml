@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   collect:
@@ -29,6 +30,21 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5' 'websockets>=14,<18'
+      - name: Load previous full scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow scanner.yml --branch main --status success --limit 3 --json databaseId --jq '.[].databaseId') || exit 0
+          for run in $runs; do
+            if gh run download "$run" --name scan-results --dir opening-download; then
+              mkdir -p opening-scan
+              report=$(find opening-download -name latest.json -print -quit)
+              if [[ -n "$report" ]]; then
+                cp "$report" opening-scan/latest.json
+                break
+              fi
+            fi
+          done
       - name: Collect opening data and notify
         env:
           MARKET: ${{ inputs.market || (github.event.schedule == '30 21 * * 0-4' && 'NXT' || 'KRX') }}
