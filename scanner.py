@@ -492,18 +492,28 @@ def scan_market(market, tickers, benchmark, names=None, prices=None):
     return results, errors
 
 def rank_korean_candidates(candidates, limit=5):
-    """Rank liquid candidates, reserving two places for unusual volume."""
+    """Rank liquid trend candidates with a confirmed price or volume trigger."""
     liquid = []
     for item in candidates:
         indicators = item["indicators"]
         turnover = (indicators.get("price") or 0) * (indicators.get("volume") or 0)
-        if turnover >= 100_000_000:
+        positive_trend = (
+            (indicators.get("return_5d") or 0) > 0
+            and (indicators.get("return_20d") or 0) > 0
+            and (indicators.get("relative_strength") or 0) > 0
+            and (indicators.get("price") or 0) > (indicators.get("ma20") or 0) > 0
+        )
+        price_or_volume_trigger = bool(indicators.get("breakout")) or (
+            (indicators.get("volume_ratio") or 0) >= 2
+            and (indicators.get("return_5d") or 0) >= 0.05
+        )
+        if turnover >= 100_000_000 and positive_trend and price_or_volume_trigger:
             liquid.append((item, turnover))
     unusual = sorted(
         (pair for pair in liquid if (pair[0]["indicators"].get("volume_ratio") or 0) >= 2),
         key=lambda pair: (-pair[0]["indicators"]["volume_ratio"], -pair[1], pair[0]["symbol"]),
     )
-    ranked = sorted(liquid, key=lambda pair: (-pair[0]["signal"]["score"], -pair[1], pair[0]["symbol"]))
+    ranked = sorted(liquid, key=lambda pair: (-(pair[0]["signal"]["score"] - 2 * bool(pair[0]["indicators"].get("rebound"))), -pair[1], pair[0]["symbol"]))
     selected = {}
     for item, _ in unusual[:2] + ranked:
         selected.setdefault(item["symbol"], item)
