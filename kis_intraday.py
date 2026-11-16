@@ -73,22 +73,95 @@ def protective_stop(bars, entry_limit, bid, overseas):
     return float(stop)
 
 
+MARKET_INDICES = {
+    "KR": ("^KS11", "^KQ11"),
+    "US": ("^GSPC", "^IXIC", "^RUT"),
+}
+GLOBAL_MARKET_TICKERS = ("^STOXX50E", "^N225", "000001.SS", "^HSI",
+                         "KRW=X", "DX-Y.NYB", "^TNX", "^VIX", "CL=F")
+RISK_HEADLINE = re.compile(
+    r"\b(tariffs?|export controls?|sanctions?|invasion|airstrikes?|"
+    r"trading halt|recall|bankruptcy|guidance cut)\b|관세|수출\s*규제|제재|공습|거래정지|리콜|실적\s*하향",
+    re.IGNORECASE,
+)
+
+
 def market_evidence(market, previous_session, available_at):
-    """Read the most recent completed index session for the live decision."""
-    benchmark = "^GSPC" if market.startswith("US-") else "^KS11"
+    """Require broad local confirmation and record global market conditions."""
+    local = MARKET_INDICES["US" if market.startswith("US-") else "KR"]
+    tickers = (*MARKET_INDICES["KR"], *MARKET_INDICES["US"], *GLOBAL_MARKET_TICKERS)
     try:
-        prices = yf.Ticker(benchmark).history(period="3mo", auto_adjust=False, timeout=8)
-        closes = prices.loc[prices.index.date <= previous_session, "Close"].dropna()
-        if len(closes) < 20 or closes.index[-1].date() != previous_session:
-            print(f"{market} market context unavailable: incomplete benchmark history")
-            return []
-        state = "supportive" if closes.iloc[-1] > closes.iloc[-20:].mean() else "neutral"
+        data = yf.download(list(tickers), period="3mo", auto_adjust=False,
+                           group_by="ticker", threads=4, progress=False, timeout=8)
+        supportive = []
+        snapshot = {}
+        for ticker in tickers:
+            if ticker not in data.columns.get_level_values(0):
+                continue
+            closes = data[ticker]["Close"].dropna()
+            closes = closes.loc[closes.index.date <= previous_session]
+            if len(closes) < 2:
+                continue
+            day = closes.index[-1].date()
+            snapshot[ticker] = {"date": day.isoformat(), "close": float(closes.iloc[-1]),
+                                "change_pct": float((closes.iloc[-1] / closes.iloc[-2] - 1) * 100)}
+            if ticker in local and day == previous_session and len(closes) >= 20:
+                supportive.append(bool(closes.iloc[-1] > closes.iloc[-20:].mean()))
     except Exception as exc:
         print(f"{market} market context unavailable ({type(exc).__name__})")
         return []
-    print(f"{market} market context: {benchmark} {previous_session} {state}")
+    print(f"{market} market snapshot {json.dumps(snapshot)}")
+    if len(supportive) != len(local):
+        print(f"{market} market context unavailable: incomplete local index coverage")
+        return []
+    # At least two of three US indices, and both Korean indices, must agree.
+    state = "supportive" if sum(supportive) > len(local) / 2 else "neutral"
     return [{"kind": "market", "market": market, "symbol": "*",
-             "available_at": available_at.isoformat(), "assessment": state}]
+             "available_at": available_at.isoformat(), "assessment": state,
+             "snapshot": snapshot}]
+
+
+def headline_risks(market, symbol, articles, now):
+    risks = []
+    for item in articles:
+        article = item.get("content") or {}
+        title = article.get("title") or ""
+        if not RISK_HEADLINE.search(title):
+            continue
+        try:
+            published = datetime.fromisoformat(str(article.get("pubDate") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
+            continue
+        risks.append({"kind": "event", "market": market, "symbol": symbol,
+                      "available_at": published.isoformat(), "assessment": "risk",
+                      "headline": title, "source": "Yahoo Finance ticker news"})
+    return risks
+
+
+def news_evidence(market, symbols, now):
+    from concurrent.futures import ThreadPoolExecutor
+
+    overseas = market.startswith("US-")
+    lookup = [(symbol, symbol[4:] if overseas else symbol + ".KS") for symbol in symbols]
+    # Korean ticker news can be listed under either exchange suffix.
+    if not overseas:
+        lookup += [(symbol, symbol + ".KQ") for symbol in symbols]
+
+    def fetch(pair):
+        symbol, ticker = pair
+        try:
+            articles = yf.Ticker(ticker).get_news(count=12)
+            return headline_risks(market, symbol, articles, now)
+        except Exception as exc:
+            print(f"{market} {ticker} news unavailable ({type(exc).__name__})")
+            return []
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        evidence = [item for records in pool.map(fetch, lookup) for item in records]
+    print(f"{market} ticker news risk records: {len(evidence)}")
+    return evidence
 
 
 def domestic_research(market, symbols, now):
@@ -418,7 +491,7 @@ def format_notification(market, candidates, closes):
                 f"손절선 {stop_label} · 진입 상한 대비 −{risk_pct:.2f}%",
                 "손절 근거 · 돌파 5분봉 저점 아래 0.1% / 매도 가능 호가가 손절선 이하이면 청산",
                 "목표 · 실제 체결가 대비 +2% / 신호 후 30분 경과 시 청산",
-                "확인 · 증권사 의견·시황 우호 / 등록된 일정 위험 필터 통과",
+                "확인 · 증권사 의견·시황 우호 / 수집된 일정·위험 뉴스 필터 통과",
             ])
         else:
             lines.append("매수 진입가 미제시 · 관찰만")
@@ -502,6 +575,7 @@ def main():
             observed_market = market_evidence(market, previous_session, datetime.now(local_zone))
             evidence.extend(observed_market)
             evidence.extend(research_evidence(market, symbols, datetime.now(local_zone)))
+            evidence.extend(news_evidence(market, symbols, datetime.now(local_zone)))
             evidence.extend(scheduled_event_evidence(
                 market, datetime.now(local_zone), opens + timedelta(minutes=15)))
             if args.context or evidence:
