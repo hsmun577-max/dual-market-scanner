@@ -491,6 +491,25 @@ def scan_market(market, tickers, benchmark, names=None, prices=None):
 
     return results, errors
 
+def rank_korean_candidates(candidates, limit=5):
+    """Rank liquid candidates, reserving two places for unusual volume."""
+    liquid = []
+    for item in candidates:
+        indicators = item["indicators"]
+        turnover = (indicators.get("price") or 0) * (indicators.get("volume") or 0)
+        if turnover >= 100_000_000:
+            liquid.append((item, turnover))
+    unusual = sorted(
+        (pair for pair in liquid if (pair[0]["indicators"].get("volume_ratio") or 0) >= 2),
+        key=lambda pair: (-pair[0]["indicators"]["volume_ratio"], -pair[1], pair[0]["symbol"]),
+    )
+    ranked = sorted(liquid, key=lambda pair: (-pair[0]["signal"]["score"], -pair[1], pair[0]["symbol"]))
+    selected = {}
+    for item, _ in unusual[:2] + ranked:
+        selected.setdefault(item["symbol"], item)
+    return list(selected.values())[:limit]
+
+
 def telegram_candidate_line(item):
     signal = item["signal"]
     indicators = item["indicators"]
@@ -506,7 +525,8 @@ def telegram_candidate_line(item):
         label = f"{label} · 일봉 스캔 기준가 {price_label}"
     return (
         f"• {label}\n"
-        f"  {signal['stage']} {signal['score']}점 · {reasons} · {data_date}"
+        f"  {signal['stage']} {signal['score']}점 · {reasons} · {data_date}\n"
+        f"  기업분석 {item.get('fundamentals', '미검증')} · 뉴스·공시 {item.get('news_and_filings', '미검증')}"
     )
 
 
@@ -588,6 +608,8 @@ def send_telegram_summary(report):
             (item for item in candidates if item["market"] == market),
             key=lambda item: (-item["signal"]["score"], item["symbol"]),
         )
+        if market == "KR":
+            ranked = rank_korean_candidates(ranked)
         if ranked:
             lines.append(f"\n[{market_name} 종목 후보]")
             lines.extend(telegram_candidate_line(item) for item in ranked[:5])
