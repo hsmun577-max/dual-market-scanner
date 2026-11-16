@@ -18,7 +18,7 @@ from websockets.exceptions import WebSocketException
 
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
 from signal_context import context_status
-from scanner import KR_SYMBOL_NAMES, US_SYMBOL_NAMES, calculate_indicators, classify_signal, clean_prices
+from scanner import KR_SYMBOL_NAMES, US_SYMBOL_NAMES, calculate_indicators, classify_signal, clean_prices, rank_korean_candidates
 
 
 # Common shares from the current watchlist. NXT subscription acceptance is checked per session.
@@ -189,6 +189,26 @@ def scheduled_event_evidence(market, now, decision_at):
 
 
 def daily_candidates(previous_session, overseas=False):
+    report = Path("opening-scan/latest.json")
+    if not overseas and report.is_file():
+        try:
+            results = json.loads(report.read_text(encoding="utf-8"))["results"]
+            fresh = [item for item in results if item["market"] == "KR"
+                     and item["symbol"].endswith((".KS", ".KQ"))
+                     and item["indicators"]["data_date"] == previous_session.isoformat()]
+            if fresh:
+                candidates = rank_korean_candidates(
+                    [item for item in fresh if item["signal"]["stage"] in
+                     {"장전 관찰 후보", "장중 조건부 진입 후보"}], limit=len(SYMBOLS),
+                )
+                for item in candidates:
+                    KR_SYMBOL_NAMES[f"{item['symbol'].split('.')[0]}.KS"] = item.get("name") or item["symbol"]
+                print(f"국내 직전 거래일 스캔에서 장중 감시 종목 {len(candidates)}개 선정")
+                return [item["symbol"].split(".")[0] for item in candidates]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"직전 거래일 스캔 사용 실패 ({type(exc).__name__})")
+    if not overseas:
+        print("직전 거래일 전 종목 스캔 자료 없음: 기존 감시 목록 사용")
     tickers = list(US_SYMBOLS) if overseas else [f"{symbol}.KS" for symbol in SYMBOLS]
     prices = yf.download(
         tickers, period="1y", interval="1d", auto_adjust=True,
