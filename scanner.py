@@ -503,7 +503,7 @@ def telegram_candidate_line(item):
     price = indicators.get("price")
     if price is not None:
         price_label = f"{price:,.0f}원" if item["market"] == "KR" else f"${price:,.2f}"
-        label = f"{label}  {price_label}"
+        label = f"{label} · 일봉 스캔 기준가 {price_label}"
     return (
         f"• {label}\n"
         f"  {signal['stage']} {signal['score']}점 · {reasons} · {data_date}"
@@ -580,6 +580,7 @@ def send_telegram_summary(report):
 
     lines = [
         "듀얼스캐너 일봉 관찰 후보",
+        "매수 진입가 · 미제시",
         f"조회 성공 {report['successful']}/{report['attempted']} · 후보 {len(candidates)}개",
     ]
     for market, market_name in (("KR", "국장"), ("US", "미장")):
