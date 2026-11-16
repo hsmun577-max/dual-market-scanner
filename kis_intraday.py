@@ -383,7 +383,7 @@ def format_notification(market, candidates, closes):
         ticker = symbol[4:] if overseas else symbol
         name = US_SYMBOL_NAMES[ticker] if overseas else KR_SYMBOL_NAMES[f"{symbol}.KS"]
         price_label = f"${price:,.2f}" if overseas else f"{price:,}원"
-        lines.extend(["", f"{name} ({ticker}) · 신호가 {price_label}"])
+        lines.extend(["", f"{name} ({ticker}) · 스캔 기준가 {price_label} (5분봉 종가)"])
         if entry_limit is not None:
             # Round the display down so it never exceeds the strategy's price cap.
             step = Decimal("0.01" if overseas else "1")
@@ -393,7 +393,7 @@ def format_notification(market, candidates, closes):
             risk_pct = (1 - stop / float(limit)) * 100
             expires = closes + timedelta(seconds=30)
             lines.extend([
-                f"진입 상한 {limit_label} · {expires:%H:%M:%S}까지 ({'ET' if overseas else 'KST'})",
+                f"매수 진입 상한 {limit_label} · {expires:%H:%M:%S}까지 ({'ET' if overseas else 'KST'})",
                 "상한 초과·시간 경과·진입 전 손절선 이탈 시 진입 보류",
                 f"손절선 {stop_label} · 진입 상한 대비 −{risk_pct:.2f}%",
                 "손절 근거 · 돌파 5분봉 저점 아래 0.1% / 매도 가능 호가가 손절선 이하이면 청산",
@@ -401,7 +401,7 @@ def format_notification(market, candidates, closes):
                 "확인 · 증권사 의견·시황 우호 / 등록된 일정 위험 필터 통과",
             ])
         else:
-            lines.append("진입 보류 · 거래량·가격 돌파를 관찰 중")
+            lines.append("매수 진입가 미제시 · 관찰만")
         lines.append(f"근거 · 5분봉 고점 돌파 / 거래량 {ratio:.2f}배 / 호가 간격 {spread:.2f}%")
     return "\n".join(lines)
 
