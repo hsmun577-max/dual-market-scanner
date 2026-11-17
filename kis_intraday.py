@@ -363,6 +363,49 @@ def dart_contract_details(api_key, receipt):
         return {}
 
 
+def dart_contract_candidates(api_key, ranked, now):
+    """Promote up to two same-day contract issuers with confirmed trading activity."""
+    if not ranked:
+        return []
+    day = now.strftime("%Y%m%d")
+    candidates = []
+    receipts = set()
+    attempts = 0
+    for page in range(1, 4):
+        response = requests.get(
+            "https://opendart.fss.or.kr/api/list.json",
+            params={"crtfc_key": api_key, "bgn_de": day, "end_de": day, "pblntf_ty": "I",
+                    "page_no": page, "page_count": 100},
+            timeout=6,
+        )
+        response.raise_for_status()
+        body = response.json()
+        if body.get("status") == "013":
+            break
+        if body.get("status") != "000":
+            raise ValueError("DART daily exchange disclosure query failed")
+        for item in body.get("list", []):
+            code = item.get("stock_code", "").strip()
+            title = item.get("report_nm", "")
+            receipt = item.get("rcept_no", "")
+            if (code not in ranked or code in candidates or item.get("rcept_dt") != day
+                    or not re.fullmatch(r"\d{14}", receipt) or receipt in receipts
+                    or "단일판매" not in title or "공급계약" not in title
+                    or any(word in title for word in ("정정", "해지", "취소"))):
+                continue
+            receipts.add(receipt)
+            attempts += 1
+            details = dart_contract_details(api_key, receipt)
+            if details.get("amount_krw", 0) > 0 and details.get("revenue_ratio_pct", 0) >= 5:
+                candidates.append(code)
+                print(f"DART contract watch {code} receipt={receipt} ratio={details['revenue_ratio_pct']:g}%")
+            if len(candidates) == 2 or attempts == 3:
+                return candidates
+        if page >= int(body.get("total_page") or 0):
+            break
+    return candidates
+
+
 def dart_disclosures(api_key, corp_code, now):
     response = requests.get(
         "https://opendart.fss.or.kr/api/list.json",
@@ -646,10 +689,20 @@ def korean_intraday_leaders(market, app_key, app_secret):
     body = response.json()
     if body.get("rt_cd") != "0" or not isinstance(body.get("output"), list):
         raise RuntimeError("KIS 장중 거래대금 순위 응답 오류")
-    return select_intraday_leaders(body["output"])
+    ranked = select_intraday_leaders(body["output"], limit=30)
+    dart_key = os.getenv("DART_API_KEY", "").strip()
+    catalysts = []
+    if dart_key:
+        try:
+            catalysts = dart_contract_candidates(dart_key, ranked, datetime.now(KST))
+            print(f"{market} 당일 공급계약 우선 감시: {', '.join(catalysts) or '없음'}")
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            print(f"{market} DART 계약 후보 조회 실패 ({type(exc).__name__})")
+    selected = list(dict.fromkeys([*catalysts, *ranked]))[:len(SYMBOLS)]
+    return {symbol: ranked[symbol] for symbol in selected}
 
 
-def select_intraday_leaders(rows):
+def select_intraday_leaders(rows, limit=len(SYMBOLS)):
     leaders = {}
     for row in rows:
         symbol = str(row.get("mksc_shrn_iscd") or "")
@@ -660,7 +713,7 @@ def select_intraday_leaders(rows):
             continue
         if re.fullmatch(r"[0-9A-Z]{6}", symbol) and turnover >= 100_000_000 and gain > 0:
             leaders.setdefault(symbol, str(row.get("hts_kor_isnm") or symbol))
-        if len(leaders) >= len(SYMBOLS):
+        if len(leaders) >= limit:
             break
     return leaders
 
