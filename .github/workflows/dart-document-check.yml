@@ -27,44 +27,23 @@ jobs:
           if not key:
               raise SystemExit("DART key unavailable")
           now=datetime.now(ZoneInfo("Asia/Seoul"))
-          sampled=0
-          for page in range(1,9):
+          from io import BytesIO
+          from zipfile import ZipFile, BadZipFile
+          from xml.etree import ElementTree
+          for receipt in ("20261117800641","20261117900571","20261117800497"):
+              r=requests.get("https://opendart.fss.or.kr/api/document.xml",params={"crtfc_key":key,"rcept_no":receipt},timeout=6)
               try:
-                  response=requests.get("https://opendart.fss.or.kr/api/list.json",params={
-                      "crtfc_key":key,"bgn_de":(now-timedelta(days=14)).strftime("%Y%m%d"),
-                      "end_de":now.strftime("%Y%m%d"),"pblntf_ty":"I","page_no":page,"page_count":100},timeout=8)
-                  response.raise_for_status()
-                  body=response.json()
-              except (requests.RequestException,ValueError) as exc:
-                  raise SystemExit(type(exc).__name__) from None
-              if body.get("status")!="000":
-                  print("DART list status:", body.get("status"))
-                  break
-              for row in body.get("list",[]):
-                  title=row.get("report_nm","")
-                  code=row.get("stock_code","").strip()
-                  if "단일판매" not in title or "공급계약" not in title or not code:
-                      continue
-                  receipt=row["rcept_no"]
-                  sampled+=1
+                  with ZipFile(BytesIO(r.content)) as z:
+                      print("ZIP",receipt,z.namelist())
+                      for name in z.namelist():
+                          if name.lower().endswith(".xml"):
+                              root=ElementTree.fromstring(z.read(name))
+                              rows=[" ".join(" ".join(tr.itertext()).split()) for tr in root.iter("TR")]
+                              print("ROWS",root.tag,len(rows),[row[:170] for row in rows if "매출액" in row or "계약금액" in row][:8])
+              except BadZipFile:
                   try:
-                      details=dart_contract_details(key,receipt)
-                  except requests.RequestException as exc:
-                      print("Document error", receipt, type(exc).__name__)
-                      continue
-                  print("DART_DOCUMENT", receipt, code, row.get("corp_name"), details,flush=True)
-                  if "amount_krw" in details and "revenue_ratio_pct" in details:
-                      day=datetime.strptime(row["rcept_dt"],"%Y%m%d").date().isoformat()
-                      company={"filings":[dict(filing_date=day,form=title,contract=details)]}
-                      KR_SYMBOL_NAMES[code+".KS"]=row.get("corp_name") or code
-                      text=format_notification("KRX",[(code,1.7,.1,1000,None,None,None)],now,{code:company})
-                      line=next(line for line in text.splitlines() if line.startswith("공급계약"))
-                      assert "계약금액" in line and "최근 매출 대비" in line
-                      print("DART_RENDER",line,flush=True)
-                      raise SystemExit(0)
-                  if sampled>=12:
-                      break
-              if sampled>=12 or page>=body.get("total_page",0):
-                  break
-          raise SystemExit(f"No document with both fields, tested {sampled}")
+                      doc=ElementTree.fromstring(r.content)
+                      print("DART_STATUS",receipt,r.status_code,doc.findtext("status"),doc.findtext("message"))
+                  except ElementTree.ParseError:
+                      print("INVALID",receipt,r.status_code)
           PY
