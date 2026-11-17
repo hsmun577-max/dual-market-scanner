@@ -442,6 +442,49 @@ def dart_disclosures(api_key, corp_code, now):
     return shown, risks
 
 
+def dart_quarterly_financials(api_key, corp_code, filings):
+    """Use three-month income statement fields from the matching DART filing."""
+    codes = {"03": "11013", "06": "11012", "09": "11014"}
+    report = next((item for item in filings
+                   if re.search(r"(분기보고서|반기보고서).*\((\d{4})\.(03|06|09)\)", item["form"])), None)
+    if report is None:
+        return {}
+    match = re.search(r"(분기보고서|반기보고서).*\((\d{4})\.(03|06|09)\)", report["form"])
+    year, month = match.group(2, 3)
+    response = requests.get("https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json",
+                            params={"crtfc_key": api_key, "corp_code": corp_code, "bsns_year": year,
+                                    "reprt_code": codes[month], "fs_div": "CFS"}, timeout=6)
+    response.raise_for_status()
+    body = response.json()
+    if body.get("status") not in {"000", "013"}:
+        raise ValueError("DART quarterly financial query failed")
+    receipt = report["url"].rsplit("=", 1)[-1]
+    accounts = {row["account_id"]: row for row in body.get("list", [])
+                if row.get("sj_div") in {"IS", "CIS"} and row.get("rcept_no") == receipt and row.get("account_id")}
+    revenue = accounts.get("ifrs-full_Revenue") or accounts.get("ifrs_Revenue")
+    income = accounts.get("dart_OperatingIncomeLoss")
+    if not revenue or not income:
+        return {}
+
+    def amount(row, key):
+        try:
+            value = float(str(row.get(key, "")).replace(",", ""))
+            return value if math.isfinite(value) else None
+        except ValueError:
+            return None
+
+    sales = amount(revenue, "thstrm_amount")
+    operating = amount(income, "thstrm_amount")
+    if sales is None or sales <= 0 or operating is None:
+        return {}
+    snapshot = {"quarter": f"{year}-{month}", "operating_margin_pct": 100 * operating / sales,
+                "financial_source": "DART 연결", "financial_filing_url": report["url"]}
+    prior_sales = amount(revenue, "frmtrm_q_amount")
+    if prior_sales is not None and prior_sales > 0:
+        snapshot["revenue_yoy_pct"] = 100 * (sales / prior_sales - 1)
+    return snapshot
+
+
 def company_context(market, symbols, now):
     from concurrent.futures import ThreadPoolExecutor
 
@@ -494,6 +537,13 @@ def company_context(market, symbols, now):
                               "assessment": "risk"} for record in filing_risks)
             except (requests.RequestException, ValueError, TypeError) as exc:
                 print(f"{market} {symbol} DART unavailable ({type(exc).__name__})")
+            try:
+                dart_financials = dart_quarterly_financials(dart_key, corp_codes[symbol], snapshot.get("filings", []))
+                if dart_financials:
+                    snapshot.pop("revenue_yoy_pct", None)
+                    snapshot.update(dart_financials)
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                print(f"{market} {symbol} DART financials unavailable ({type(exc).__name__})")
         return symbol, snapshot, risks
 
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -969,7 +1019,7 @@ def format_notification(market, candidates, closes, companies=None):
             financials = f"기업실적 · {company['quarter']} 분기 영업이익률 {company['operating_margin_pct']:.1f}%"
             if "revenue_yoy_pct" in company:
                 financials += f" / 매출 전년 동기 대비 {company['revenue_yoy_pct']:+.1f}%"
-            lines.append(financials)
+            lines.append(financials + f" · {company.get('financial_source', 'Yahoo Finance')}")
         else:
             lines.append("기업실적 · 자료 미확보")
         if overseas:
