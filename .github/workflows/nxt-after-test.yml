@@ -1,0 +1,73 @@
+name: NXT after-market scan test
+on:
+  push:
+    branches: [codex/nxt-after-test-20261117]
+    paths: [.github/workflows/nxt-after-test.yml]
+permissions: {}
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          KIS_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_SECRET: ${{ secrets.KIS_APP_SECRET }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.parse, urllib.request
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+
+          key,secret=os.environ["KIS_KEY"],os.environ["KIS_SECRET"]
+          base="https://openapi.koreainvestment.com:9443"
+          def call(path, headers, params=None, data=None):
+              req=urllib.request.Request(base+path+("?" + urllib.parse.urlencode(params) if params else ""),
+                  headers=headers,data=json.dumps(data).encode() if data else None)
+              try:
+                  with urllib.request.urlopen(req,timeout=10) as res:
+                      return json.load(res)
+              except Exception as exc:
+                  raise RuntimeError(f"request failed: {type(exc).__name__} HTTP {getattr(exc,'code','-')}") from None
+          now=datetime.now(ZoneInfo("Asia/Seoul"))
+          opened=now.replace(hour=15,minute=40,second=0,microsecond=0)
+          end=now.replace(minute=now.minute//5*5,second=0,microsecond=0)
+          if now.date().isoformat()!="2026-11-17" or not opened+timedelta(minutes=15)<=end<=opened+timedelta(hours=4,minutes=20):
+              raise SystemExit("Outside the requested NXT after-market test window")
+          auth=call("/oauth2/tokenP",{"Content-Type":"application/json"},data={
+            "grant_type":"client_credentials","appkey":key,"appsecret":secret})
+          headers={"authorization":"Bearer "+auth["access_token"],"appkey":key,"appsecret":secret,"custtype":"P"}
+          rank=call("/uapi/domestic-stock/v1/quotations/volume-rank",dict(headers,tr_id="FHPST01710000"),{
+            "FID_COND_MRKT_DIV_CODE":"NX","FID_COND_SCR_DIV_CODE":"20171","FID_INPUT_ISCD":"0000","FID_DIV_CLS_CODE":"1",
+            "FID_BLNG_CLS_CODE":"3","FID_TRGT_CLS_CODE":"111111111","FID_TRGT_EXLS_CLS_CODE":"0000000000",
+            "FID_INPUT_PRICE_1":"","FID_INPUT_PRICE_2":"","FID_VOL_CNT":"","FID_INPUT_DATE_1":""})
+          if rank.get("rt_cd")!="0":
+              raise SystemExit("NXT rank failed: "+str(rank.get("msg_cd","")))
+          candidates={}
+          for row in rank.get("output",[]):
+              if int(row.get("acml_tr_pbmn") or 0)>=100_000_000 and float(row.get("prdy_ctrt") or 0)>0:
+                  candidates.setdefault(row["mksc_shrn_iscd"],row["hts_kor_isnm"])
+              if len(candidates)==9:
+                  break
+          print("NXT_TEST_WINDOW", (end-timedelta(minutes=15)).isoformat(),end.isoformat(), "CANDIDATES",len(candidates),flush=True)
+          for ticker,name in candidates.items():
+              try:
+                  chart=call("/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",dict(headers,tr_id="FHKST03010200"),{
+                      "FID_COND_MRKT_DIV_CODE":"NX","FID_INPUT_ISCD":ticker,"FID_INPUT_HOUR_1":end.strftime("%H%M%S"),
+                      "FID_PW_DATA_INCU_YN":"N","FID_ETC_CLS_CODE":""})
+                  if chart.get("rt_cd")!="0":
+                      print("NXT_TEST",ticker,name,"chart_error",chart.get("msg_cd",""));continue
+                  data={row["stck_cntg_hour"]:row for row in chart.get("output2",[]) if row.get("stck_bsop_date")==now.strftime("%Y%m%d")}
+                  mins=[(end-timedelta(minutes=n)).strftime("%H%M%S") for n in range(15,0,-1)]
+                  if any(m not in data for m in mins):
+                      print("NXT_TEST",ticker,name,"missing_minutes",sum(m not in data for m in mins));continue
+                  volumes=[sum(int(data[m]["cntg_vol"]) for m in mins[i:i+5]) for i in (0,5,10)]
+                  if min(volumes)<=0:
+                      print("NXT_TEST",ticker,name,"zero_volume");continue
+                  resistance=max(int(data[m]["stck_hgpr"]) for m in mins[:10])
+                  close=int(data[mins[-1]]["stck_prpr"])
+                  ratio=2*volumes[2]/sum(volumes[:2])
+                  print("NXT_TEST",ticker,name,"breakout",close>resistance,"volume_ratio",round(ratio,2),"close",close,
+                        "price_volume_pass",resistance<close<=resistance*1.005 and ratio>=2)
+              except (RuntimeError, KeyError, ValueError) as exc:
+                  print("NXT_TEST",ticker,name,"unavailable",type(exc).__name__)
+          PY
