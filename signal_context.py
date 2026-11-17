@@ -14,7 +14,7 @@ def context_status(records, market, symbol, decision_at):
         if record["market"] not in (market, "*") or record["symbol"] not in (symbol, "*"):
             continue
         kind = record["kind"]
-        if kind == "research" and record["symbol"] != symbol:
+        if kind == "research":
             continue
         published = datetime.fromisoformat(record["available_at"])
         if published.utcoffset() is None or decision_at.utcoffset() is None:
@@ -23,12 +23,11 @@ def context_status(records, market, symbol, decision_at):
             evidence[kind].append((published, record["assessment"]))
     if any(value == "risk" for _, value in evidence["event"]):
         return "event_risk"
-    for kind in ("research", "market"):
-        if not evidence[kind]:
-            return f"missing_{kind}"
-        latest = max(at for at, _ in evidence[kind])
-        if any(value != "supportive" for at, value in evidence[kind] if at == latest):
-            return f"{kind}_not_supportive"
+    if not evidence["market"]:
+        return "missing_market"
+    latest = max(at for at, _ in evidence["market"])
+    if any(value != "supportive" for at, value in evidence["market"] if at == latest):
+        return "market_not_supportive"
     # Require a positive coverage marker from the event feed as well.
     if not any(value == "clear" for _, value in evidence["event"]):
         return "missing_event"
