@@ -1,0 +1,37 @@
+name: OpenDART connection check
+on:
+  push:
+    branches: [codex/dart-connection-check-20261117]
+    paths: [.github/workflows/dart-check.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'websockets>=14,<18'
+      - env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          from kis_intraday import dart_company_codes, dart_disclosures
+          key = os.environ.get("DART_API_KEY", "").strip()
+          if not key:
+              raise SystemExit("DART_API_KEY missing")
+          try:
+              codes = dart_company_codes(key)
+              filings, risks = dart_disclosures(key, codes["005930"], datetime.now(ZoneInfo("Asia/Seoul")))
+          except Exception as exc:
+              raise SystemExit(f"DART request failed ({type(exc).__name__})") from None
+          print("DART verified:", len(codes), "listed codes;",
+                len(filings), "recent Samsung Electronics filings;",
+                len(risks), "risk matches")
+          PY
