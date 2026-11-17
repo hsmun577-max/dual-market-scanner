@@ -676,8 +676,12 @@ def main():
             for symbol, name in leaders.items():
                 KR_SYMBOL_NAMES[symbol + ".KS"] = name
             print(f"{market} 장중 거래대금 감시: {', '.join(symbols) or '후보 없음'}")
+        elif overseas:
+            # The prior daily screen must not prevent premarket observation.
+            symbols = [f"DNAS{ticker}" for ticker in US_SYMBOLS]
+            print(f"{market} 프리장 체결·호가 감시 {len(symbols)}종목 (일봉 통과 조건 없음)")
         else:
-            symbols = daily_candidates(previous_session, overseas)
+            symbols = daily_candidates(previous_session)
         if symbols:
             opens = collection_open(opens, datetime.now(local_zone))
         if symbols:
