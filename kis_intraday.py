@@ -288,6 +288,42 @@ def dart_company_codes(api_key):
             for row in root.findall("list") if row.findtext("stock_code", "").strip()}
 
 
+def supply_contract_metrics(document):
+    from xml.etree import ElementTree
+
+    metrics = {}
+    for row in ElementTree.fromstring(document).iter("TR"):
+        cells = ["".join(cell.itertext()).strip() for cell in row if cell.tag in {"TD", "TH", "TU"}]
+        for label, value in zip(cells, cells[1:]):
+            label = re.sub(r"\s+", "", label)
+            value = value.replace(",", "").strip()
+            if label.endswith("계약금액(원)") and re.fullmatch(r"[0-9]+", value):
+                metrics["amount_krw"] = int(value)
+            if label.endswith("매출액대비(%)"):
+                value = value.removesuffix("%").strip()
+                if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value):
+                    metrics["revenue_ratio_pct"] = float(value)
+    return metrics
+
+
+def dart_contract_details(api_key, receipt):
+    from io import BytesIO
+    from xml.etree import ElementTree
+    from zipfile import BadZipFile, ZipFile
+
+    response = requests.get("https://opendart.fss.or.kr/api/document.xml",
+                            params={"crtfc_key": api_key, "rcept_no": receipt}, timeout=6)
+    response.raise_for_status()
+    try:
+        with ZipFile(BytesIO(response.content)) as archive:
+            document = next((item for item in archive.infolist()
+                             if item.filename.rsplit("/", 1)[-1] == f"{receipt}.xml"
+                             and item.file_size <= 4_000_000), None)
+            return supply_contract_metrics(archive.read(document)) if document else {}
+    except (BadZipFile, ElementTree.ParseError):
+        return {}
+
+
 def dart_disclosures(api_key, corp_code, now):
     response = requests.get(
         "https://opendart.fss.or.kr/api/list.json",
@@ -313,7 +349,15 @@ def dart_disclosures(api_key, corp_code, now):
         if day == today and DART_RISK_TITLE.search(title):
             risks.append({**filing, "available_at": now.isoformat(), "headline": title})
     filings.sort(key=lambda record: record["filing_date"], reverse=True)
-    return filings[:3], risks
+    shown = filings[:3]
+    for filing in shown:
+        if "단일판매" in filing["form"] and "공급계약" in filing["form"]:
+            try:
+                filing["contract"] = dart_contract_details(api_key, filing["url"].rsplit("=", 1)[-1])
+            except requests.RequestException as exc:
+                print(f"DART contract document unavailable ({type(exc).__name__})")
+            break
+    return shown, risks
 
 
 def company_context(market, symbols, now):
@@ -847,6 +891,15 @@ def format_notification(market, candidates, closes, companies=None):
         elif company.get("filings"):
             filing = company["filings"][0]
             lines.append(f"DART 공시 · {filing['filing_date']} {filing['form'][:70]}")
+            contract = next((item for item in company["filings"] if item.get("contract")), None)
+            if contract:
+                details = contract["contract"]
+                values = []
+                if "amount_krw" in details:
+                    values.append(f"계약금액 {details['amount_krw']:,}원")
+                if "revenue_ratio_pct" in details:
+                    values.append(f"최근 매출 대비 {details['revenue_ratio_pct']:g}%")
+                lines.append(f"공급계약 · {contract['filing_date']} / " + " / ".join(values))
         else:
             lines.append("DART 공시 · 최근 자료 미확보")
         if company.get("news"):
