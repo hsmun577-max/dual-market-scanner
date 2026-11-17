@@ -302,6 +302,47 @@ def scheduled_event_evidence(market, now, decision_at):
              "available_at": now.isoformat(), "assessment": state}]
 
 
+def korean_intraday_leaders(market, app_key, app_secret):
+    base = "https://openapi.koreainvestment.com:9443"
+    auth = requests.post(base + "/oauth2/tokenP", timeout=8, json={
+        "grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret,
+    })
+    auth.raise_for_status()
+    response = requests.get(
+        base + "/uapi/domestic-stock/v1/quotations/volume-rank",
+        headers={"authorization": "Bearer " + auth.json()["access_token"], "appkey": app_key,
+                 "appsecret": app_secret, "tr_id": "FHPST01710000", "custtype": "P"},
+        params={"FID_COND_MRKT_DIV_CODE": {"KRX": "J", "NXT": "NX"}[market],
+                "FID_COND_SCR_DIV_CODE": "20171", "FID_INPUT_ISCD": "0000",
+                "FID_DIV_CLS_CODE": "1", "FID_BLNG_CLS_CODE": "3",
+                "FID_TRGT_CLS_CODE": "111111111", "FID_TRGT_EXLS_CLS_CODE": "0000000000",
+                "FID_INPUT_PRICE_1": "", "FID_INPUT_PRICE_2": "",
+                "FID_VOL_CNT": "", "FID_INPUT_DATE_1": ""},
+        timeout=8,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if body.get("rt_cd") != "0" or not isinstance(body.get("output"), list):
+        raise RuntimeError("KIS 장중 거래대금 순위 응답 오류")
+    return select_intraday_leaders(body["output"])
+
+
+def select_intraday_leaders(rows):
+    leaders = {}
+    for row in rows:
+        symbol = str(row.get("mksc_shrn_iscd") or "")
+        try:
+            turnover = int(row.get("acml_tr_pbmn") or 0)
+            gain = float(row.get("prdy_ctrt") or 0)
+        except (ValueError, TypeError):
+            continue
+        if re.fullmatch(r"[0-9A-Z]{6}", symbol) and turnover >= 100_000_000 and gain > 0:
+            leaders.setdefault(symbol, str(row.get("hts_kor_isnm") or symbol))
+        if len(leaders) >= len(SYMBOLS):
+            break
+    return leaders
+
+
 def daily_candidates(previous_session, overseas=False):
     report = Path("opening-scan/latest.json")
     if not overseas and report.is_file():
@@ -590,6 +631,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("market", choices=OPEN_TIMES)
     parser.add_argument("--context", type=Path, help="JSON array of timestamped evidence records")
+    parser.add_argument("--intraday-leaders", action="store_true")
     args = parser.parse_args()
     evidence = json.loads(args.context.read_text(encoding="utf-8-sig")) if args.context else []
     market = args.market
@@ -606,8 +648,12 @@ def main():
         print("개장 시각 변경 거래일은 장중 알림을 건너뜁니다")
         return
     opens = datetime.combine(now.date(), OPEN_TIMES[market], local_zone)
+    if args.intraday_leaders:
+        if market != "KRX":
+            parser.error("--intraday-leaders requires KRX")
+        opens += timedelta(minutes=65)
     scheduled_open = opens
-    if not opens - timedelta(minutes=100) <= now <= opens + timedelta(minutes=14):
+    if not opens - timedelta(minutes=170 if args.intraday_leaders else 100) <= now <= opens + timedelta(minutes=14):
         raise SystemExit(f"수집 창을 놓쳤거나 너무 이릅니다. 현재 {now.isoformat()}, 목표 {opens.isoformat()}")
 
     keys = [os.getenv(name, "").strip() for name in (
@@ -619,7 +665,19 @@ def main():
     snapshot = Path("us-early-candidates.json")
     try:
         previous_session = calendar.previous_session(today).date()
-        symbols = daily_candidates(previous_session, overseas)
+        if args.intraday_leaders:
+            lookup_at = scheduled_open - timedelta(minutes=15)
+            sleep(max(0, (lookup_at - datetime.now(local_zone)).total_seconds()))
+            try:
+                leaders = korean_intraday_leaders(market, app_key, app_secret)
+            except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
+                raise RuntimeError(f"KIS 장중 순위 조회 실패 ({type(exc).__name__})") from None
+            symbols = list(leaders)
+            for symbol, name in leaders.items():
+                KR_SYMBOL_NAMES[symbol + ".KS"] = name
+            print(f"{market} 장중 거래대금 감시: {', '.join(symbols) or '후보 없음'}")
+        else:
+            symbols = daily_candidates(previous_session, overseas)
         if symbols:
             opens = collection_open(opens, datetime.now(local_zone))
         if symbols:
@@ -654,7 +712,7 @@ def main():
                 print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=15):%H:%M}")
             asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds), resistance=resistance))
         else:
-            print(f"{market} 직전 거래일 관찰 후보 없음")
+            print(f"{market} 감시 후보 없음")
             publish([])
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from None
