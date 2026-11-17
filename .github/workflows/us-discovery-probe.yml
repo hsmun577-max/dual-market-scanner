@@ -1,0 +1,68 @@
+name: US premarket discovery probe
+on:
+  push:
+    branches: [codex/us-premarket-discovery-probe-20261117]
+    paths: [.github/workflows/us-discovery-probe.yml]
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - env:
+          KIS_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_SECRET: ${{ secrets.KIS_APP_SECRET }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, time, urllib.parse, urllib.request
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+          eastern=ZoneInfo("America/New_York")
+          start=datetime(2026,11,17,4,16,tzinfo=eastern)
+          now=datetime.now(eastern)
+          if now>=start.replace(hour=9,minute=25):
+              raise SystemExit("Premarket probe window passed")
+          print("Probe scheduled:",start.isoformat(),flush=True)
+          time.sleep(max(0,(start-now).total_seconds()))
+          key,secret=os.environ["KIS_KEY"],os.environ["KIS_SECRET"]
+          base="https://openapi.koreainvestment.com:9443"
+          def call(path, headers, params=None, payload=None):
+              req=urllib.request.Request(base+path+("?" + urllib.parse.urlencode(params) if params else ""),
+                  headers=headers,data=json.dumps(payload).encode() if payload else None)
+              try:
+                  with urllib.request.urlopen(req,timeout=10) as res:
+                      return json.load(res)
+              except Exception as exc:
+                  raise RuntimeError(f"Request failed: {type(exc).__name__} HTTP {getattr(exc,'code','-')}") from None
+          token=call("/oauth2/tokenP",{"Content-Type":"application/json"},payload={"grant_type":"client_credentials","appkey":key,"appsecret":secret})["access_token"]
+          headers={"authorization":"Bearer "+token,"appkey":key,"appsecret":secret,"custtype":"P"}
+          completed=0
+          for venue in ("NAS","NYS","AMS"):
+              try:
+                  rank=call("/uapi/overseas-stock/v1/ranking/volume-surge",dict(headers,tr_id="HHDFS76270000"),
+                           {"EXCD":venue,"MINX":"3","VOL_RANG":"2","KEYB":"","AUTH":""})
+              except RuntimeError as exc:
+                  print("Ranking request failed",venue,exc,flush=True)
+                  continue
+              rows=rank.get("output2") or []
+              print("Ranking",venue,"status",rank.get("rt_cd"),"message",rank.get("msg_cd"),"rows",len(rows),flush=True)
+              if rank.get("rt_cd")!="0":
+                  continue
+              completed+=1
+              symbols=list(dict.fromkeys(str(row.get("symb","")) for row in rows if isinstance(row,dict)))
+              for sym in [s for s in symbols if re.fullmatch(r"[A-Z]{1,6}",s)][:5]:
+                  try:
+                      chart=call("/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice",dict(headers,tr_id="HHDFS76950200"),
+                             {"AUTH":"","EXCD":venue,"SYMB":sym,"NMIN":"1","PINC":"0","NEXT":"","NREC":"30","FILL":"","KEYB":""})
+                  except RuntimeError as exc:
+                      print("Chart request failed",venue,sym,exc,flush=True)
+                      continue
+                  end=datetime.now(eastern).replace(second=0,microsecond=0)
+                  lower=max(start.replace(minute=0),end-timedelta(minutes=15))
+                  minutes={str(x.get("xhms","")) for x in chart.get("output2") or []
+                      if x.get("xymd")==end.strftime("%Y%m%d") and lower.strftime("%H%M%S")<=str(x.get("xhms",""))<end.strftime("%H%M%S")
+                      and str(x.get("evol","")).isdigit() and int(x["evol"])>0}
+                  print("Premarket",venue,sym,"complete positive-volume minutes",len(minutes),"chart_status",chart.get("rt_cd"),flush=True)
+          if not completed:
+              raise SystemExit("No venue ranking was available")
+          PY
