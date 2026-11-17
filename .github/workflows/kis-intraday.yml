@@ -21,7 +21,11 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 230
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [daily, leaders]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,6 +35,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5' 'websockets>=14,<18'
       - name: Load previous full scan
+        if: matrix.source == 'daily'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -46,7 +51,9 @@ jobs:
             fi
           done
       - name: Collect opening data and notify
+        if: matrix.source == 'daily' || inputs.market == 'KRX' || github.event.schedule == '30 22 * * 0-4'
         env:
+          CANDIDATE_SOURCE: ${{ matrix.source }}
           MARKET: ${{ inputs.market || (github.event.schedule == '30 21 * * 0-4' && 'NXT' || 'KRX') }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
@@ -57,6 +64,9 @@ jobs:
           context_args=()
           if python signal_context.py signal-context.json; then
             context_args=(--context signal-context.json)
+          fi
+          if [[ "$CANDIDATE_SOURCE" == leaders ]]; then
+            context_args+=(--intraday-leaders)
           fi
           set +e
           python -u kis_intraday.py "$MARKET" "${context_args[@]}" 2>&1 | tee intraday-status.log
@@ -82,7 +92,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: intraday-replay
+          name: ${{ matrix.source == 'daily' && 'intraday-replay' || 'intraday-replay-leaders' }}
           path: |
             *-replay.json
             intraday-status.log
