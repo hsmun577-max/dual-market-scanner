@@ -890,6 +890,8 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 print(f"{market} 구독 검증 {len(symbols) - len(rejected)}/{len(symbols)}")
                 candidates = []
                 decisions = {}
+                event_scores = {symbol: event_impact(evidence, samples_path.stem, symbol, closes)
+                                for symbol in symbols}
                 for symbol in symbols:
                     if symbol in rejected:
                         decisions[symbol] = "subscription_failed"
@@ -907,13 +909,13 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 for symbol, status in decisions.items():
                     print(f"{samples_path.stem} {symbol} 판정 {status}", flush=True)
                 samples_path.with_name(f"{samples_path.stem}-decisions-replay.json").write_text(
-                    json.dumps({"signal_at": closes.isoformat(), "counts": counts, "symbols": decisions},
+                    json.dumps({"signal_at": closes.isoformat(), "counts": counts, "symbols": decisions, "event_scores": event_scores},
                                indent=2), encoding="utf-8",
                 )
                 if len(rejected) == len(symbols):
                     raise RuntimeError("개장 전 구독 승인에 성공한 종목이 없습니다")
                 notification = asyncio.create_task(asyncio.to_thread(
-                    on_signal, sorted(candidates, key=lambda row: (-row[1], row[0]))
+                    on_signal, sorted(candidates, key=lambda row: (-event_scores[row[0]], -row[1], row[0]))
                 ))
                 evaluated = True
                 deadline = closes + timedelta(minutes=30, seconds=30)
@@ -978,6 +980,48 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
     await notification
 
 
+def event_impact(evidence, market, symbol, decision_at):
+    """Score recent company-specific evidence without counting duplicate headlines."""
+    grades = set()
+    for row in evidence or ():
+        if row["kind"] != "event" or row["symbol"] != symbol or row["market"] not in (market, "*"):
+            continue
+        stamp = datetime.fromisoformat(row["available_at"])
+        if decision_at - timedelta(hours=24) <= stamp < decision_at:
+            grades.add(row["assessment"])
+    return (1 if "positive" in grades else 0) - (2 if "risk" in grades else 0)
+
+
+def confirmed_contract_events(companies, market, observed_at):
+    return [
+        {"kind": "event", "market": market, "symbol": symbol,
+         "available_at": observed_at.isoformat(), "assessment": "positive", "source": "DART",
+         "headline": filing["form"], "url": filing["url"]}
+        for symbol, company in companies.items()
+        for filing in company.get("filings", [])
+        if filing.get("source") == "DART"
+        and filing["filing_date"] == observed_at.date().isoformat()
+        and not any(word in filing["form"] for word in ("정정", "해지", "취소"))
+        and filing.get("contract", {}).get("amount_krw", 0) > 0
+        and filing["contract"].get("revenue_ratio_pct", 0) >= 5
+    ]
+
+
+def research_label(evidence, market, symbol, decision_at):
+    opinions = []
+    for row in evidence:
+        if row["kind"] != "research" or row["market"] not in (market, "*") or row["symbol"] != symbol:
+            continue
+        timestamp = datetime.fromisoformat(row["available_at"])
+        if decision_at - timedelta(days=7) <= timestamp < decision_at:
+            opinions.append((timestamp, row["assessment"]))
+    if not opinions:
+        return "최근 자료 미확보"
+    latest = max(at for at, _ in opinions)
+    supportive = all(grade == "supportive" for at, grade in opinions if at == latest)
+    return ("우호" if supportive else "우호 의견 미확인") + f" · {latest.astimezone(KST):%m/%d}"
+
+
 def format_notification(market, candidates, closes, companies=None):
     companies = companies or {}
     overseas = market.startswith("US-")
@@ -1009,12 +1053,15 @@ def format_notification(market, candidates, closes, companies=None):
                 "손절 근거 · 돌파 5분봉 저점 아래 0.1% / 매도 가능 호가가 손절선 이하이면 청산",
                 f"목표 매도가 {target_label} · 진입 상한 대비 +{target_pct:.2f}%\n목표가 근거 · {target_reason}",
                 "매도 가능 호가가 목표가에 도달하면 익절 · 신호 후 30분 경과 시 청산",
-                "확인 · 증권사 의견·시황 우호 / 수집된 일정·위험 뉴스 필터 통과",
+                "확인 · 시황 우호 / 수집된 일정·위험 뉴스 필터 통과",
             ])
         else:
             lines.append("매수 진입가 미제시 · 관찰만")
         lines.append(f"근거 · 5분봉 고점 돌파 / 거래량 {ratio:.2f}배 / 호가 간격 {spread:.2f}%")
         company = companies.get(symbol, {})
+        lines.append(f"증권사 의견(참고) · {company.get('research_label', '최근 자료 미확보')}")
+        if company.get("event_score"):
+            lines.append(f"종목 이벤트 점수 · {company['event_score']:+d}")
         if "operating_margin_pct" in company:
             financials = f"기업실적 · {company['quarter']} 분기 영업이익률 {company['operating_margin_pct']:.1f}%"
             if "revenue_yoy_pct" in company:
@@ -1162,12 +1209,13 @@ def main():
             evidence.extend(research_evidence(market, symbols, datetime.now(local_zone)))
             companies, company_risks = company_context(market, symbols, datetime.now(local_zone))
             evidence.extend(company_risks)
+            evidence.extend(confirmed_contract_events(companies, market, datetime.now(local_zone)))
             evidence.extend(scheduled_event_evidence(
                 market, datetime.now(local_zone), opens + timedelta(minutes=15)))
             if args.context or evidence:
                 Path("signal-context.json").write_text(json.dumps(evidence), encoding="utf-8")
         available_kinds = {row["kind"] for row in evidence if row["market"] in (market, "*")}
-        missing_kinds = {"research", "market", "event"} - available_kinds
+        missing_kinds = {"market", "event"} - available_kinds
         if missing_kinds:
             print(f"{market} missing context: {', '.join(sorted(missing_kinds))}; observation alerts only")
         def publish(candidates):
@@ -1176,7 +1224,12 @@ def main():
             elif market == "US-late":
                 candidates = filter_us_updates(candidates, today, snapshot)
             if candidates:
-                notify(market, candidates, opens + timedelta(minutes=15), token, chat_id, companies)
+                decision_at = opens + timedelta(minutes=15)
+                for symbol, *_ in candidates:
+                    company = companies.setdefault(symbol, {})
+                    company["research_label"] = research_label(evidence, market, symbol, decision_at)
+                    company["event_score"] = event_impact(evidence, market, symbol, decision_at)
+                notify(market, candidates, decision_at, token, chat_id, companies)
             else:
                 print(f"{market} 장중 알림 조건 충족 없음")
 
