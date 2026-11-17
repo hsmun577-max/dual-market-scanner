@@ -11,7 +11,7 @@ import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from kis_intraday import breakout_v2, candidate_metrics, protective_stop, sell_target
+from kis_intraday import breakout_v2, candidate_metrics, protective_stop, price_projection
 from signal_context import context_status
 
 
@@ -71,7 +71,13 @@ def replay(row, fee_bps, *, strict=False, use_support_stop=False):
     if entry_index is None:
         return {"status": "missing_entry_quote"}
     entry = after[entry_index][1]["ask"]
-    target = sell_target(limit, stop, row["market"].startswith("US-")) if stop is not None else entry * 1.02
+    target = entry * 1.02
+    if stop is not None:
+        projection = price_projection(dict(enumerate(bars)), limit, row.get("prior_highs", ()),
+                                      row["market"].startswith("US-"))
+        if projection is None:
+            return {"status": "no_upside_projection"}
+        target = projection[0]
     stop = entry * 0.99 if stop is None else stop
 
     for at, quote in after[entry_index + 1:]:
