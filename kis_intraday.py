@@ -8,7 +8,7 @@ import re
 from html import unescape
 from time import sleep
 from datetime import datetime, time, timedelta
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -86,12 +86,45 @@ RISK_HEADLINE = re.compile(
 )
 
 
-def sell_target(entry_limit, stop, overseas):
-    """Set a target two risk units above the highest allowed entry."""
-    entry = Decimal(str(entry_limit))
-    risk = entry - Decimal(str(stop))
+def price_projection(bars, entry_limit, prior_highs, overseas):
+    """Project the opening range and account for nearby prior-session highs."""
+    if any("low" not in bars[slot] for slot in (0, 1)):
+        return None
+    ceiling = max(bars[slot]["high"] for slot in (0, 1))
+    floor = min(bars[slot]["low"] for slot in (0, 1))
+    if ceiling <= floor:
+        return None
+    projected = ceiling + (ceiling - floor)
+    overhead = min((high for high in prior_highs if high > ceiling), default=None)
+    decimals = 2 if overseas else 0
+    if overhead is not None and overhead <= projected:
+        reason = f"최근 20거래일 고점 {overhead:,.{decimals}f}에서 저항 예상"
+    else:
+        reason = f"돌파 기준 {ceiling:,.{decimals}f} + 직전 가격 범위 {ceiling - floor:,.{decimals}f}"
+    target = min(projected, overhead) if overhead is not None else projected
     step = Decimal("0.01" if overseas else "1")
-    return float((entry + 2 * risk).quantize(step, rounding=ROUND_UP))
+    target = float(Decimal(str(target)).quantize(step, rounding=ROUND_DOWN))
+    return (target, reason) if target > entry_limit else None
+
+
+def prior_resistance(symbols, previous_session, overseas):
+    tickers = [symbol[4:] for symbol in symbols] if overseas else [
+        symbol + (".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS") for symbol in symbols
+    ]
+    try:
+        prices = yf.download(tickers, period="3mo", auto_adjust=False, group_by="ticker",
+                             multi_level_index=True, progress=False, threads=4, timeout=8)
+        levels = {}
+        for symbol, ticker in zip(symbols, tickers):
+            if ticker in prices.columns.get_level_values(0):
+                highs = prices[ticker]["High"].dropna()
+                highs = highs.loc[highs.index.date <= previous_session].tail(20)
+                if len(highs) == 20 and highs.index[-1].date() == previous_session:
+                    levels[symbol] = [float(value) for value in highs]
+        return levels
+    except (KeyError, ValueError, OSError) as exc:
+        print(f"Historical resistance unavailable ({type(exc).__name__})")
+        return {}
 
 
 def market_evidence(market, previous_session, available_at):
@@ -283,7 +316,8 @@ def daily_candidates(previous_session, overseas=False):
                      {"장전 관찰 후보", "장중 조건부 진입 후보"}], limit=len(SYMBOLS),
                 )
                 for item in candidates:
-                    KR_SYMBOL_NAMES[f"{item['symbol'].split('.')[0]}.KS"] = item.get("name") or item["symbol"]
+                    KR_SYMBOL_NAMES[item["symbol"]] = item.get("name") or item["symbol"]
+                    KR_SYMBOL_NAMES[f"{item['symbol'].split('.')[0]}.KS"] = KR_SYMBOL_NAMES[item["symbol"]]
                 print(f"국내 직전 거래일 스캔에서 장중 감시 종목 {len(candidates)}개 선정")
                 return [item["symbol"].split(".")[0] for item in candidates]
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -344,13 +378,13 @@ def candidate_metrics(bars, quote, close_time):
     return evaluate_breakout(bars, quote, close_time)[1]
 
 
-def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False):
+def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False, prior_highs=()):
     status, metrics = evaluate_breakout(bars, quote, closes)
     if metrics is None:
         return status, None
     if observation_only or evidence is None:
         status = context_status(evidence or [], window, symbol, closes)
-        return status if status != "supported" else "observation_only", (symbol, *metrics, None, None)
+        return status if status != "supported" else "observation_only", (symbol, *metrics, None, None, None)
     limit = breakout_v2(bars, quote, closes)
     if limit is None:
         return "strict_breakout_failed", None
@@ -360,10 +394,14 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     stop = protective_stop(bars, limit, quote["bid"], overseas)
     if stop is None:
         return "invalid_support_stop", None
-    return "buy_signal", (symbol, *metrics, limit, stop)
+    projection = price_projection(bars, limit, prior_highs, overseas)
+    if projection is None:
+        return "no_upside_above_entry", None
+    return "buy_signal", (symbol, *metrics, limit, stop, projection)
 
 
-async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False):
+async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False, resistance=None):
+    resistance = resistance or {}
     closes = opens + timedelta(minutes=15)
     feeds = FEEDS[market]
     pending = {(tr_id, symbol) for tr_id in feeds for symbol in symbols}
@@ -392,7 +430,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                         continue
                     status, candidate = evaluate_candidate(
                         bars[symbol], quotes.get(symbol), closes, samples_path.stem, symbol,
-                        evidence, market == "US", observation_only,
+                        evidence, market == "US", observation_only, resistance.get(symbol, ()),
                     )
                     decisions[symbol] = status
                     if candidate is not None:
@@ -462,6 +500,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 "symbol": symbol,
                 "signal_at": closes.isoformat(),
                 "daily_eligible": True,
+                "prior_highs": resistance.get(symbol, []),
                 "bars": [
                     {"start": (opens + timedelta(minutes=5 * slot)).isoformat(),
                      **{key: bar[key] for key in ("high", "low", "close", "volume")}}
@@ -480,7 +519,7 @@ def format_notification(market, candidates, closes):
     headline = "매수 신호" if candidates and candidates[0][4] is not None else "관찰 후보"
     timestamp = f"{closes:%m/%d %H:%M} ET · {closes.astimezone(KST):%H:%M} KST" if overseas else f"{closes:%m/%d %H:%M} KST"
     lines = [f"{headline} | {session}", timestamp]
-    for symbol, ratio, spread, price, entry_limit, stop in candidates[:5]:
+    for symbol, ratio, spread, price, entry_limit, stop, projection in candidates[:5]:
         ticker = symbol[4:] if overseas else symbol
         name = US_SYMBOL_NAMES[ticker] if overseas else KR_SYMBOL_NAMES[f"{symbol}.KS"]
         price_label = f"${price:,.2f}" if overseas else f"{price:,}원"
@@ -492,7 +531,7 @@ def format_notification(market, candidates, closes):
             limit_label = f"${limit:,.2f}" if overseas else f"{limit:,}원"
             stop_label = f"${stop:,.2f}" if overseas else f"{stop:,.0f}원"
             risk_pct = (1 - stop / float(limit)) * 100
-            target = sell_target(entry_limit, stop, overseas)
+            target, target_reason = projection
             target_label = f"${target:,.2f}" if overseas else f"{target:,.0f}원"
             target_pct = (target / float(limit) - 1) * 100
             expires = closes + timedelta(seconds=30)
@@ -501,7 +540,7 @@ def format_notification(market, candidates, closes):
                 "상한 초과·시간 경과·진입 전 손절선 이탈 시 진입 보류",
                 f"손절선 {stop_label} · 진입 상한 대비 −{risk_pct:.2f}%",
                 "손절 근거 · 돌파 5분봉 저점 아래 0.1% / 매도 가능 호가가 손절선 이하이면 청산",
-                f"목표 매도가 {target_label} · 진입 상한 대비 +{target_pct:.2f}% (손절 거리 2배)",
+                f"목표 매도가 {target_label} · 진입 상한 대비 +{target_pct:.2f}%\n목표가 근거 · {target_reason}",
                 "매도 가능 호가가 목표가에 도달하면 익절 · 신호 후 30분 경과 시 청산",
                 "확인 · 증권사 의견·시황 우호 / 수집된 일정·위험 뉴스 필터 통과",
             ])
@@ -607,12 +646,13 @@ def main():
                 print(f"{market} 장중 알림 조건 충족 없음")
 
         if symbols:
+            resistance = prior_resistance(symbols, previous_session, overseas)
             wait_for_connection_window(opens)
             approval = request_approval(app_key, app_secret)
             opens = collection_open(scheduled_open, datetime.now(local_zone))
             if opens != scheduled_open:
                 print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=15):%H:%M}")
-            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds)))
+            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds), resistance=resistance))
         else:
             print(f"{market} 직전 거래일 관찰 후보 없음")
             publish([])
