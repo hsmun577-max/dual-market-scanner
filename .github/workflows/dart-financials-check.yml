@@ -1,0 +1,40 @@
+name: DART financials check
+on:
+  push:
+    branches: [codex/dart-financials-check]
+    paths: [.github/workflows/dart-financials-check.yml]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'websockets>=14,<18'
+      - env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          from kis_intraday import dart_company_codes,dart_disclosures,dart_quarterly_financials,format_notification
+          key=os.environ["DART_API_KEY"]
+          now=datetime.now(ZoneInfo("Asia/Seoul"))
+          try:
+              corp=dart_company_codes(key)["005930"]
+              filings,_=dart_disclosures(key,corp,now)
+              result=dart_quarterly_financials(key,corp,filings)
+          except Exception as exc:
+              raise SystemExit(type(exc).__name__) from None
+          print("DART_FORMS",[(x["form"],x["filing_date"]) for x in filings])
+          print("DART_FINANCIALS",result)
+          if "revenue_yoy_pct" not in result:
+              raise SystemExit("Quarterly figures missing")
+          text=format_notification("KRX",[("005930",1.7,.1,1000,None,None,None)],now,{"005930":result})
+          print("DART_RENDER",next(l for l in text.splitlines() if l.startswith("기업실적")))
+          PY
