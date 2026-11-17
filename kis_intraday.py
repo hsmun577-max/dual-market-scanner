@@ -96,7 +96,11 @@ def price_projection(bars, entry_limit, prior_highs, overseas):
         return None
     projected = ceiling + (ceiling - floor)
     overhead = min((high for high in prior_highs if high > ceiling), default=None)
-    reason = "돌파 전 가격 범위만큼 상승" if overhead is None or overhead > projected else "최근 20거래일 상단 저항"
+    decimals = 2 if overseas else 0
+    if overhead is not None and overhead <= projected:
+        reason = f"최근 20거래일 고점 {overhead:,.{decimals}f}에서 저항 예상"
+    else:
+        reason = f"돌파 기준 {ceiling:,.{decimals}f} + 직전 가격 범위 {ceiling - floor:,.{decimals}f}"
     target = min(projected, overhead) if overhead is not None else projected
     step = Decimal("0.01" if overseas else "1")
     target = float(Decimal(str(target)).quantize(step, rounding=ROUND_DOWN))
@@ -536,7 +540,7 @@ def format_notification(market, candidates, closes):
                 "상한 초과·시간 경과·진입 전 손절선 이탈 시 진입 보류",
                 f"손절선 {stop_label} · 진입 상한 대비 −{risk_pct:.2f}%",
                 "손절 근거 · 돌파 5분봉 저점 아래 0.1% / 매도 가능 호가가 손절선 이하이면 청산",
-                f"목표 매도가 {target_label} · 진입 상한 대비 +{target_pct:.2f}%  · {target_reason}",
+                f"목표 매도가 {target_label} · 진입 상한 대비 +{target_pct:.2f}%\n목표가 근거 · {target_reason}",
                 "매도 가능 호가가 목표가에 도달하면 익절 · 신호 후 30분 경과 시 청산",
                 "확인 · 증권사 의견·시황 우호 / 수집된 일정·위험 뉴스 필터 통과",
             ])
