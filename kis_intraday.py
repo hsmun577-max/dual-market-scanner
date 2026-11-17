@@ -8,7 +8,7 @@ import re
 from html import unescape
 from time import sleep
 from datetime import datetime, time, timedelta
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -84,6 +84,14 @@ RISK_HEADLINE = re.compile(
     r"trading halt|recall|bankruptcy|guidance cut)\b|관세|수출\s*규제|제재|공습|거래정지|리콜|실적\s*하향",
     re.IGNORECASE,
 )
+
+
+def sell_target(entry_limit, stop, overseas):
+    """Set a target two risk units above the highest allowed entry."""
+    entry = Decimal(str(entry_limit))
+    risk = entry - Decimal(str(stop))
+    step = Decimal("0.01" if overseas else "1")
+    return float((entry + 2 * risk).quantize(step, rounding=ROUND_UP))
 
 
 def market_evidence(market, previous_session, available_at):
@@ -484,13 +492,17 @@ def format_notification(market, candidates, closes):
             limit_label = f"${limit:,.2f}" if overseas else f"{limit:,}원"
             stop_label = f"${stop:,.2f}" if overseas else f"{stop:,.0f}원"
             risk_pct = (1 - stop / float(limit)) * 100
+            target = sell_target(entry_limit, stop, overseas)
+            target_label = f"${target:,.2f}" if overseas else f"{target:,.0f}원"
+            target_pct = (target / float(limit) - 1) * 100
             expires = closes + timedelta(seconds=30)
             lines.extend([
                 f"매수 진입 상한 {limit_label} · {expires:%H:%M:%S}까지 ({'ET' if overseas else 'KST'})",
                 "상한 초과·시간 경과·진입 전 손절선 이탈 시 진입 보류",
                 f"손절선 {stop_label} · 진입 상한 대비 −{risk_pct:.2f}%",
                 "손절 근거 · 돌파 5분봉 저점 아래 0.1% / 매도 가능 호가가 손절선 이하이면 청산",
-                "목표 · 실제 체결가 대비 +2% / 신호 후 30분 경과 시 청산",
+                f"목표 매도가 {target_label} · 진입 상한 대비 +{target_pct:.2f}% (손절 거리 2배)",
+                "매도 가능 호가가 목표가에 도달하면 익절 · 신호 후 30분 경과 시 청산",
                 "확인 · 증권사 의견·시황 우호 / 수집된 일정·위험 뉴스 필터 통과",
             ])
         else:
