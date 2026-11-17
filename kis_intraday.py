@@ -268,10 +268,67 @@ def us_company_filings(ticker, now):
     return sorted(fallback, key=lambda item: item["filing_date"], reverse=True)[:3], []
 
 
+DART_RISK_TITLE = re.compile(r"회생절차개시신청|파산신청|횡령[ㆍ·및 ]*배임|상장폐지결정|감사의견거절|채무불이행")
+
+
+def dart_company_codes(api_key):
+    from io import BytesIO
+    from xml.etree import ElementTree
+    from zipfile import BadZipFile, ZipFile
+
+    response = requests.get("https://opendart.fss.or.kr/api/corpCode.xml",
+                            params={"crtfc_key": api_key}, timeout=10)
+    response.raise_for_status()
+    try:
+        with ZipFile(BytesIO(response.content)) as archive:
+            root = ElementTree.fromstring(archive.read("CORPCODE.xml"))
+    except (BadZipFile, KeyError, ElementTree.ParseError) as exc:
+        raise ValueError("DART corporate code file unavailable") from exc
+    return {row.findtext("stock_code", "").strip(): row.findtext("corp_code", "")
+            for row in root.findall("list") if row.findtext("stock_code", "").strip()}
+
+
+def dart_disclosures(api_key, corp_code, now):
+    response = requests.get(
+        "https://opendart.fss.or.kr/api/list.json",
+        params={"crtfc_key": api_key, "corp_code": corp_code, "bgn_de": (now - timedelta(days=14)).strftime("%Y%m%d"),
+                "end_de": now.strftime("%Y%m%d"), "page_count": "100"},
+        timeout=6,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if body.get("status") == "013":
+        return [], []
+    if body.get("status") != "000":
+        raise ValueError("DART disclosure query failed")
+    filings, risks = [], []
+    today = now.strftime("%Y%m%d")
+    for row in body.get("list", []):
+        day, receipt, title = (row.get(k, "") for k in ("rcept_dt", "rcept_no", "report_nm"))
+        if not re.fullmatch(r"\d{8}", day) or day > today or not re.fullmatch(r"\d{14}", receipt) or not title:
+            continue
+        filing = {"filing_date": f"{day[:4]}-{day[4:6]}-{day[6:]}", "form": title,
+                  "url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}", "source": "DART"}
+        filings.append(filing)
+        if day == today and DART_RISK_TITLE.search(title):
+            risks.append({**filing, "available_at": now.isoformat(), "headline": title})
+    filings.sort(key=lambda record: record["filing_date"], reverse=True)
+    return filings[:3], risks
+
+
 def company_context(market, symbols, now):
     from concurrent.futures import ThreadPoolExecutor
 
     overseas = market.startswith("US-")
+    dart_key = "" if overseas else os.getenv("DART_API_KEY", "").strip()
+    corp_codes = {}
+    if dart_key:
+        try:
+            corp_codes = dart_company_codes(dart_key)
+        except (requests.RequestException, ValueError) as exc:
+            print(f"{market} DART issuer map unavailable ({type(exc).__name__})")
+    elif not overseas:
+        print(f"{market} DART_API_KEY missing; domestic disclosures unavailable")
 
     def fetch(symbol):
         suffix = ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS"
@@ -304,6 +361,13 @@ def company_context(market, symbols, now):
                               "assessment": "risk"} for record in filing_risks)
             except Exception as exc:
                 print(f"{market} {symbol} filing index unavailable ({type(exc).__name__})")
+        elif corp_codes.get(symbol):
+            try:
+                snapshot["filings"], filing_risks = dart_disclosures(dart_key, corp_codes[symbol], now)
+                risks.extend({**record, "kind": "event", "market": market, "symbol": symbol,
+                              "assessment": "risk"} for record in filing_risks)
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                print(f"{market} {symbol} DART unavailable ({type(exc).__name__})")
         return symbol, snapshot, risks
 
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -780,6 +844,11 @@ def format_notification(market, candidates, closes, companies=None):
                 lines.append(f"공시 · {day} {filing['form']} ({scope})")
             else:
                 lines.append("SEC 공시 · 최근 자료 미확보")
+        elif company.get("filings"):
+            filing = company["filings"][0]
+            lines.append(f"DART 공시 · {filing['filing_date']} {filing['form'][:70]}")
+        else:
+            lines.append("DART 공시 · 최근 자료 미확보")
         if company.get("news"):
             article = company["news"][0]
             stamp = datetime.fromisoformat(article["available_at"]).astimezone(KST)
