@@ -55,6 +55,7 @@ jobs:
         env:
           CANDIDATE_SOURCE: ${{ matrix.source }}
           MARKET: ${{ inputs.market || (github.event.schedule == '30 21 * * 0-4' && 'NXT' || 'KRX') }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
