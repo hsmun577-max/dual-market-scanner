@@ -653,7 +653,8 @@ def main():
             parser.error("--intraday-leaders requires KRX")
         opens += timedelta(minutes=65)
     scheduled_open = opens
-    if not opens - timedelta(minutes=170 if args.intraday_leaders else 100) <= now <= opens + timedelta(minutes=14):
+    max_lead = 230 if overseas else (170 if args.intraday_leaders else 100)
+    if not opens - timedelta(minutes=max_lead) <= now <= opens + timedelta(minutes=14):
         raise SystemExit(f"수집 창을 놓쳤거나 너무 이릅니다. 현재 {now.isoformat()}, 목표 {opens.isoformat()}")
 
     keys = [os.getenv(name, "").strip() for name in (
@@ -664,6 +665,12 @@ def main():
     app_key, app_secret, token, chat_id = keys
     snapshot = Path("us-early-candidates.json")
     try:
+        if overseas:
+            context_at = scheduled_open - timedelta(minutes=25)
+            delay = (context_at - datetime.now(local_zone)).total_seconds()
+            if delay > 0:
+                print(f"{market} 프리장 자료 수집 대기: {context_at.isoformat()}", flush=True)
+                sleep(delay)
         previous_session = calendar.previous_session(today).date()
         if args.intraday_leaders:
             lookup_at = scheduled_open - timedelta(minutes=15)
