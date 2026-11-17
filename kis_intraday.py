@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 from html import unescape
@@ -162,47 +163,88 @@ def market_evidence(market, previous_session, available_at):
              "snapshot": snapshot}]
 
 
-def headline_risks(market, symbol, articles, now):
-    risks = []
+def recent_company_news(articles, now):
+    records = {}
     for item in articles:
         article = item.get("content") or {}
-        title = article.get("title") or ""
-        if not RISK_HEADLINE.search(title):
-            continue
+        title = " ".join((article.get("title") or "").split())
         try:
             published = datetime.fromisoformat(str(article.get("pubDate") or "").replace("Z", "+00:00"))
         except ValueError:
             continue
-        if published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
+        if not title or published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
             continue
-        risks.append({"kind": "event", "market": market, "symbol": symbol,
-                      "available_at": published.isoformat(), "assessment": "risk",
-                      "headline": title, "source": "Yahoo Finance ticker news"})
-    return risks
+        link = (article.get("canonicalUrl") or {}).get("url")
+        provider = (article.get("provider") or {}).get("displayName") or "Yahoo Finance"
+        records.setdefault(title.casefold(), {"headline": title, "available_at": published.isoformat(),
+                                              "source": provider, "url": link})
+    return sorted(records.values(), key=lambda item: datetime.fromisoformat(item["available_at"]), reverse=True)
 
 
-def news_evidence(market, symbols, now):
+def headline_risks(market, symbol, articles, now):
+    return [
+        {**item, "kind": "event", "market": market, "symbol": symbol, "assessment": "risk"}
+        for item in recent_company_news(articles, now) if RISK_HEADLINE.search(item["headline"])
+    ]
+
+
+def company_financials(statement, today):
+    quarters = sorted((col for col in statement.columns if col.date() < today), reverse=True)
+    for quarter in quarters:
+        if not {"Total Revenue", "Operating Income"}.issubset(statement.index):
+            return {}
+        sales, income = (float(statement.loc[key, quarter]) for key in ("Total Revenue", "Operating Income"))
+        if not math.isfinite(sales) or sales <= 0 or not math.isfinite(income):
+            continue
+        result = {"quarter": quarter.date().isoformat(), "operating_margin_pct": 100 * income / sales}
+        prior = next((col for col in quarters if 350 <= (quarter - col).days <= 380), None)
+        if prior is not None:
+            prior_sales = float(statement.loc["Total Revenue", prior])
+            if math.isfinite(prior_sales) and prior_sales > 0:
+                result["revenue_yoy_pct"] = 100 * (sales / prior_sales - 1)
+        return result
+    return {}
+
+
+def company_context(market, symbols, now):
     from concurrent.futures import ThreadPoolExecutor
 
     overseas = market.startswith("US-")
-    lookup = [(symbol, symbol[4:] if overseas else symbol + ".KS") for symbol in symbols]
-    # Korean ticker news can be listed under either exchange suffix.
-    if not overseas:
-        lookup += [(symbol, symbol + ".KQ") for symbol in symbols]
 
-    def fetch(pair):
-        symbol, ticker = pair
+    def fetch(symbol):
+        suffix = ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS"
+        ticker = yf.Ticker(symbol[4:] if overseas else symbol + suffix)
+        snapshot, risks = {}, []
         try:
-            articles = yf.Ticker(ticker).get_news(count=12)
-            return headline_risks(market, symbol, articles, now)
+            articles = ticker.get_news(count=12)
+            snapshot["news"] = recent_company_news(articles, now)[:3]
+            risks.extend(headline_risks(market, symbol, articles, now))
         except Exception as exc:
-            print(f"{market} {ticker} news unavailable ({type(exc).__name__})")
-            return []
+            print(f"{market} {symbol} news unavailable ({type(exc).__name__})")
+        try:
+            snapshot.update(company_financials(ticker.get_income_stmt(freq="quarterly"), now.date()))
+        except Exception as exc:
+            print(f"{market} {symbol} financials unavailable ({type(exc).__name__})")
+        try:
+            dates = sorted(str(day)[:10] for day in (ticker.calendar or {}).get("Earnings Date", []))
+            snapshot["earnings_dates"] = dates
+            if now.date().isoformat() in dates:
+                risks.append({"kind": "event", "market": market, "symbol": symbol,
+                              "available_at": now.isoformat(), "assessment": "risk",
+                              "source": "Yahoo Finance earnings calendar",
+                              "headline": "당일 실적 발표 예정"})
+        except Exception as exc:
+            print(f"{market} {symbol} earnings calendar unavailable ({type(exc).__name__})")
+        return symbol, snapshot, risks
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        evidence = [item for records in pool.map(fetch, lookup) for item in records]
-    print(f"{market} ticker news risk records: {len(evidence)}")
-    return evidence
+        results = list(pool.map(fetch, symbols))
+    snapshots = {symbol: snapshot for symbol, snapshot, _ in results}
+    for symbol, snapshot, risks in results:
+        print(f"{market} {symbol} company context {json.dumps(snapshot, ensure_ascii=False)}", flush=True)
+        for risk in risks:
+            print(f"{market} {symbol} risk evidence {json.dumps(risk, ensure_ascii=False)}", flush=True)
+    return snapshots, [risk for _, _, risks in results for risk in risks]
 
 
 def domestic_research(market, symbols, now):
@@ -617,7 +659,8 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
     await notification
 
 
-def format_notification(market, candidates, closes):
+def format_notification(market, candidates, closes, companies=None):
+    companies = companies or {}
     overseas = market.startswith("US-")
     session = {"US-early": "미국 프리장", "US-late": "미국 프리장 갱신",
                "NXT": "국내 NXT 프리장", "KRX": "국내 KRX 정규장"}[market]
@@ -652,11 +695,25 @@ def format_notification(market, candidates, closes):
         else:
             lines.append("매수 진입가 미제시 · 관찰만")
         lines.append(f"근거 · 5분봉 고점 돌파 / 거래량 {ratio:.2f}배 / 호가 간격 {spread:.2f}%")
+        company = companies.get(symbol, {})
+        if "operating_margin_pct" in company:
+            financials = f"기업실적 · {company['quarter']} 분기 영업이익률 {company['operating_margin_pct']:.1f}%"
+            if "revenue_yoy_pct" in company:
+                financials += f" / 매출 전년 동기 대비 {company['revenue_yoy_pct']:+.1f}%"
+            lines.append(financials)
+        else:
+            lines.append("기업실적 · 자료 미확보")
+        if company.get("news"):
+            article = company["news"][0]
+            stamp = datetime.fromisoformat(article["available_at"]).astimezone(KST)
+            lines.append(f"최근 기사 · {stamp:%m/%d %H:%M} KST {article['source']} / {article['headline'][:90]}")
+        else:
+            lines.append("최근 기사 · 연결된 24시간 기사 미확보")
     return "\n".join(lines)
 
 
-def notify(market, candidates, closes, token, chat_id):
-    message = format_notification(market, candidates, closes)
+def notify(market, candidates, closes, token, chat_id, companies=None):
+    message = format_notification(market, candidates, closes, companies)
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
@@ -757,11 +814,13 @@ def main():
             symbols = daily_candidates(previous_session)
         if symbols:
             opens = collection_open(opens, datetime.now(local_zone))
+        companies = {}
         if symbols:
             observed_market = market_evidence(market, previous_session, datetime.now(local_zone))
             evidence.extend(observed_market)
             evidence.extend(research_evidence(market, symbols, datetime.now(local_zone)))
-            evidence.extend(news_evidence(market, symbols, datetime.now(local_zone)))
+            companies, company_risks = company_context(market, symbols, datetime.now(local_zone))
+            evidence.extend(company_risks)
             evidence.extend(scheduled_event_evidence(
                 market, datetime.now(local_zone), opens + timedelta(minutes=15)))
             if args.context or evidence:
@@ -776,7 +835,7 @@ def main():
             elif market == "US-late":
                 candidates = filter_us_updates(candidates, today, snapshot)
             if candidates:
-                notify(market, candidates, opens + timedelta(minutes=15), token, chat_id)
+                notify(market, candidates, opens + timedelta(minutes=15), token, chat_id, companies)
             else:
                 print(f"{market} 장중 알림 조건 충족 없음")
 
