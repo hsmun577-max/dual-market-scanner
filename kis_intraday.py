@@ -288,12 +288,51 @@ def dart_company_codes(api_key):
             for row in root.findall("list") if row.findtext("stock_code", "").strip()}
 
 
-def supply_contract_metrics(document):
-    from xml.etree import ElementTree
+class DartTableParser:
+    """Read disclosure table cells even when the source has unmatched XML tags."""
 
+    def rows(self, document):
+        from html.parser import HTMLParser
+
+        class Parser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.rows = []
+                self.row = None
+                self.cell = None
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "tr":
+                    self.row = []
+                    self.cell = None
+                elif tag in {"td", "th", "tu"} and self.row is not None:
+                    self.cell = []
+                    self.row.append(self.cell)
+
+            def handle_endtag(self, tag):
+                if tag in {"td", "th", "tu"}:
+                    self.cell = None
+                elif tag == "tr" and self.row is not None:
+                    self.rows.append(["".join(cell).strip() for cell in self.row])
+                    self.row = self.cell = None
+
+            def handle_data(self, data):
+                if self.cell is not None:
+                    self.cell.append(data)
+
+        try:
+            decoded = document.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            decoded = document.decode("cp949", errors="replace")
+        parser = Parser()
+        parser.feed(decoded)
+        parser.close()
+        return parser.rows
+
+
+def supply_contract_metrics(document):
     metrics = {}
-    for row in ElementTree.fromstring(document).iter("TR"):
-        cells = ["".join(cell.itertext()).strip() for cell in row if cell.tag in {"TD", "TH", "TU"}]
+    for cells in DartTableParser().rows(document):
         for label, value in zip(cells, cells[1:]):
             label = re.sub(r"\s+", "", label)
             value = value.replace(",", "").strip()
