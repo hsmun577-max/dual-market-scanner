@@ -206,6 +206,68 @@ def company_financials(statement, today):
     return {}
 
 
+SEC_EVENT_ITEMS = {
+    "1.03": "파산 또는 법정관리",
+    "2.04": "채무 조기상환 또는 채무불이행 관련 공시",
+    "3.01": "상장 기준 미충족 또는 상장폐지 관련 공시",
+    "4.02": "기존 재무제표 신뢰 불가 공시",
+}
+
+
+def sec_submission_context(recent, cik, now):
+    filings, risks = [], []
+    for form, accepted, accession, document, items in zip(
+        *(recent[key] for key in ("form", "acceptanceDateTime", "accessionNumber", "primaryDocument", "items"))
+    ):
+        try:
+            stamp = datetime.fromisoformat(accepted.replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            continue
+        if stamp.utcoffset() is None or not now - timedelta(days=30) <= stamp < now:
+            continue
+        if form not in {"8-K", "8-K/A", "10-Q", "10-K", "6-K", "20-F"}:
+            continue
+        url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/{document}"
+        item_codes = str(items or "").split(",")
+        item_codes = [code.strip() for code in item_codes]
+        listing = {"form": form, "accepted_at": stamp.isoformat(), "url": url, "items": item_codes,
+                   "source": "SEC EDGAR"}
+        filings.append(listing)
+        if form in {"8-K", "8-K/A"} and now - stamp <= timedelta(hours=24):
+            risks.extend({**listing, "available_at": stamp.isoformat(), "headline": SEC_EVENT_ITEMS[code]}
+                         for code in item_codes if code in SEC_EVENT_ITEMS)
+    filings.sort(key=lambda filing: datetime.fromisoformat(filing["accepted_at"]), reverse=True)
+    return filings[:3], risks
+
+
+def us_company_filings(ticker, now):
+    # Resolve the issuer's CIK from the ticker-specific filing index.
+    index = ticker.get_sec_filings() or []
+    urls = [str(item.get("edgarUrl") or "") for item in index]
+    ciks = [match[1] for url in urls if (match := re.search(r"_(\d{1,10})$", url))]
+    if ciks:
+        cik = ciks[0]
+        try:
+            response = requests.get(
+                f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json",
+                headers={"User-Agent": "Dual Market Scanner https://github.com/hsmun577-max/dual-market-scanner"},
+                timeout=5,
+            )
+            response.raise_for_status()
+            return sec_submission_context(response.json()["filings"]["recent"], cik, now)
+        except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
+            print(f"SEC submission lookup unavailable ({type(exc).__name__})")
+    # Date-only index entries are informational and cannot block an intraday decision.
+    fallback = []
+    for item in index:
+        day = str(item.get("date") or "")
+        if (now - timedelta(days=30)).date().isoformat() <= day < now.date().isoformat():
+            if item.get("type") in {"8-K", "8-K/A", "10-Q", "10-K", "6-K", "20-F"} and item.get("edgarUrl"):
+                fallback.append({"form": item["type"], "filing_date": day,
+                                 "url": item["edgarUrl"], "source": "Yahoo Finance SEC index"})
+    return sorted(fallback, key=lambda item: item["filing_date"], reverse=True)[:3], []
+
+
 def company_context(market, symbols, now):
     from concurrent.futures import ThreadPoolExecutor
 
@@ -235,6 +297,13 @@ def company_context(market, symbols, now):
                               "headline": "당일 실적 발표 예정"})
         except Exception as exc:
             print(f"{market} {symbol} earnings calendar unavailable ({type(exc).__name__})")
+        if overseas:
+            try:
+                snapshot["filings"], filing_risks = us_company_filings(ticker, now)
+                risks.extend({**record, "kind": "event", "market": market, "symbol": symbol,
+                              "assessment": "risk"} for record in filing_risks)
+            except Exception as exc:
+                print(f"{market} {symbol} filing index unavailable ({type(exc).__name__})")
         return symbol, snapshot, risks
 
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -703,6 +772,14 @@ def format_notification(market, candidates, closes, companies=None):
             lines.append(financials)
         else:
             lines.append("기업실적 · 자료 미확보")
+        if overseas:
+            if company.get("filings"):
+                filing = company["filings"][0]
+                day = (filing.get("accepted_at") or filing["filing_date"])[:10]
+                scope = "SEC 접수 확인" if filing.get("accepted_at") else "공시 목록 · 접수 시각 미확인"
+                lines.append(f"공시 · {day} {filing['form']} ({scope})")
+            else:
+                lines.append("SEC 공시 · 최근 자료 미확보")
         if company.get("news"):
             article = company["news"][0]
             stamp = datetime.fromisoformat(article["available_at"]).astimezone(KST)
