@@ -1,0 +1,75 @@
+name: Company ranking replay
+on:
+  push:
+    branches: [codex/company-ranking-replay-202611]
+    paths: [.github/workflows/company-ranking-replay.yml]
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'websockets>=14,<18'
+      - env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python -u - <<'PY'
+          import json, os, requests, re, statistics
+          from datetime import date, timedelta
+          import yfinance as yf
+          from kis_intraday import dart_company_codes,dart_quarterly_financials
+
+          pools = json.loads(r'''{"2026-11-11":[{"symbol":"100030.KQ","name":"인지소프트"},{"symbol":"034230.KS","name":"파라다이스"},{"symbol":"050760.KQ","name":"에스폴리텍"},{"symbol":"481050.KS","name":"KODEX CD1년금리플러스액티브(합성)"},{"symbol":"423160.KS","name":"KODEX KOFR금리액티브(합성)"},{"symbol":"022100.KS","name":"포스코DX"},{"symbol":"068760.KQ","name":"셀트리온제약"},{"symbol":"455890.KS","name":"RISE 머니마켓액티브"},{"symbol":"196230.KS","name":"RISE 단기통안채"},{"symbol":"053030.KQ","name":"바이넥스"}],"2026-11-12":[{"symbol":"094850.KQ","name":"참좋은여행"},{"symbol":"363280.KS","name":"티와이홀딩스"},{"symbol":"035900.KQ","name":"JYP Ent."},{"symbol":"488770.KS","name":"KODEX 머니마켓액티브"},{"symbol":"036460.KS","name":"한국가스공사"},{"symbol":"423160.KS","name":"KODEX KOFR금리액티브(합성)"},{"symbol":"006120.KS","name":"SK디스커버리"},{"symbol":"058860.KS","name":"KTis"},{"symbol":"003850.KS","name":"보령"},{"symbol":"419120.KQ","name":"산돌"}]}''')
+          key=os.environ["DART_API_KEY"]
+          try:
+              codes=dart_company_codes(key)
+          except Exception as exc:
+              raise SystemExit(f"DART issuer mapping failed: {type(exc).__name__}") from None
+          result=[]
+          for day, entries in pools.items():
+              cutoff=date.fromisoformat(day)
+              for rank, row in enumerate(entries):
+                  symbol=row["symbol"]
+                  corp=codes.get(symbol.split(".")[0])
+                  financials={}
+                  if corp:
+                      try:
+                          res=requests.get("https://opendart.fss.or.kr/api/list.json",params={
+                              "crtfc_key":key,"corp_code":corp,"bgn_de":(cutoff-timedelta(days=200)).strftime("%Y%m%d"),
+                              "end_de":(cutoff-timedelta(days=1)).strftime("%Y%m%d"),"pblntf_ty":"A","page_count":100},timeout=8)
+                          res.raise_for_status()
+                          body=res.json()
+                          filings=[dict(form=x["report_nm"],url="https://dart.fss.or.kr/dsaf001/main.do?rcpNo="+x["rcept_no"])
+                                   for x in body.get("list",[]) if x.get("rcept_dt","")<cutoff.strftime("%Y%m%d")]
+                          financials=dart_quarterly_financials(key,corp,filings)
+                      except Exception as exc:
+                          print("DART_MISSING",symbol,type(exc).__name__)
+                  margin,growth=financials.get("operating_margin_pct"),financials.get("revenue_yoy_pct")
+                  grade=0 if margin is None or growth is None else (1 if margin>0 and growth>0 else -1 if margin<0 or growth<0 else 0)
+                  row.update(rank=rank,financial_grade=grade,financials=financials)
+              technical=entries[:5]
+              informed=sorted(entries,key=lambda x:(-x["financial_grade"],x["rank"]))[:5]
+              print("COVERAGE",day,sum("revenue_yoy_pct" in x["financials"] for x in entries),len(entries),flush=True)
+              symbols=sorted({x["symbol"] for x in technical+informed})
+              next_day=cutoff+timedelta(days=1)
+              panel=yf.download(symbols,start=next_day.isoformat(),end=(next_day+timedelta(days=1)).isoformat(),
+                                auto_adjust=False,group_by="ticker",threads=False,progress=False,timeout=10)
+              for strategy, rows in [("technical",technical),("financial",informed)]:
+                  for row in rows:
+                      prices=panel[row["symbol"]].dropna(subset=["Open","Close"])
+                      net=None
+                      if len(prices) and prices.Open.iloc[0]>0:
+                          net=100*(prices.Close.iloc[0]*.999/(prices.Open.iloc[0]*1.001)-1)
+                      entry=dict(date=day,strategy=strategy,symbol=row["symbol"],name=row["name"],grade=row["financial_grade"],net_pct=net)
+                      result.append(entry)
+                      print("TRADE",json.dumps(entry,ensure_ascii=False),flush=True)
+          for strategy in ("technical","financial"):
+              returns=[x["net_pct"] for x in result if x["strategy"]==strategy and x["net_pct"] is not None]
+              print("SUMMARY",strategy,len(returns),sum(x>0 for x in returns),statistics.mean(returns) if returns else None,
+                    min(returns) if returns else None)
+          PY
