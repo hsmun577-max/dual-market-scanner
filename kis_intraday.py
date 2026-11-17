@@ -302,6 +302,70 @@ def scheduled_event_evidence(market, now, decision_at):
              "available_at": now.isoformat(), "assessment": state}]
 
 
+def has_premarket_liquidity(rows, end):
+    """Require trades in all three completed five-minute periods."""
+    first = end - timedelta(minutes=15)
+    buckets = set()
+    seen = set()
+    traded_value = 0.0
+    for row in rows:
+        try:
+            stamp = datetime.strptime(row["xymd"] + row["xhms"], "%Y%m%d%H%M%S").replace(tzinfo=end.tzinfo)
+            volume = int(row["evol"])
+            price = float(row["last"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if first <= stamp < end and stamp not in seen and volume > 0 and 1 <= price < float("inf"):
+            seen.add(stamp)
+            traded_value += price * volume
+            buckets.add(int((stamp - first).total_seconds()) // 300)
+    return len(buckets) == 3 and traded_value >= 100_000
+
+
+def us_premarket_leaders(app_key, app_secret, now):
+    base = "https://openapi.koreainvestment.com:9443"
+    try:
+        auth = requests.post(base + "/oauth2/tokenP", timeout=5, json={
+            "grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret,
+        })
+        auth.raise_for_status()
+        headers = {"authorization": "Bearer " + auth.json()["access_token"],
+                   "appkey": app_key, "appsecret": app_secret, "custtype": "P"}
+        rank = requests.get(base + "/uapi/overseas-stock/v1/ranking/volume-surge",
+                            headers=dict(headers, tr_id="HHDFS76270000"),
+                            params={"EXCD": "NAS", "MINX": "3", "VOL_RANG": "2", "AUTH": "", "KEYB": ""},
+                            timeout=5)
+        rank.raise_for_status()
+        payload = rank.json()
+        if payload.get("rt_cd") != "0":
+            print("US-late premarket ranking unavailable:", payload.get("msg_cd"))
+            return []
+        tickers = list(dict.fromkeys(str(row.get("symb") or "") for row in payload.get("output2") or []))
+    except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
+        print(f"US-late premarket ranking unavailable ({type(exc).__name__})")
+        return []
+
+    end = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+    leaders = []
+    for ticker in [t for t in tickers if re.fullmatch(r"[A-Z]{1,6}", t) and t not in US_SYMBOLS][:12]:
+        try:
+            chart = requests.get(base + "/uapi/overseas-price/v1/quotations/inquire-time-itemchartprice",
+                                 headers=dict(headers, tr_id="HHDFS76950200"),
+                                 params={"AUTH": "", "EXCD": "NAS", "SYMB": ticker, "NMIN": "1",
+                                         "PINC": "0", "NEXT": "", "NREC": "30", "FILL": "", "KEYB": ""},
+                                 timeout=5)
+            chart.raise_for_status()
+            body = chart.json()
+            if body.get("rt_cd") == "0" and has_premarket_liquidity(body.get("output2") or [], end):
+                leaders.append("DNAS" + ticker)
+                if len(leaders) == 4:
+                    break
+        except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
+            print(f"US-late {ticker} liquidity check unavailable ({type(exc).__name__})")
+    print(f"US-late 신규 프리장 감시: {', '.join(leaders) or '없음'}", flush=True)
+    return leaders
+
+
 def korean_intraday_leaders(market, app_key, app_secret):
     base = "https://openapi.koreainvestment.com:9443"
     auth = requests.post(base + "/oauth2/tokenP", timeout=8, json={
@@ -562,7 +626,7 @@ def format_notification(market, candidates, closes):
     lines = [f"{headline} | {session}", timestamp]
     for symbol, ratio, spread, price, entry_limit, stop, projection in candidates[:5]:
         ticker = symbol[4:] if overseas else symbol
-        name = US_SYMBOL_NAMES[ticker] if overseas else KR_SYMBOL_NAMES[f"{symbol}.KS"]
+        name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else KR_SYMBOL_NAMES[f"{symbol}.KS"]
         price_label = f"${price:,.2f}" if overseas else f"{price:,}원"
         lines.extend(["", f"{name} ({ticker}) · 스캔 기준가 {price_label} (5분봉 종가)"])
         if entry_limit is not None:
@@ -686,6 +750,8 @@ def main():
         elif overseas:
             # The prior daily screen must not prevent premarket observation.
             symbols = [f"DNAS{ticker}" for ticker in US_SYMBOLS]
+            if market == "US-late":
+                symbols.extend(us_premarket_leaders(app_key, app_secret, datetime.now(local_zone)))
             print(f"{market} 프리장 체결·호가 감시 {len(symbols)}종목 (일봉 통과 조건 없음)")
         else:
             symbols = daily_candidates(previous_session)
