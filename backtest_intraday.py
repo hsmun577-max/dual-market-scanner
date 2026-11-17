@@ -11,7 +11,7 @@ import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from kis_intraday import breakout_v2, candidate_metrics, protective_stop
+from kis_intraday import breakout_v2, candidate_metrics, protective_stop, sell_target
 from signal_context import context_status
 
 
@@ -71,13 +71,14 @@ def replay(row, fee_bps, *, strict=False, use_support_stop=False):
     if entry_index is None:
         return {"status": "missing_entry_quote"}
     entry = after[entry_index][1]["ask"]
+    target = sell_target(limit, stop, row["market"].startswith("US-")) if stop is not None else entry * 1.02
     stop = entry * 0.99 if stop is None else stop
 
     for at, quote in after[entry_index + 1:]:
         if at > exit_at + timedelta(seconds=30):
             break
         bid = quote["bid"]
-        if at >= exit_at or bid <= stop or bid >= entry * 1.02:
+        if at >= exit_at or bid <= stop or bid >= target:
             fee = fee_bps / 10_000
             return {"status": "evaluated", "net_return": bid * (1 - fee) / (entry * (1 + fee)) - 1}
     return {"status": "missing_exit_quote"}
