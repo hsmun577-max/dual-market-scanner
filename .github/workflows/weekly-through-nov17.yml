@@ -33,7 +33,7 @@ jobs:
           START, END, EXIT = "2026-11-09", "2026-11-13", "2026-11-17"
           def gh(*args):
               return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
-          runs = json.loads(gh("run", "list", "--workflow", "scanner.yml", "--branch", "main",
+          runs = json.loads(gh("run", "list", "--workflow", "scanner.yml",
                                "--status", "success", "--limit", "100", "--json", "databaseId,createdAt"))
           snapshots = {}
           issues = []
