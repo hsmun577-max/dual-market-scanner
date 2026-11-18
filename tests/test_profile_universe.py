@@ -9,6 +9,13 @@ AT=datetime.now(timezone.utc)
 
 
 class ProfileIndexTests(unittest.TestCase):
+    def test_empty_provider_responses_are_not_unsupported_stocks(self):
+        entries=[(str(i),str(i)) for i in range(20)]
+        profiles,status=refresh(entries,{},lambda symbol:{},AT)
+        self.assertEqual(len(status),10)
+        self.assertTrue(all(value=='provider_data_unavailable' for value in status.values()))
+        self.assertEqual(profiles,{})
+
     def test_bootstrap_korean_symbol_uses_official_exchange_suffix(self):
         with TemporaryDirectory() as folder:
             source=Path(folder)/'sample.json'; output=Path(folder)/'merged.json'

@@ -61,4 +61,4 @@ jobs:
           path: completed-pipeline-audit.json
           if-no-files-found: ignore
 
-# Validate canonical exchange symbols in verified bootstrap profiles.
+# Verify empty-provider data classification and bootstrap normalization.

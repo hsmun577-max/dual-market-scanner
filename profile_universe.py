@@ -25,6 +25,10 @@ def refresh(entries, cached, fetch, at, max_age_days=30, checkpoint=None, deadli
             status[symbol]='cached'; continue
         try:
             info=fetch(symbol)
+            if not isinstance(info,dict) or not info.get('quoteType'):
+                status[symbol]='provider_data_unavailable'; failures+=1
+                if failures>=10: break
+                continue
             failures=0
             if info.get('quoteType') != 'EQUITY':
                 status[symbol]='unsupported_instrument'; continue
