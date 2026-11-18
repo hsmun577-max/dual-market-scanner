@@ -4,7 +4,7 @@ import re
 
 PRODUCTS = {
  'screen_content': ('film','movie','drama','animation','broadcasting','영화','드라마','애니메이션','방송'),
- 'games': ('video game','online game','gaming','온라인게임','게임'),
+ 'games': ('video game','online game','온라인게임','게임'),
  'recorded_music': ('recorded music','music publishing','music production','music','음반','음원'),
  'live_entertainment': ('concert','live entertainment','live performance','콘서트','공연'),
  'semiconductors': ('semiconductor','반도체'),
@@ -42,6 +42,12 @@ def contains(text, words):
 def profile(company, at):
     text=' '.join(str(company.get(k) or '') for k in ('business_description','industry'))
     products={key for key,words in PRODUCTS.items() if contains(text,words)}
+    # A product mentioned as a customer's use is not the issuer's content business.
+    industry=str(company.get('industry') or '')
+    sector=company.get('sector')
+    if sector and industry and sector!='Communication Services' and not contains(industry,
+            ('entertainment','electronic gaming','broadcasting','media','publishing')):
+        products -= {'screen_content','games','recorded_music','live_entertainment'}
     countries={key for key,words in COUNTRIES.items() if contains(text,words)}
     home=company.get('country')
     if home: countries.add(home)
@@ -131,7 +137,8 @@ def discover(registry, events, at, limit=12):
         positive=[link for link in result['links'] if link['direction']>0]
         if positive: ranked.append((symbol,len({(l['event_id'],p) for l in positive for p in l['matched_products']})))
         elif result.get('expectation_links'): ranked.append((symbol,.1))
-    return [symbol for symbol,_ in sorted(ranked,key=lambda item:(-item[1],item[0]))[:limit]]
+    ordered=[symbol for symbol,_ in sorted(ranked,key=lambda item:(-item[1],item[0]))]
+    return ordered if limit is None else ordered[:limit]
 
 
 def load_profiles(path='reports/company-profiles.json'):
@@ -148,7 +155,7 @@ def save_profiles(companies, path='reports/company-profiles.json'):
     from pathlib import Path
     registry=load_profiles(path)
     keys=('company_name','business_description','industry','country','profile_available_at',
-          'profile_source','business_relationships','available_at','checked_at','source_symbol','exchange','display_name')
+          'profile_source','business_relationships','available_at','checked_at','source_symbol','exchange','display_name','sector')
     for symbol,company in companies.items():
         if company.get('business_description'):
             target=company.get('source_symbol') or symbol
@@ -168,7 +175,8 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=24):
                                       liquidity_rejection_reason,average_turnover)
     eligible=[row for row in pool if liquidity_rejection_reason(row,market) is None]
     indexed={row['symbol']:row for row in eligible}
-    event_rows=[indexed[s] for s in event_symbols if s in indexed][:min(8,max(1,limit//3))]
+    event_rows=sorted((indexed[s] for s in set(event_symbols) if s in indexed),
+                      key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:min(8,max(1,limit//3))]
     trend=rank_market_candidates(eligible,market,limit=5)
     recovery=rank_recovery_candidates(eligible,market,limit=5)
     neutral=sorted(eligible,key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:8]

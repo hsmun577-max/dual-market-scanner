@@ -16,6 +16,11 @@ def records(exchange,source):
 
 
 class EventWatchTests(unittest.TestCase):
+    def test_event_watch_uses_turnover_priority_before_feed_capacity_limit(self):
+        first,event=records('NMS','AAA'); last,_=records('NMS','ZZZ')
+        self.assertEqual(event_watch_symbols('US-late',AT,{'AAA':first,'ZZZ':last},[event],limit=1,
+                                            turnover={'AAA':10.,'ZZZ':100.}),['DNASZZZ'])
+
     def test_first_seen_during_live_fetch_is_eligible_after_fetch(self):
         company,event=records('NMS','NEW')
         event['available_at']=(AT+timedelta(minutes=1)).isoformat()

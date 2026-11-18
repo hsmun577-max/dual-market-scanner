@@ -1495,7 +1495,7 @@ def main():
 
 
 
-def event_watch_symbols(market, at, registry=None, events=None, limit=6):
+def event_watch_symbols(market, at, registry=None, events=None, limit=6, turnover=None):
     """Translate generic event candidates into supported feed identifiers."""
     from economic_graph import discover,load_profiles
     from event_impact_analysis import world_events
@@ -1505,9 +1505,20 @@ def event_watch_symbols(market, at, registry=None, events=None, limit=6):
         # Discovery runs after retrieval; do not exclude events first observed during it.
         at=datetime.now(at.tzinfo)
     selected=[]
+    if turnover is None:
+        turnover={}
+        try:
+            from candidate_selection import average_turnover
+            report=json.loads(Path('opening-scan/latest.json').read_text(encoding='utf-8-sig'))
+            for row in report['results']:
+                turnover[row['symbol']]=average_turnover(row['indicators'])
+        except (OSError,ValueError,KeyError,TypeError):
+            pass
     prefixes={'NMS':'DNAS','NGM':'DNAS','NCM':'DNAS','NAS':'DNAS',
               'NYQ':'DNYS','NYS':'DNYS','ASE':'DAMS','AMS':'DAMS'}
-    for key in discover(registry,events,at,limit=100):
+    candidates=discover(registry,events,at,limit=None)
+    candidates.sort(key=lambda key:(-turnover.get(registry[key].get('source_symbol') or key,0),key))
+    for key in candidates:
         company=registry[key]
         symbol=company.get('source_symbol') or key
         if market.startswith('US-'):

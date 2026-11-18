@@ -523,7 +523,7 @@ def prepare_selected_analysis(report):
     checked = datetime.now(timezone.utc)
     shared_events, event_coverage = world_events(checked)
     registry = load_profiles()
-    linked = discover(registry, shared_events, datetime.now(timezone.utc))
+    linked = discover(registry, shared_events, datetime.now(timezone.utc),limit=None)
     report["event_discovery"] = {"profile_count":len(registry),"linked_symbols":linked,
                                  "feed_coverage":event_coverage,"universe_wide_news_coverage":False}
     for market in ("KR", "US"):

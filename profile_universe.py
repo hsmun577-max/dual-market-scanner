@@ -130,8 +130,27 @@ def restore_index():
                                  '--dir',str(folder)],capture_output=True)
             files=list(folder.rglob('company-profiles.json'))
             if done.returncode==0 and files:
-                return merge_profiles(files)
+                count=merge_profiles(files)
+                restore_prices()
+                return count
     return 0
+
+
+def restore_prices():
+    """Use the last completed full scan for prioritization, never as a live quote."""
+    import subprocess
+    import shutil
+    result=subprocess.run(['gh','run','list','--workflow','scanner.yml','--branch','main',
+        '--status','success','--limit','3','--json','databaseId'],capture_output=True,text=True)
+    if result.returncode: return
+    for row in json.loads(result.stdout):
+        folder=Path('price-download')/str(row['databaseId'])
+        done=subprocess.run(['gh','run','download',str(row['databaseId']),'--name','scan-results',
+                             '--dir',str(folder)],capture_output=True)
+        files=list(folder.rglob('latest.json'))
+        if done.returncode==0 and files:
+            target=Path('opening-scan/latest.json'); target.parent.mkdir(exist_ok=True)
+            shutil.copyfile(files[0],target); return
 
 
 if __name__=='__main__': main()

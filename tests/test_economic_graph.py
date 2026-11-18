@@ -25,6 +25,16 @@ def stock(symbol):
 
 
 class EconomicGraphTests(unittest.TestCase):
+    def test_customer_use_of_games_does_not_make_a_hardware_issuer_a_game_publisher(self):
+        hardware=company('Manufactures video game peripherals and television broadcasting receivers')
+        hardware.update(sector='Technology',industry='Computer Hardware')
+        self.assertEqual(connect(hardware,frames([event()],AT),AT)['links'],[])
+
+    def test_event_research_capacity_uses_liquidity_not_ticker_alphabet(self):
+        small=stock('AAA.KS'); large=stock('ZZZ.KS')
+        large['indicators']['volume']=small['indicators']['volume']*10
+        self.assertEqual(select_analysis_candidates([small,large],'KR',['AAA.KS','ZZZ.KS'],limit=1),[large])
+
     def test_market_presence_is_not_eligibility_for_another_countrys_agreement(self):
         foreign=company('Produces online games in China and the United States')
         foreign['country']='United States'
