@@ -9,7 +9,7 @@ permissions:
   actions: read
 concurrency:
   group: verified-live-signal
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   verify-send:
     runs-on: ubuntu-latest

@@ -8,6 +8,21 @@ from kis_intraday import format_notification, KST
 
 
 class SectorAndRecoveryTests(unittest.TestCase):
+    def test_relative_leaders_are_visible_below_absolute_threshold(self):
+        rows=[dict(market='KR',name='반도체',early=False,active=False,starting=False,
+                   source='daily_vs_20d',data_date='2026-11-17',turnover_ratio=1.1,
+                   return_pct=1.,market_excess_pct=.5)]
+        text='\n'.join(format_sector_header(rows,'KR'))
+        self.assertIn('반도체',text)
+        self.assertIn('상대 강세',text)
+        self.assertIn('실시간 아님',text)
+        self.assertNotIn('없음',text)
+
+    def test_missing_sector_data_is_never_no_money_flow(self):
+        text='\n'.join(format_sector_header([],'KR'))
+        self.assertIn('데이터 확인 실패',text)
+        self.assertNotIn('없음',text)
+
     def frames(self):
         starts=[stamp for day in pd.bdate_range('2026-11-09','2026-11-18')
                 for stamp in pd.date_range(str(day.date())+' 09:00',periods=12,freq='5min',tz='Asia/Seoul')]
