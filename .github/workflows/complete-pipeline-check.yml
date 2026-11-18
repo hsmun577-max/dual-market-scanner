@@ -46,17 +46,17 @@ jobs:
           profiles=load_profiles()
           events,coverage=world_events(datetime.now(timezone.utc))
           linked=discover(profiles,events,datetime.now(timezone.utc),limit=None)
-from economic_graph import select_analysis_candidates
-scan_path=Path("opening-scan/latest.json")
-priority={}
-if profiles:
-    if not scan_path.is_file(): raise RuntimeError("Latest price scan not restored for priority validation")
-    report=json.loads(scan_path.read_text(encoding="utf-8-sig"))
-    for market in ("KR","US"):
-        pool=[row for row in report["results"] if row["market"]==market]
-        selected=select_analysis_candidates(pool,market,linked)
-        priority[market]=[{"symbol":row["symbol"],"name":row.get("name")}
-                          for row in selected if row["symbol"] in linked]
+          from economic_graph import select_analysis_candidates
+          scan_path=Path("opening-scan/latest.json")
+          priority={}
+          if profiles:
+              if not scan_path.is_file(): raise RuntimeError("Latest price scan not restored for priority validation")
+              report=json.loads(scan_path.read_text(encoding="utf-8-sig"))
+              for market in ("KR","US"):
+                  pool=[row for row in report["results"] if row["market"]==market]
+                  selected=select_analysis_candidates(pool,market,linked)
+                  priority[market]=[{"symbol":row["symbol"],"name":row.get("name")}
+                                    for row in selected if row["symbol"] in linked]
           coverage_files=list(Path("profile-download").rglob("profile-coverage.json"))
           index_coverage=json.loads(coverage_files[0].read_text()) if coverage_files else {"status":"initial_full_collection_not_available"}
           result={"profile_count":count,"event_candidate_count":len(linked),"analysis_event_priority":priority,"feed_coverage":coverage,"index_coverage":index_coverage,
