@@ -59,12 +59,12 @@ jobs:
                       next_day = calendar.next_session(day)
                       opening = calendar.session_open(next_day).to_pydatetime()
                       closing = calendar.session_close(day).to_pydatetime()
-                      if not closing <= generated < opening:
+                      if not closing <= generated < opening or generated.astimezone(zone).date().isoformat() > END:
                           continue
                       key = (market, day)
                       previous = snapshots.get(key)
                       day_rows = [row for row in rows if row["indicators"]["data_date"] == day]
-                      quality = (bool(report.get("full_market_scan")), len(day_rows), -generated.timestamp())
+                      quality = (bool(report.get("full_market_scan")), -generated.timestamp(), len(day_rows))
                       if previous and previous["quality"] >= quality:
                           continue
                       snapshots[key] = {"run":run["databaseId"],"generated_at":generated.isoformat(),
