@@ -1,5 +1,4 @@
 name: Complete pipeline verification
-# Verify the bootstrap fallback while the first full index is being built.
 on:
   workflow_dispatch:
   push:
@@ -61,3 +60,5 @@ jobs:
           name: completed-pipeline-audit
           path: completed-pipeline-audit.json
           if-no-files-found: ignore
+
+# Validate canonical exchange symbols in verified bootstrap profiles.

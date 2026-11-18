@@ -3,11 +3,21 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
 import unittest
+from unittest.mock import patch
 from profile_universe import refresh,merge_profiles
 AT=datetime.now(timezone.utc)
 
 
 class ProfileIndexTests(unittest.TestCase):
+    def test_bootstrap_korean_symbol_uses_official_exchange_suffix(self):
+        with TemporaryDirectory() as folder:
+            source=Path(folder)/'sample.json'; output=Path(folder)/'merged.json'
+            source.write_text(json.dumps({'123456':dict(profile_available_at=AT.isoformat())}))
+            with patch('profile_universe.load_universe',return_value={'KR':{'123456.KQ':'회사'}}):
+                merge_profiles([source],str(output))
+            result=json.loads(output.read_text())
+            self.assertEqual(result['123456.KQ']['source_symbol'],'123456.KQ')
+
     def test_fresh_profile_is_reused_without_fetch(self):
         old=dict(business_description='existing description',profile_available_at=AT.isoformat())
         def fetch(symbol): raise AssertionError('network must not be called')

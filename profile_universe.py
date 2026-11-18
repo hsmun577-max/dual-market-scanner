@@ -93,11 +93,18 @@ def main():
 
 def merge_profiles(paths, output='reports/company-profiles.json'):
     from economic_graph import stamp
-    merged=load_profiles(output)
+    merged=load_profiles(output); korean_symbols=None
     for path in paths:
         for symbol,company in load_profiles(str(path)).items():
             if not isinstance(company,dict): continue
             key=company.get('source_symbol') or symbol
+            if key.isdigit() and len(key)==6:
+                if korean_symbols is None:
+                    try: korean_symbols=load_universe()['KR']
+                    except Exception: korean_symbols={}
+                matches=[ticker for ticker in korean_symbols if ticker.split('.')[0]==key]
+                if len(matches)==1:
+                    key=matches[0]; company={**company,'source_symbol':key}
             old=merged.get(key,{})
             old_at=stamp(old.get('profile_available_at')); new_at=stamp(company.get('profile_available_at'))
             if new_at and (not old_at or new_at>=old_at): merged[key]=company
