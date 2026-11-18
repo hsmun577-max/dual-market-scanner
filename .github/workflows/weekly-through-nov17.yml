@@ -63,10 +63,12 @@ jobs:
                           continue
                       key = (market, day)
                       previous = snapshots.get(key)
-                      if previous and previous["generated_at"] <= generated.isoformat():
+                      day_rows = [row for row in rows if row["indicators"]["data_date"] == day]
+                      quality = (bool(report.get("full_market_scan")), len(day_rows), -generated.timestamp())
+                      if previous and previous["quality"] >= quality:
                           continue
                       snapshots[key] = {"run":run["databaseId"],"generated_at":generated.isoformat(),
-                                        "entry_date":str(next_day.date()),
+                                        "entry_date":str(next_day.date()), "quality":quality, "full_market_scan":bool(report.get("full_market_scan")),
                                         "rows":[row for row in rows if row["indicators"]["data_date"] == day]}
           orders, coverage = [], {}
           for market in ("KR", "US"):
@@ -80,11 +82,11 @@ jobs:
                   pool = [row for row in snapshot["rows"] if row["signal"]["stage"] in {"장전 관찰 후보","장중 조건부 진입 후보"}]
                   selected = rank_korean_candidates(pool) if market == "KR" else sorted(pool, key=lambda row:(-row["signal"]["score"],row["symbol"]))[:5]
                   coverage[market+" "+day] = {"scanned":len(snapshot["rows"]),"eligible":len(pool),
-                                            "selected":len(selected),"run":snapshot["run"],"generated_at":snapshot["generated_at"]}
+                                            "selected":len(selected),"full_market_scan":snapshot["full_market_scan"],"run":snapshot["run"],"generated_at":snapshot["generated_at"]}
                   for row in selected:
                       orders.append({"market":market,"signal_date":day,"entry_date":snapshot["entry_date"],
                                      "symbol":row["symbol"],"name":row.get("name") or row["symbol"],
-                                     "score":row["signal"]["score"],"snapshot_run":snapshot["run"]})
+                                     "score":row["signal"]["score"],"snapshot_run":snapshot["run"],"full_market_scan":snapshot["full_market_scan"]})
           tickers = sorted({row["symbol"] for row in orders})
           prices = yf.download(tickers, start=START, end="2026-11-18", auto_adjust=False,
                                group_by="ticker", progress=False, threads=4, timeout=20, actions=True)
