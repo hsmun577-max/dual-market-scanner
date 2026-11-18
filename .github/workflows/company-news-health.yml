@@ -1,0 +1,55 @@
+name: Company and news health check
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/company-news-health.yml'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'websockets>=14,<18'
+      - name: Check live domestic news and company accounts
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from datetime import datetime
+          from pathlib import Path
+          from kis_intraday import KST, korean_company_news, dart_company_codes, dart_financial_reports, dart_quarterly_financials
+          now = datetime.now(KST)
+          result = {"checked_at": now.isoformat(), "symbol": "005930"}
+          news = korean_company_news("005930", now)
+          result["news_count_24h"] = len(news)
+          result["headlines"] = news[:3]
+          key = os.getenv("DART_API_KEY", "").strip()
+          if not key:
+              raise SystemExit("DART_API_KEY missing")
+          code = dart_company_codes(key).get("005930")
+          if not code:
+              raise SystemExit("DART issuer code missing")
+          reports = dart_financial_reports(key, code, now)
+          result["periodic_reports"] = len(reports)
+          result["financials"] = dart_quarterly_financials(key, code, reports)
+          Path("company-news-health.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+          print(json.dumps(result, ensure_ascii=False))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("Company/news live download\n\n")
+              summary.write(json.dumps(result, ensure_ascii=False, indent=2))
+          if not result["financials"]:
+              raise SystemExit("Financial report found but quarterly metrics unavailable")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: company-news-health
+          path: company-news-health.json
+          if-no-files-found: ignore
