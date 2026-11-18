@@ -16,6 +16,8 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt 'websockets>=14,<18'
+      - name: Verify concurrent context refresh
+        run: PYTHONPATH=. python tests/test_context_refresh.py
       - name: Check live domestic news and company accounts
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
