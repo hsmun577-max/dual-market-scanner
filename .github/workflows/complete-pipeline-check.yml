@@ -1,4 +1,5 @@
 name: Complete pipeline verification
+# Verify the bootstrap fallback while the first full index is being built.
 on:
   workflow_dispatch:
   push:

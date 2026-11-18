@@ -108,16 +108,18 @@ def merge_profiles(paths, output='reports/company-profiles.json'):
 
 def restore_index():
     import subprocess
-    result=subprocess.run(['gh','run','list','--workflow','company-profile-index.yml','--branch','main',
-        '--status','success','--limit','3','--json','databaseId'],capture_output=True,text=True)
-    if result.returncode: return 0
-    for row in json.loads(result.stdout):
-        folder=Path('profile-download')/str(row['databaseId'])
-        done=subprocess.run(['gh','run','download',str(row['databaseId']),'--name','company-exposures',
-                             '--dir',str(folder)],capture_output=True)
-        files=list(folder.rglob('company-profiles.json'))
-        if done.returncode==0 and files:
-            return merge_profiles(files)
+    for workflow,artifact in [('company-profile-index.yml','company-exposures'),
+                              ('economic-graph-check.yml','economic-graph-audit')]:
+        result=subprocess.run(['gh','run','list','--workflow',workflow,'--branch','main',
+            '--status','success','--limit','3','--json','databaseId'],capture_output=True,text=True)
+        if result.returncode: continue
+        for row in json.loads(result.stdout):
+            folder=Path('profile-download')/str(row['databaseId'])
+            done=subprocess.run(['gh','run','download',str(row['databaseId']),'--name',artifact,
+                                 '--dir',str(folder)],capture_output=True)
+            files=list(folder.rglob('company-profiles.json'))
+            if done.returncode==0 and files:
+                return merge_profiles(files)
     return 0
 
 
