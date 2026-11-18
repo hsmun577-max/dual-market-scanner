@@ -20,6 +20,7 @@ from websockets.exceptions import WebSocketException
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
 from signal_context import context_status
 from company_forecast import build_company_forecast
+from event_impact_analysis import article_text, world_events, analyze_events
 from candidate_selection import instrument_rejection_reason, rank_market_candidates, rank_recovery_candidates
 from sector_flow import format_sector_header
 from telegram_text import split_telegram_text
@@ -582,7 +583,8 @@ def company_quality_metrics(ticker, snapshot, now):
             if isinstance(value,(int,float)) and math.isfinite(value):
                 result[target] = float(value)
         for source,target in (("sector","sector"),("industry","industry"),
-                              ("quoteType","quote_type"),("financialCurrency","financial_currency")):
+                              ("quoteType","quote_type"),("financialCurrency","financial_currency"),
+                              ("longBusinessSummary","business_description"),("longName","company_name")):
             if info.get(source):
                 result[target] = info[source]
     except Exception as exc:
@@ -639,6 +641,7 @@ def company_context(market, symbols, now):
     from concurrent.futures import ThreadPoolExecutor
 
     overseas = market.startswith("US-")
+    global_events, global_coverage = world_events(now)
     dart_key = "" if overseas else os.getenv("DART_API_KEY", "").strip()
     corp_codes = {}
     if dart_key:
@@ -727,6 +730,13 @@ def company_context(market, symbols, now):
                 print(f"{market} {symbol} DART financials unavailable ({type(exc).__name__})")
         snapshot["market"] = "US" if overseas else "KR"
         snapshot.update(company_quality_metrics(ticker, snapshot, now))
+        company_events = []
+        for news in snapshot.get("news", [])[:3]:
+            body, body_status = article_text(news.get("url"))
+            company_events.append({**news, "body": body, "body_status": body_status,
+                                   "event_id": news.get("url"), "scope": "company"})
+        snapshot["event_analysis"] = analyze_events(snapshot, [*global_events, *company_events],
+                                                     datetime.now(now.tzinfo), global_coverage)
         if history_prices is not None:
             try:
                 data = history_prices[mapped_tickers[symbol]]

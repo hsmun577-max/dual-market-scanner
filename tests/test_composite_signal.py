@@ -11,7 +11,9 @@ def inputs():
     company=dict(quarter='2026-09',checked_at='2026-11-18T08:00:00+09:00',
         operating_margin_pct=12.,revenue_yoy_pct=20.,operating_margin_yoy_pp=3.,
         free_cash_flow_margin_pct=8.,operating_cash_conversion=1.2,net_debt_to_equity=.3,
-        trailing_pe=25.,forward_pe=20.,sector='Technology',filing_status='checked',news_status='ok')
+        trailing_pe=25.,forward_pe=20.,sector='Technology',filing_status='checked',news_status='ok',
+        event_analysis=dict(generated_at='2026-11-18T08:00:00+09:00',status='no_material_events_identified',
+                            feed_coverage=[dict(status='checked')],unread_events=[]))
     indicators=dict(price=100.,ma20=98.,return_5d=.03,return_20d=.08,
         relative_strength=.06,volume_ratio=2.,volatility_20d=.02,market_return_20d=.02)
     sectors=[dict(name='반도체',data_date='2026-11-17',market_excess_pct=.5,turnover_ratio=1.8)]
@@ -19,6 +21,21 @@ def inputs():
 
 
 class CompositeSignalTests(unittest.TestCase):
+    def test_feed_success_alone_does_not_prove_causal_analysis(self):
+        company,indicators,sectors=inputs()
+        del company['event_analysis']
+        result=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
+        self.assertIsNone(result['composite_score'])
+        self.assertIn('causal_event_analysis',result['missing_dimensions'])
+
+    def test_unread_news_cannot_be_scored_as_complete(self):
+        company,indicators,sectors=inputs()
+        company['event_analysis'].update(score=.3,status='directional_hypotheses',
+                                       unread_events=[dict(url='https://example.com')])
+        result=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
+        self.assertIsNone(result['composite_score'])
+        self.assertIn('unread_event_bodies',result['missing_dimensions'])
+
     def test_new_periodic_filing_blocks_old_financials(self):
         company,indicators,sectors=inputs()
         company.update(quarter='2026-06-30',filings=[dict(form='10-K',filing_date='2026-11-17')])

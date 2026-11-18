@@ -1,0 +1,73 @@
+name: Company and world event impact audit
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/event-impact-check.yml'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Verify causal scenarios and composite gates
+        run: |
+          python -m compileall -q scanner.py kis_intraday.py company_forecast.py event_impact_analysis.py
+          PYTHONPATH=. python tests/test_event_impact_analysis.py
+          PYTHONPATH=. python tests/test_composite_signal.py
+          PYTHONPATH=. python tests/test_daily_delivery_update.py
+          PYTHONPATH=. python tests/test_sector_update.py
+          PYTHONPATH=. python tests/test_selection_update.py
+      - name: Check current public company and world data without sending
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import datetime,timezone
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+          import kis_intraday as k
+          from company_forecast import build_company_forecast
+          from event_impact_analysis import earnings_bridge
+          audit=[]
+          for market,symbols,sector_market,zone in (
+              ("US-late",["DNASALRM","DNASPOWL"],"US","America/New_York"),
+              ("KRX",["007660"],"KR","Asia/Seoul")):
+              now=datetime.now(ZoneInfo(zone))
+              companies,risks=k.company_context(market,symbols,now)
+              sectors=k.sector_flow_snapshot(sector_market,datetime.now(ZoneInfo(zone)))
+              for symbol,company in companies.items():
+                  indicators=company.get("price_indicators",{})
+                  forecast=None
+                  if indicators.get("price"):
+                      forecast=build_company_forecast(company,indicators,indicators["price"],datetime.now(ZoneInfo(zone)),risks,sectors)
+                  audit.append(dict(symbol=symbol,company_name=company.get("company_name"),
+                      quarter=company.get("quarter"),profile_available=bool(company.get("business_description")),
+                      event_analysis=company.get("event_analysis"),forecast=forecast))
+          Path("event-impact-audit.json").write_text(json.dumps(audit,ensure_ascii=False,indent=2),encoding="utf-8")
+          summary=[]
+          for row in audit:
+              a=row["event_analysis"] or {}
+              summary.append(dict(symbol=row["symbol"],quarter=row["quarter"],profile_available=row["profile_available"],
+                  status=a.get("status"),world_feeds=a.get("feed_coverage"),read_events=len(a.get("assessed_events",[])),
+                  unread_events=len(a.get("unread_events",[])),positive=len(a.get("positive_drivers",[])),
+                  negative=len(a.get("negative_drivers",[])),uncertain=len(a.get("uncertainties",[])),
+                  score=(row["forecast"] or {}).get("composite_score"),
+                  missing=(row["forecast"] or {}).get("missing_dimensions")))
+          print("EVENT_IMPACT_AUDIT="+json.dumps(summary,ensure_ascii=False),flush=True)
+          print("TELEGRAM_SENT=false",flush=True)
+          
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: event-impact-audit
+          path: event-impact-audit.json
+          if-no-files-found: ignore

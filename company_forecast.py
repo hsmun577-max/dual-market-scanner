@@ -156,10 +156,22 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
             uncertainty=max(uncertainty,.8 if row["assessment"]=="risk" else .4)
     feeds_checked = (company.get("filing_status")=="checked"
                      and company.get("news_status") in {"ok","no_recent_articles"})
-    if event_terms or feeds_checked:
+    causal = company.get("event_analysis", {})
+    causal_score = _number(causal, "score")
+    causal_stamp = datetime.fromisoformat(causal["generated_at"]) if causal.get("generated_at") else None
+    causal_valid = causal_stamp is not None and causal_stamp.utcoffset() is not None and at-timedelta(hours=24)<=causal_stamp<=at
+    if causal_valid and causal_score is not None:
+        event_terms.append(max(-1, min(1, causal_score)))
+        # Automatic causal rules remain hypotheses: preserve uncertainty in the range.
+        uncertainty = max(uncertainty, .4)
+    if event_terms:
         components["events"] = math.tanh(sum(event_terms))
-    evidence["events"] = {"quantified_events":len(event_terms),"unquantified_events":unquantified_events,
-                          "feeds_checked":feeds_checked,"uncertainty":uncertainty}
+    elif (causal_valid and causal.get("status") == "no_material_events_identified" and feeds_checked):
+        components["events"] = 0.
+    evidence["events"] = {"event_direction_terms":len(event_terms),"quantified_earnings_events":0,"unquantified_events":unquantified_events,
+                          "feeds_checked":feeds_checked,"uncertainty":uncertainty,
+                          "causal_analysis":causal if causal_valid else {"status":"unavailable_or_stale"},
+                          "meaning":"rule based event direction; not quantified earnings impact"}
     coverage = sum(weights[key] for key in components)
     composite = sum(weights[key]*value for key,value in components.items())/coverage if coverage else 0.
     ma20 = _number(indicators,"ma20")
@@ -177,6 +189,12 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     drift = .6*scale*after_pricing
     width = scale*(1+(1-coverage)*.7+uncertainty*.5+priced_in*.3)
     missing = [key for key in weights if key not in components]
+    if not causal_valid:
+        missing.append("causal_event_analysis")
+    elif causal.get("unread_events"):
+        missing.append("unread_event_bodies")
+    if causal_valid and not any(row.get("status")=="checked" for row in causal.get("feed_coverage", [])):
+        missing.append("world_event_coverage")
     if financial_period_missing(company):
         missing.append("latest_report_not_in_financials")
     if free_cash_margin is None and conversion is None:
