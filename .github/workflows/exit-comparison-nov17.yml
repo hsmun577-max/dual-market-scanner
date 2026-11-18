@@ -164,6 +164,11 @@ jobs:
                   result["expected_bars"] = len(expected)
                   result["received_bars"] = len(data.index.intersection(expected))
                   result["policies"] = {policy:simulate(data,expected,entry,maps[policy]) for policy in POLICIES}
+                  for value in result["policies"].values():
+                      if value["status"] == "open_at_valuation":
+                          value["last_close"] = row["exit_close"]
+                          value["net_pct"] = net(entry,row["exit_close"])
+                          value["valuation_source"] = "official daily close from fixed entry dataset"
                   result["status"]="paired" if all(x["status"]!="incomplete" for x in result["policies"].values()) else "incomplete_pair"
               except Exception as exc:
                   result["status"]="download_error"
