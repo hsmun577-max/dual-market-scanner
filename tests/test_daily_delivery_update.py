@@ -35,7 +35,7 @@ class DailyDeliveryTests(unittest.TestCase):
             financial_source='DART 연결',checked_at='2026-11-18T10:00:00+09:00',
             filings=[dict(filing_date='2026-11-16',form='분기보고서')],filing_status='checked',
             news=[dict(headline='삼성전자 실적 증가',source='공식자료')])
-        with patch('kis_intraday.company_context',return_value=({'005930':snapshot},[])) as context:
+        with patch('kis_intraday.company_context',return_value=({'005930':snapshot},[])) as context, patch('event_impact_analysis.world_events',return_value=([],[])), patch('economic_graph.load_profiles',return_value={}):
             scanner.prepare_selected_analysis(report)
         context.assert_called_once()
         self.assertEqual(row['fundamentals'],'영업흑자')

@@ -191,7 +191,7 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     missing = [key for key in weights if key not in components]
     if not causal_valid:
         missing.append("causal_event_analysis")
-    elif causal.get("unread_events"):
+    elif any(row.get("required",True) for row in causal.get("unread_events", [])):
         missing.append("unread_event_bodies")
     if causal_valid and not any(row.get("status")=="checked" for row in causal.get("feed_coverage", [])):
         missing.append("world_event_coverage")

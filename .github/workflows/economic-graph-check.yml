@@ -1,0 +1,74 @@
+name: Shared economic graph and discovery audit
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/economic-graph-check.yml'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Verify generic event links and chart independent discovery
+        run: |
+          python -m compileall -q economic_graph.py event_impact_analysis.py scanner.py kis_intraday.py
+          PYTHONPATH=. python tests/test_economic_graph.py
+          PYTHONPATH=. python tests/test_event_impact_analysis.py
+          PYTHONPATH=. python tests/test_composite_signal.py
+          PYTHONPATH=. python tests/test_daily_delivery_update.py
+          PYTHONPATH=. python tests/test_sector_update.py
+          PYTHONPATH=. python tests/test_selection_update.py
+      - name: Audit actual policy and company exposures without sending
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import datetime,timezone
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+          from unittest.mock import patch
+          import kis_intraday as k
+          from economic_graph import discover,frames,load_profiles
+          from event_impact_analysis import world_events
+          # Exchange/name data only, not stock-specific prediction rules.
+          k.KR_SYMBOL_NAMES.update({"041510.KQ":"에스엠","352820.KS":"하이브","035900.KQ":"JYP Ent."})
+          companies,risks=k.company_context("KRX",["041510","352820","035900"],datetime.now(ZoneInfo("Asia/Seoul")))
+          events,coverage=world_events(datetime.now(timezone.utc))
+          at=datetime.now(timezone.utc)
+          event_frames=frames(events,at)
+          registry=load_profiles()
+          linked=discover(registry,events,at)
+          audit={"checked_at":at.isoformat(),"world_coverage":coverage,"profile_count":len(registry),
+                 "event_frames":event_frames,"discovered":linked,"telegram_sent":False,
+                 "historical_early_capture_proven":False,
+                 "companies":[{"symbol":symbol,"name":company.get("company_name"),
+                      "profile_available":bool(company.get("business_description")),
+                      "graph":company.get("event_analysis",{}).get("economic_graph",{}),
+                      "causal_status":company.get("event_analysis",{}).get("status"),
+                      "unread_events":len(company.get("event_analysis",{}).get("unread_events",[]))}
+                      for symbol,company in companies.items()]}
+          Path("economic-graph-audit.json").write_text(json.dumps(audit,ensure_ascii=False,indent=2),encoding="utf-8")
+          summary={**audit,"event_frames":len(event_frames),
+                   "companies":[{**row,"graph":{"status":row["graph"].get("status"),
+                                               "links":len(row["graph"].get("links",[])),
+                                               "products":row["graph"].get("profile",{}).get("products",[])}}
+                                 for row in audit["companies"]]}
+          print("ECONOMIC_GRAPH_AUDIT="+json.dumps(summary,ensure_ascii=False),flush=True)
+          
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: economic-graph-audit
+          path: |
+            economic-graph-audit.json
+            reports/company-profiles.json
+          if-no-files-found: ignore

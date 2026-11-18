@@ -517,14 +517,20 @@ def rank_korean_candidates(candidates, limit=5):
 def prepare_selected_analysis(report):
     """Fetch evidence for the actual daily alert candidates before saving and sending."""
     from kis_intraday import company_context, KR_SYMBOL_NAMES as context_kr_names, US_SYMBOL_NAMES as context_us_names
+    from economic_graph import load_profiles, discover, select_analysis_candidates
+    from event_impact_analysis import world_events
 
     checked = datetime.now(timezone.utc)
+    shared_events, event_coverage = world_events(checked)
+    registry = load_profiles()
+    linked = discover(registry, shared_events, datetime.now(timezone.utc))
+    report["event_discovery"] = {"profile_count":len(registry),"linked_symbols":linked,
+                                 "feed_coverage":event_coverage,"universe_wide_news_coverage":False}
     for market in ("KR", "US"):
         pool = [item for item in report["results"] if item["market"] == market]
-        ranked = rank_market_candidates(pool, market)
-        recovery = rank_recovery_candidates(pool, market, limit=8)
-        symbols = {item["symbol"] for item in ranked}
-        selected = ranked + [item for item in recovery if item["symbol"] not in symbols][:3]
+        event_symbols = [symbol[4:] if symbol.startswith("DNAS") else symbol+(
+            ".KQ" if symbol+".KQ" in context_kr_names else ".KS") for symbol in linked]
+        selected = select_analysis_candidates(pool, market, event_symbols)
         keys = {}
         for item in selected:
             symbol = item["symbol"].split(".")[0] if market == "KR" else "DNAS" + item["symbol"]
@@ -550,7 +556,7 @@ def prepare_selected_analysis(report):
                                     "영업적자" if margin is not None and margin < 0 else
                                     "손익분기" if margin == 0 else "재무자료 조회 실패 또는 미제공")
             item["news_and_filings"] = f"기사 {len(company.get('news', []))}건 · 공시 {len(company.get('filings', []))}건"
-            item["company_forecast"] = build_company_forecast(company, {**company.get("price_indicators", {}), **item["indicators"]},
+            item["company_forecast"] = build_company_forecast(company, {**item["indicators"], **company.get("price_indicators", {})},
                 item["indicators"]["price"], datetime.now(timezone.utc),
                 [row for row in risks if row.get("symbol") == symbol], report.get("sectors", []))
             item["risk_headlines"] = list(dict.fromkeys(

@@ -587,6 +587,10 @@ def company_quality_metrics(ticker, snapshot, now):
                               ("longBusinessSummary","business_description"),("longName","company_name")):
             if info.get(source):
                 result[target] = info[source]
+        if info.get("country"):
+            result["country"] = info["country"]
+        result["profile_available_at"] = datetime.now(now.tzinfo).isoformat()
+        result["profile_source"] = "Yahoo Finance issuer profile"
     except Exception as exc:
         result["profile_error"] = type(exc).__name__
     if result.get("quote_type") == "ETF":
@@ -755,6 +759,8 @@ def company_context(market, symbols, now):
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(fetch, symbols))
     snapshots = {symbol: snapshot for symbol, snapshot, _ in results}
+    from economic_graph import save_profiles
+    save_profiles(snapshots)
     for symbol, snapshot, risks in results:
         print(f"{market} {symbol} company context {json.dumps(snapshot, ensure_ascii=False)}", flush=True)
         for risk in risks:
@@ -993,14 +999,13 @@ def daily_candidates(previous_session, overseas=False):
                      and item["symbol"].endswith((".KS", ".KQ"))
                      and item["indicators"]["data_date"] == previous_session.isoformat()]
             if fresh:
-                candidates = rank_korean_candidates(
-                    [item for item in fresh if item["signal"]["stage"] in
-                     {"장전 관찰 후보", "장중 조건부 진입 후보"}], limit=5,
-                )
-                existing = {item["symbol"] for item in candidates}
-                recoveries = rank_recovery_candidates(fresh, "KR", limit=len(SYMBOLS))
-                candidates.extend(item for item in recoveries if item["symbol"] not in existing)
-                candidates = candidates[:len(SYMBOLS)]
+                from economic_graph import select_analysis_candidates
+                event_symbols = [item["symbol"] for item in fresh
+                    if any(link.get("direction",0)>0 for link in item.get("company_analysis",{}).get(
+                        "event_analysis",{}).get("economic_graph",{}).get("links",[]))
+                    or item.get("company_analysis",{}).get("event_analysis",{}).get(
+                        "economic_graph",{}).get("expectation_links")]
+                candidates = select_analysis_candidates(fresh,"KR",event_symbols,limit=len(SYMBOLS))
                 for item in candidates:
                     KR_SYMBOL_NAMES[item["symbol"]] = item.get("name") or item["symbol"]
                     KR_SYMBOL_NAMES[f"{item['symbol'].split('.')[0]}.KS"] = KR_SYMBOL_NAMES[item["symbol"]]

@@ -6,10 +6,11 @@ from xml.etree import ElementTree
 import math
 import re
 import requests
+from economic_graph import frames as event_frames, connect as connect_business
 
 ALLOWED = ('federalreserve.gov', 'ecb.europa.eu', 'sec.gov', 'reuters.com',
            'finance.yahoo.com', 'cnbc.com', 'hanaw.com', 'samsungpop.com',
-           'yna.co.kr', 'dart.fss.or.kr', 'eia.gov', 'ofac.treasury.gov')
+           'yna.co.kr', 'dart.fss.or.kr', 'eia.gov', 'ofac.treasury.gov', 'korea.kr', 'motir.go.kr')
 HEADERS = {'User-Agent': 'DualMarketScanner research https://github.com/hsmun577-max/dual-market-scanner'}
 CHANNELS = {
  'demand': ('demand', 'orders', 'backlog', '수요', '수주', '수주잔고'),
@@ -88,7 +89,7 @@ def article_text(url):
     except (requests.RequestException,ValueError): return '', 'download_failed'
 
 
-def world_events(now):
+def _fetch_world_events(now):
     """Keep persistent policy events, with explicit feed coverage and publication dates."""
     from email.utils import parsedate_to_datetime
     rows=[]; coverage=[]
@@ -128,6 +129,8 @@ def world_events(now):
         status='checked' if days else 'listing_unparsed'
     except (requests.RequestException,ValueError): pass
     coverage.append(dict(source='OFAC',status=status,events=count,checked_at=now.isoformat()))
+    korean_events,korean_coverage=korean_policy_events(now)
+    rows.extend(korean_events); coverage.append(korean_coverage)
     return rows,coverage
 
 
@@ -187,6 +190,10 @@ def _route(channel, event, company, direct):
 
 def analyze_events(company, events, at, feed_coverage=()):
     assessed=[]; unsupported=[]; seen=set(); positive=[]; negative=[]; uncertain=[]
+    graph = connect_business(company, event_frames(events, at), at)
+    uncertain.extend(graph.get('expectation_links', []))
+    for link in graph['links']:
+        (positive if link['direction']>0 else negative if link['direction']<0 else uncertain).append(link)
     for event in events:
         published=timestamp(event.get('available_at'))
         expiry=timestamp(event.get('expires_at'))
@@ -196,7 +203,8 @@ def analyze_events(company, events, at, feed_coverage=()):
         seen.add(identity)
         body=event.get('body','')
         if len(body)<400:
-            unsupported.append(dict(url=event.get('url'),reason='본문 미확보: 제목만으로 실적 영향 확정 금지'))
+            unsupported.append(dict(url=event.get('url'),required=direct_company_event(event,company),
+                reason='본문 미확보: 제목만으로 실적 영향 확정 금지'))
             continue
         direct=direct_company_event(event,company)
         sentences=re.split(r'(?<=[.!?。])\s+|\n+',body)
@@ -239,6 +247,7 @@ def analyze_events(company, events, at, feed_coverage=()):
         score=round(score,4) if score is not None else None,
         status='directional_hypotheses' if claims else 'no_material_events_identified' if quiet else 'insufficient_causal_evidence',
         business_profile_available=bool(company.get('business_description')),exposures=sorted(exposure(company)),
+        economic_graph=graph,
         positive_drivers=positive,negative_drivers=negative,uncertainties=uncertain,
         assessed_events=assessed,unread_events=unsupported,feed_coverage=list(feed_coverage),
         fx_sensitivity=currency_sensitivity(company, {
@@ -322,3 +331,45 @@ def currency_sensitivity(company, changes, at):
         result.update(after_hedge_economic_effect=operating_effect*(1-hedge),hedge_status='scenario_coverage_available',
                       hedge_accounting='경제적 노출 상쇄치; 헤지손익의 손익계산서 분류는 별도 확인 필요')
     return result
+
+
+def korean_policy_events(now):
+    """Read current official policy links; first-seen time prevents hindsight claims."""
+    from urllib.parse import urljoin
+    class Links(HTMLParser):
+        def __init__(self): super().__init__(); self.href=None; self.text=[]; self.rows=[]
+        def handle_starttag(self,tag,attrs):
+            if tag=='a': self.href=dict(attrs).get('href'); self.text=[]
+        def handle_data(self,text):
+            if self.href: self.text.append(text)
+        def handle_endtag(self,tag):
+            if tag=='a' and self.href:
+                self.rows.append((self.href,' '.join(self.text).strip())); self.href=None
+    rows=[]; status='unavailable'
+    try:
+        response=requests.get('https://www.korea.kr/main.do',headers=HEADERS,timeout=5,allow_redirects=False)
+        response.raise_for_status()
+        parser=Links(); parser.feed(response.text)
+        links=[]
+        for href,title in parser.rows:
+            url=urljoin('https://www.korea.kr/',href)
+            if ('policyNewsView.do?' in url or 'pressReleaseView.do?' in url) and allowed_url(url):
+                if re.search(r'FTA|정상|관세|금리|수출|콘텐츠|제재|협상|에너지|반도체',title,re.I):
+                    links.append((url,title))
+        for url,title in list(dict.fromkeys(links))[:8]:
+            text,body_status=article_text(url)
+            rows.append(dict(event_id=url,url=url,headline=title,source='대한민국 정책브리핑',
+                available_at=datetime.now(now.tzinfo).isoformat(),availability_basis='first_seen_not_original_publication',
+                body=text,body_status=body_status,scope='world'))
+        status='checked' if links else 'listing_unparsed_or_no_matching_links'
+    except (requests.RequestException,ValueError): pass
+    return rows,dict(source='대한민국 정책브리핑',status=status,events=len(rows),checked_at=now.isoformat())
+
+_WORLD_CACHE={}
+def world_events(now):
+    """Reuse one policy snapshot across discovery and company evaluation in a run."""
+    key=int(now.timestamp())//300
+    if key not in _WORLD_CACHE:
+        _WORLD_CACHE.clear()
+        _WORLD_CACHE[key]=_fetch_world_events(now)
+    return _WORLD_CACHE[key]
