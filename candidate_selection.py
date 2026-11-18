@@ -11,7 +11,7 @@ CASH_OR_BOND = re.compile(
     r"머니마켓|KOFR|CD(?:\d|금리)|단기금리|단기채|채권|국채|회사채|통안채|"
     r"\b(?:treasury|treasuries|bonds?|money market|ultrashort|floating rate)\b", re.I)
 COMPLEX_ETF = re.compile(
-    r"인버스|레버리지|커버드콜|위클리페이|\b(?:inverse|leveraged|weeklypay|covered call|[23]x)\b", re.I)
+    r"인버스|레버리지|커버드콜|위클리페이|-1[xX]|\b(?:inverse|leveraged|weeklypay|covered call|[23]x)\b", re.I)
 KNOWN_COMPLEX = {"SOXL", "SOXS", "TQQQ", "SQQQ", "SPXL", "SPXS"}
 
 
