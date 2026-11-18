@@ -188,6 +188,50 @@ def headline_risks(market, symbol, articles, now):
     ]
 
 
+def korean_company_news(symbol, now):
+    """Use dated Korean headlines when Yahoo has no domestic coverage."""
+    from email.utils import parsedate_to_datetime
+    from xml.etree import ElementTree
+
+    name = KR_SYMBOL_NAMES.get(symbol + ".KS") or KR_SYMBOL_NAMES.get(symbol + ".KQ")
+    if not name or name == symbol:
+        return []
+    response = requests.get("https://news.google.com/rss/search", params={
+        "q": f'"{name}" 주식 when:1d', "hl": "ko", "gl": "KR", "ceid": "KR:ko",
+    }, timeout=8)
+    response.raise_for_status()
+    articles = []
+    for item in ElementTree.fromstring(response.content).findall("./channel/item"):
+        title = item.findtext("title", "").strip()
+        try:
+            published = parsedate_to_datetime(item.findtext("pubDate", ""))
+        except (ValueError, TypeError):
+            continue
+        if name not in title or published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
+            continue
+        articles.append({"headline": title, "available_at": published.isoformat(),
+                         "source": item.findtext("source", "Google News"),
+                         "url": item.findtext("link", "")})
+    return sorted({item["headline"]: item for item in articles}.values(),
+                  key=lambda item: item["available_at"], reverse=True)
+
+
+def dart_financial_reports(api_key, corp_code, now):
+    """Find periodic reports independently of the recent event disclosure window."""
+    response = requests.get("https://opendart.fss.or.kr/api/list.json", params={
+        "crtfc_key": api_key, "corp_code": corp_code, "pblntf_ty": "A",
+        "bgn_de": (now - timedelta(days=400)).strftime("%Y%m%d"),
+        "end_de": now.strftime("%Y%m%d"), "page_count": 100,
+    }, timeout=8)
+    response.raise_for_status()
+    body = response.json()
+    if body.get("status") not in {"000", "013"}:
+        raise ValueError("DART financial report index unavailable")
+    return [{"form": row.get("report_nm", ""),
+             "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=" + row["rcept_no"]}
+            for row in body.get("list", []) if re.fullmatch(r"\d{14}", row.get("rcept_no", ""))]
+
+
 def company_financials(statement, today):
     quarters = sorted((col for col in statement.columns if col.date() < today), reverse=True)
     for quarter in quarters:
@@ -458,6 +502,16 @@ def dart_quarterly_financials(api_key, corp_code, filings):
     body = response.json()
     if body.get("status") not in {"000", "013"}:
         raise ValueError("DART quarterly financial query failed")
+    financial_scope = "연결"
+    if body.get("status") == "013" or not body.get("list"):
+        response = requests.get("https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json",
+                                params={"crtfc_key": api_key, "corp_code": corp_code, "bsns_year": year,
+                                        "reprt_code": codes[month], "fs_div": "OFS"}, timeout=6)
+        response.raise_for_status()
+        body = response.json()
+        financial_scope = "별도"
+        if body.get("status") not in {"000", "013"}:
+            raise ValueError("DART separate financial query failed")
     receipt = report["url"].rsplit("=", 1)[-1]
     accounts = {row["account_id"]: row for row in body.get("list", [])
                 if row.get("sj_div") in {"IS", "CIS"} and row.get("rcept_no") == receipt and row.get("account_id")}
@@ -478,7 +532,7 @@ def dart_quarterly_financials(api_key, corp_code, filings):
     if sales is None or sales <= 0 or operating is None:
         return {}
     snapshot = {"quarter": f"{year}-{month}", "operating_margin_pct": 100 * operating / sales,
-                "financial_source": "DART 연결", "financial_filing_url": report["url"]}
+                "financial_source": f"DART {financial_scope}", "financial_filing_url": report["url"]}
     prior_sales = amount(revenue, "frmtrm_q_amount")
     if prior_sales is not None and prior_sales > 0:
         snapshot["revenue_yoy_pct"] = 100 * (sales / prior_sales - 1)
@@ -509,6 +563,19 @@ def company_context(market, symbols, now):
             risks.extend(headline_risks(market, symbol, articles, now))
         except Exception as exc:
             print(f"{market} {symbol} news unavailable ({type(exc).__name__})")
+        if not overseas and not snapshot.get("news"):
+            try:
+                articles = korean_company_news(symbol, now)
+                snapshot["news"] = articles[:3]
+                risks.extend({**item, "kind": "event", "market": market, "symbol": symbol,
+                              "assessment": "risk"} for item in articles
+                             if RISK_HEADLINE.search(item["headline"]))
+                snapshot["news_status"] = "ok" if articles else "no_recent_articles"
+            except Exception as exc:
+                snapshot["news_status"] = "unavailable"
+                print(f"{market} {symbol} Korean news unavailable ({type(exc).__name__})")
+        else:
+            snapshot["news_status"] = "ok" if snapshot.get("news") else "unavailable_or_empty"
         try:
             snapshot.update(company_financials(ticker.get_income_stmt(freq="quarterly"), now.date()))
         except Exception as exc:
@@ -538,12 +605,15 @@ def company_context(market, symbols, now):
             except (requests.RequestException, ValueError, TypeError) as exc:
                 print(f"{market} {symbol} DART unavailable ({type(exc).__name__})")
             try:
-                dart_financials = dart_quarterly_financials(dart_key, corp_codes[symbol], snapshot.get("filings", []))
+                reports = dart_financial_reports(dart_key, corp_codes[symbol], now)
+                dart_financials = dart_quarterly_financials(dart_key, corp_codes[symbol], reports)
                 if dart_financials:
                     snapshot.pop("revenue_yoy_pct", None)
                     snapshot.update(dart_financials)
             except (requests.RequestException, ValueError, TypeError) as exc:
                 print(f"{market} {symbol} DART financials unavailable ({type(exc).__name__})")
+        snapshot["checked_at"] = now.isoformat()
+        snapshot["financial_status"] = "ok" if "operating_margin_pct" in snapshot else "unavailable"
         return symbol, snapshot, risks
 
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -1059,6 +1129,9 @@ def format_notification(market, candidates, closes, companies=None):
             lines.append("매수 진입가 미제시 · 관찰만")
         lines.append(f"근거 · 5분봉 고점 돌파 / 거래량 {ratio:.2f}배 / 호가 간격 {spread:.2f}%")
         company = companies.get(symbol, {})
+        if company.get("checked_at"):
+            checked = datetime.fromisoformat(company["checked_at"]).astimezone(KST)
+            lines.append(f"기업·뉴스 조회 · {checked:%m/%d %H:%M} KST")
         lines.append(f"증권사 의견(참고) · {company.get('research_label', '최근 자료 미확보')}")
         if company.get("event_score"):
             lines.append(f"종목 이벤트 점수 · {company['event_score']:+d}")
@@ -1096,7 +1169,8 @@ def format_notification(market, candidates, closes, companies=None):
             stamp = datetime.fromisoformat(article["available_at"]).astimezone(KST)
             lines.append(f"최근 기사 · {stamp:%m/%d %H:%M} KST {article['source']} / {article['headline'][:90]}")
         else:
-            lines.append("최근 기사 · 연결된 24시간 기사 미확보")
+            lines.append("최근 기사 · 24시간 내 검색 결과 없음" if company.get("news_status") == "no_recent_articles"
+                         else "최근 기사 · 조회 실패 또는 자료 미확보")
     return "\n".join(lines)
 
 
