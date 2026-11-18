@@ -1,0 +1,83 @@
+name: Full market issuer profile index
+on:
+  workflow_dispatch:
+    inputs:
+      batch_limit:
+        description: Instruments per shard, zero means the full assigned universe
+        type: string
+        default: '0'
+  schedule:
+    - cron: '17 */6 * * *'
+  push:
+    paths:
+      - '.github/workflows/company-profile-index.yml'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: company-profile-index
+  cancel-in-progress: false
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Verify index reliability
+        run: PYTHONPATH=. python tests/test_profile_universe.py
+      - uses: actions/cache@v4
+        with:
+          path: profiles/part-${{ matrix.shard }}.json
+          key: full-issuer-part-${{ matrix.shard }}-${{ github.run_id }}
+          restore-keys: full-issuer-part-${{ matrix.shard }}-
+      - name: Refresh full exchange-master partition
+        env:
+          PROFILE_LIMIT: ${{ inputs.batch_limit || '0' }}
+        run: python profile_universe.py --shard ${{ matrix.shard }} --shards 4 --limit "$PROFILE_LIMIT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: company-profile-part-${{ matrix.shard }}
+          path: profiles/
+          if-no-files-found: ignore
+  merge:
+    needs: refresh
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: company-profile-part-*
+          merge-multiple: true
+          path: profiles/
+      - run: python profile_universe.py --merge
+      - name: Record exact provider coverage
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          parts=[json.loads(p.read_text()) for p in Path("profiles").glob("audit-*.json")]
+          profiles=json.loads(Path("reports/company-profiles.json").read_text())
+          summary={"partitions_finished":len(parts),"expected_partitions":4,
+                   "profile_count":len(profiles),"parts":parts,
+                   "universe_collection_finished":len(parts)==4 and all(p["enumeration_complete"] for p in parts)}
+          Path("reports/profile-coverage.json").write_text(json.dumps(summary,indent=2))
+          print("PROFILE_INDEX_SUMMARY="+json.dumps(summary),flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: company-exposures
+          path: reports/

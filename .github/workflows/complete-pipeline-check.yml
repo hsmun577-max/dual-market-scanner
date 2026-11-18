@@ -1,0 +1,62 @@
+name: Complete pipeline verification
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/complete-pipeline-check.yml'
+  workflow_run:
+    workflows: ['Full market issuer profile index']
+    types: [completed]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Verify every changed analysis and discovery path
+        run: |
+          python -m compileall -q scanner.py kis_intraday.py economic_graph.py event_impact_analysis.py profile_universe.py
+          PYTHONPATH=. python tests/test_economic_graph.py
+          PYTHONPATH=. python tests/test_event_impact_analysis.py
+          PYTHONPATH=. python tests/test_composite_signal.py
+          PYTHONPATH=. python tests/test_daily_delivery_update.py
+          PYTHONPATH=. python tests/test_sector_update.py
+          PYTHONPATH=. python tests/test_selection_update.py
+          PYTHONPATH=. python tests/test_profile_universe.py
+          PYTHONPATH=. python tests/test_event_watch.py
+      - name: Verify live provider coverage without sending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json,subprocess
+          from datetime import datetime,timezone
+          from pathlib import Path
+          from economic_graph import load_profiles,discover
+          from event_impact_analysis import world_events
+          from profile_universe import restore_index
+          count=restore_index()
+          profiles=load_profiles()
+          events,coverage=world_events(datetime.now(timezone.utc))
+          linked=discover(profiles,events,datetime.now(timezone.utc),limit=30)
+          coverage_files=list(Path("profile-download").rglob("profile-coverage.json"))
+          index_coverage=json.loads(coverage_files[0].read_text()) if coverage_files else {"status":"initial_full_collection_not_available"}
+          result={"profile_count":count,"event_candidates":linked,"feed_coverage":coverage,"index_coverage":index_coverage,
+                  "telegram_sent":False,"profitability_validated":False}
+          Path("completed-pipeline-audit.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("COMPLETED_PIPELINE_AUDIT="+json.dumps(result,ensure_ascii=False),flush=True)
+          
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: completed-pipeline-audit
+          path: completed-pipeline-audit.json
+          if-no-files-found: ignore

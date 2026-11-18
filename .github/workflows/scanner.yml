@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   scan:
@@ -44,6 +45,11 @@ jobs:
           path: reports/company-profiles.json
           key: issuer-profiles-v1-${{ github.run_id }}
           restore-keys: issuer-profiles-v1-
+
+      - name: Restore full issuer exposure index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python profile_universe.py --restore
 
       - name: Run scanner
         env:

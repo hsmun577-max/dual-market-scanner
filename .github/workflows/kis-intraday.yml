@@ -34,6 +34,11 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5' 'websockets>=14,<18'
+      - name: Restore full issuer exposure index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python profile_universe.py --restore
+
       - name: Load previous full scan
         if: matrix.source == 'daily'
         env:

@@ -528,8 +528,9 @@ def prepare_selected_analysis(report):
                                  "feed_coverage":event_coverage,"universe_wide_news_coverage":False}
     for market in ("KR", "US"):
         pool = [item for item in report["results"] if item["market"] == market]
-        event_symbols = [symbol[4:] if symbol.startswith("DNAS") else symbol+(
-            ".KQ" if symbol+".KQ" in context_kr_names else ".KS") for symbol in linked]
+        event_symbols = [item["symbol"] for item in pool for symbol in linked
+            if (item["symbol"] == (registry.get(symbol,{}).get("source_symbol") or symbol.removeprefix("DNAS"))
+                or (market=="KR" and item["symbol"].split(".")[0]==symbol))]
         selected = select_analysis_candidates(pool, market, event_symbols)
         keys = {}
         for item in selected:

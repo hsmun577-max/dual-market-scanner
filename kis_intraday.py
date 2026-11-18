@@ -584,7 +584,8 @@ def company_quality_metrics(ticker, snapshot, now):
                 result[target] = float(value)
         for source,target in (("sector","sector"),("industry","industry"),
                               ("quoteType","quote_type"),("financialCurrency","financial_currency"),
-                              ("longBusinessSummary","business_description"),("longName","company_name")):
+                              ("longBusinessSummary","business_description"),("longName","company_name"),
+                              ("exchange","exchange")):
             if info.get(source):
                 result[target] = info[source]
         if info.get("country"):
@@ -734,6 +735,7 @@ def company_context(market, symbols, now):
                 print(f"{market} {symbol} DART financials unavailable ({type(exc).__name__})")
         snapshot["market"] = "US" if overseas else "KR"
         snapshot.update(company_quality_metrics(ticker, snapshot, now))
+        snapshot["source_symbol"] = mapped_tickers[symbol]
         company_events = []
         for news in snapshot.get("news", [])[:3]:
             body, body_status = article_text(news.get("url"))
@@ -1215,8 +1217,11 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 continue
             for item in parse_records(raw, feeds, received):
                 symbol = item["symbol"]
-                if market == "US" and not symbol.startswith("DNAS"):
-                    symbol = f"DNAS{symbol}"
+                if market == "US" and not symbol.startswith(("DNAS","DNYS","DAMS")):
+                    matches = [key for key in bars if key[4:]==symbol]
+                    if len(matches)!=1:
+                        continue
+                    symbol = matches[0]
                 event_time = datetime.fromisoformat(item["event_time"])
                 if symbol not in bars or symbol in rejected or not opens <= event_time:
                     continue
@@ -1429,6 +1434,8 @@ def main():
             print(f"{market} 프리장 체결·호가 감시 {len(symbols)}종목 (일봉 통과 조건 없음)")
         else:
             symbols = daily_candidates(previous_session)
+        economic_symbols = event_watch_symbols(market,datetime.now(local_zone))
+        symbols = list(dict.fromkeys([*economic_symbols,*symbols]))[:18]
         if symbols:
             opens = collection_open(opens, datetime.now(local_zone))
         companies = {}
@@ -1484,6 +1491,33 @@ def main():
         raise SystemExit(str(exc)) from None
     except (OSError, ValueError, TimeoutError, WebSocketException) as exc:
         raise SystemExit(f"{market} 장중 실행 실패 ({type(exc).__name__})") from None
+
+
+
+
+def event_watch_symbols(market, at, registry=None, events=None, limit=6):
+    """Translate generic event candidates into supported feed identifiers."""
+    from economic_graph import discover,load_profiles
+    from event_impact_analysis import world_events
+    registry=load_profiles() if registry is None else registry
+    events=world_events(at)[0] if events is None else events
+    selected=[]
+    prefixes={'NMS':'DNAS','NGM':'DNAS','NCM':'DNAS','NAS':'DNAS',
+              'NYQ':'DNYS','NYS':'DNYS','ASE':'DAMS','AMS':'DAMS'}
+    for key in discover(registry,events,at,limit=100):
+        company=registry[key]
+        symbol=company.get('source_symbol') or key
+        if market.startswith('US-'):
+            if symbol.endswith(('.KS','.KQ')): continue
+            prefix=prefixes.get(company.get('exchange'))
+            if prefix:
+                US_SYMBOL_NAMES[symbol]=company.get('display_name') or company.get('company_name') or symbol
+                selected.append(prefix+symbol)
+        elif symbol.endswith(('.KS','.KQ')):
+            KR_SYMBOL_NAMES[symbol]=company.get('company_name') or symbol
+            selected.append(symbol.split('.')[0])
+        if len(selected)>=limit: break
+    return selected
 
 
 if __name__ == "__main__":

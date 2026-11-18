@@ -117,6 +117,7 @@ def discover(registry, events, at, limit=12):
     event_frames=frames(events,at)
     ranked=[]
     for symbol,company in registry.items():
+        if not isinstance(company,dict): continue
         result=connect(company,event_frames,at)
         positive=[link for link in result['links'] if link['direction']>0]
         if positive: ranked.append((symbol,len({(l['event_id'],p) for l in positive for p in l['matched_products']})))
@@ -138,10 +139,14 @@ def save_profiles(companies, path='reports/company-profiles.json'):
     from pathlib import Path
     registry=load_profiles(path)
     keys=('company_name','business_description','industry','country','profile_available_at',
-          'profile_source','business_relationships','available_at','checked_at')
+          'profile_source','business_relationships','available_at','checked_at','source_symbol','exchange','display_name')
     for symbol,company in companies.items():
         if company.get('business_description'):
-            registry[symbol]={key:company[key] for key in keys if key in company}
+            target=company.get('source_symbol') or symbol
+            old=registry.get(target,{})
+            old=old if isinstance(old,dict) else {}
+            registry[target]={**{key:old[key] for key in keys if key in old},
+                              **{key:company[key] for key in keys if key in company}}
     file=Path(path); file.parent.mkdir(parents=True,exist_ok=True)
     temporary=file.with_suffix('.tmp')
     temporary.write_text(json.dumps(registry,ensure_ascii=False),encoding='utf-8')
