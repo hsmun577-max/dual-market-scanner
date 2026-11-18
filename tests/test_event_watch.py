@@ -1,5 +1,6 @@
 from datetime import datetime,timedelta,timezone
 import unittest
+from unittest.mock import patch
 from kis_intraday import event_watch_symbols
 AT=datetime(2026,11,18,13,tzinfo=timezone.utc)
 
@@ -15,6 +16,15 @@ def records(exchange,source):
 
 
 class EventWatchTests(unittest.TestCase):
+    def test_first_seen_during_live_fetch_is_eligible_after_fetch(self):
+        company,event=records('NMS','NEW')
+        event['available_at']=(AT+timedelta(minutes=1)).isoformat()
+        class Clock(datetime):
+            @classmethod
+            def now(cls,tz=None): return (AT+timedelta(minutes=2)).astimezone(tz)
+        with patch('event_impact_analysis.world_events',return_value=([event],[])), patch('kis_intraday.datetime',Clock):
+            self.assertEqual(event_watch_symbols('US-late',AT,{'NEW':company}),['DNASNEW'])
+
     def test_exchange_identifier_comes_from_issuer_exchange(self):
         for exchange,prefix in [('NMS','DNAS'),('NYQ','DNYS'),('ASE','DAMS')]:
             company,event=records(exchange,'NEW')

@@ -1500,7 +1500,10 @@ def event_watch_symbols(market, at, registry=None, events=None, limit=6):
     from economic_graph import discover,load_profiles
     from event_impact_analysis import world_events
     registry=load_profiles() if registry is None else registry
-    events=world_events(at)[0] if events is None else events
+    if events is None:
+        events=world_events(at)[0]
+        # Discovery runs after retrieval; do not exclude events first observed during it.
+        at=datetime.now(at.tzinfo)
     selected=[]
     prefixes={'NMS':'DNAS','NGM':'DNAS','NCM':'DNAS','NAS':'DNAS',
               'NYQ':'DNYS','NYS':'DNYS','ASE':'DAMS','AMS':'DAMS'}
