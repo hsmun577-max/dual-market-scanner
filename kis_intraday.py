@@ -1095,6 +1095,10 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
         return "composite_assessment_incomplete", None
     if forecast["composite_score"] <= 50 or forecast["base_price"] <= limit:
         return "composite_outlook_not_positive", None
+    # Require the base scenario to cover 2% risk at 1.5:1, plus 0.3% friction.
+    # This is a risk policy, not a historically optimized profitability claim.
+    if forecast["base_price"] / limit - 1 < 0.033:
+        return "insufficient_expected_reward", None
     stop = limit * 0.98
     if quote["bid"] <= stop:
         return "entry_below_fixed_stop", None
@@ -1102,7 +1106,7 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     return "buy_signal", (symbol, *metrics, limit, stop, projection)
 
 
-async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False, resistance=None, refresh_context=None, companies=None, sector_snapshot=None):
+async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False, resistance=None, refresh_context=None, companies=None, sector_snapshot=None, followup_minutes=30):
     resistance = resistance or {}
     closes = opens + timedelta(minutes=15)
     feeds = FEEDS[market]
@@ -1175,7 +1179,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                     on_signal, sorted(candidates, key=lambda row: (-(composite_scores.get(row[0]) or 0), -row[1], row[0]))
                 ))
                 evaluated = True
-                deadline = closes + timedelta(minutes=30, seconds=30)
+                deadline = closes + timedelta(minutes=followup_minutes, seconds=30)
                 continue
             try:
                 raw = await asyncio.wait_for(socket.recv(decode=True), min(seconds_left, 60))

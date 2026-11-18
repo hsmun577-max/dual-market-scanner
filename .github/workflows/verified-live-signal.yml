@@ -1,0 +1,110 @@
+name: Verify and send live buy signals
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/verified-live-signal.yml'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: verified-live-signal
+  cancel-in-progress: false
+jobs:
+  verify-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Verify selection regressions before sending
+        run: |
+          python -m compileall -q company_forecast.py kis_intraday.py scanner.py
+          PYTHONPATH=. python tests/test_composite_signal.py
+          PYTHONPATH=. python tests/test_daily_delivery_update.py
+          PYTHONPATH=. python tests/test_sector_update.py
+          PYTHONPATH=. python tests/test_selection_update.py
+      - name: Collect live bars and send validated decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python - <<'PY'
+          import asyncio, json, os, subprocess
+          from pathlib import Path
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+          import exchange_calendars
+          import kis_intraday as k
+          
+          zone=ZoneInfo("America/New_York")
+          now=datetime.now(zone)
+          calendar=exchange_calendars.get_calendar("XNYS")
+          if not calendar.is_session(now.date().isoformat()) or not 4 <= now.hour < 19:
+              raise SystemExit("US live collection is outside a trading session")
+          previous=calendar.previous_session(now.date().isoformat()).date()
+          key=os.environ["KIS_APP_KEY"]; secret=os.environ["KIS_APP_SECRET"]
+          symbols=["DNAS"+s for s in k.US_SYMBOLS]
+          runs=json.loads(subprocess.run(["gh","run","list","--workflow","scanner.yml","--branch","main","--status","success","--limit","3","--json","databaseId"],capture_output=True,text=True,check=True).stdout)
+          for run in runs:
+              folder=Path("source")/str(run["databaseId"])
+              result=subprocess.run(["gh","run","download",str(run["databaseId"]),"--name","scan-results","--dir",str(folder)],capture_output=True)
+              files=list(folder.rglob("latest.json"))
+              if result.returncode==0 and files:
+                  report=json.loads(files[0].read_text(encoding="utf-8-sig"))
+                  for row in report["results"]:
+                      if row.get("market")=="US" and row.get("company_forecast",{}).get("composite_score") is not None:
+                          symbols.append("DNAS"+row["symbol"])
+                  # Include daily-discovery candidates, without treating the daily score as a buy.
+                  import scanner
+                  for row in k.rank_market_candidates([r for r in report["results"] if r.get("market")=="US"],"US"):
+                      if row.get("market")=="US":
+                          symbols.append("DNAS"+row["symbol"])
+                  break
+          symbols.extend(k.us_premarket_leaders(key,secret,now))
+          symbols=list(dict.fromkeys(symbols))[:24]
+          symbols=[s for s in symbols if k.instrument_rejection_reason(s[4:],k.US_SYMBOL_NAMES.get(s[4:],"")) is None]
+          companies,events=k.company_context("US-late",symbols,datetime.now(zone))
+          sectors={"rows":k.sector_flow_snapshot("US",datetime.now(zone))}
+          evidence=k.market_evidence("US-late",previous,datetime.now(zone))+events
+          evidence.extend(k.confirmed_contract_events(companies,"US-late",datetime.now(zone)))
+          ready=datetime.now(zone)+timedelta(minutes=2)
+          opens=ready.replace(minute=ready.minute//5*5,second=0,microsecond=0)+timedelta(minutes=5)
+          decision=opens+timedelta(minutes=15)
+          evidence.extend(k.scheduled_event_evidence("US-late",datetime.now(zone),decision))
+          Path("live-context.json").write_text(json.dumps(evidence),encoding="utf-8")
+          print("LIVE_WINDOW="+json.dumps({"symbols":symbols,"opens":opens.isoformat(),"decision":decision.isoformat()}),flush=True)
+          sent=[]
+          def publish(candidates):
+              k.notify("US-late",candidates,decision,os.environ["TELEGRAM_BOT_TOKEN"],os.environ["TELEGRAM_CHAT_ID"],companies,sectors["rows"])
+              record={"decision_at":decision.isoformat(),"confirmed_buys":len([r for r in candidates if r[4] is not None]),"telegram_sent":True}
+              sent.append(record)
+              Path("live-delivery.json").write_text(json.dumps(record),encoding="utf-8")
+              print("LIVE_DELIVERY="+json.dumps(record),flush=True)
+          def refresh():
+              at=datetime.now(zone)
+              sectors["rows"]=k.sector_flow_snapshot("US",at)
+              updated,risks=k.company_context("US-late",symbols,at)
+              risks.extend(k.confirmed_contract_events(updated,"US-late",at))
+              return updated,risks
+          approval=k.request_approval(key,secret)
+          asyncio.run(k.collect(approval,"US",symbols,opens,publish,Path("US-late.jsonl"),evidence,companies=companies,sector_snapshot=sectors,refresh_context=refresh,followup_minutes=0))
+          Path("live-companies.json").write_text(json.dumps(companies,ensure_ascii=False),encoding="utf-8")
+          if not sent: raise RuntimeError("No delivery confirmation")
+          
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verified-live-signal
+          path: |
+            US-late*.json*
+            live-*.json
+          if-no-files-found: ignore

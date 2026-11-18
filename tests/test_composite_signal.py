@@ -1,4 +1,5 @@
 from copy import deepcopy
+from unittest.mock import patch
 from datetime import datetime, timedelta
 import unittest
 from company_forecast import build_company_forecast
@@ -18,6 +19,17 @@ def inputs():
 
 
 class CompositeSignalTests(unittest.TestCase):
+    def test_new_periodic_filing_blocks_old_financials(self):
+        company,indicators,sectors=inputs()
+        company.update(quarter='2026-06-30',filings=[dict(form='10-K',filing_date='2026-11-17')])
+        result=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
+        self.assertIsNone(result['composite_score'])
+        self.assertIn('latest_report_not_in_financials',result['missing_dimensions'])
+
+    def test_matching_periodic_filing_does_not_block(self):
+        company,indicators,sectors=inputs()
+        company['filings']=[dict(form='10-Q',filing_date='2026-11-05',report_period='2026-09-30')]
+        self.assertIsNotNone(build_company_forecast(company,indicators,100.,AT,sectors=sectors)['composite_score'])
     def test_score_uses_all_dimensions_and_is_not_a_probability(self):
         company,indicators,sectors=inputs()
         result=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
@@ -81,6 +93,13 @@ class CompositeSignalTests(unittest.TestCase):
                   for kind,grade in [('market','supportive'),('event','clear')]]
         status,candidate=evaluate_candidate(bars,quote,AT,'KRX','005930',evidence,False,
                                             company=company,sectors=sectors)
+        self.assertEqual(status,'insufficient_expected_reward')
+        self.assertIsNone(candidate)
+        forecast=build_company_forecast(company,indicators,100.5,AT,sectors=sectors)
+        forecast['base_price']=105.
+        with patch('kis_intraday.build_company_forecast',return_value=forecast):
+            status,candidate=evaluate_candidate(bars,quote,AT,'KRX','005930',evidence,False,
+                                                company=company,sectors=sectors)
         self.assertEqual(status,'buy_signal')
         text=format_notification('KRX',[candidate],AT,{'005930':company},sectors)
         self.assertIn('종합 ',text)

@@ -12,6 +12,29 @@ def _number(mapping, key):
     return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else None
 
 
+def financial_period_missing(company):
+    """A newer periodic filing must not silently leave an older quarter scored."""
+    try:
+        quarter = datetime.fromisoformat(company.get("quarter", "")[:7] + "-01").date()
+    except ValueError:
+        return False
+    for filing in company.get("filings", []):
+        form = filing.get("form", "")
+        period = filing.get("report_period")
+        if period and form in {"10-Q", "10-K", "20-F"}:
+            if period[:7] > company.get("quarter", "")[:7]:
+                return True
+        day = (filing.get("accepted_at") or filing.get("filing_date") or "")[:10]
+        try:
+            filed = datetime.fromisoformat(day).date()
+        except ValueError:
+            continue
+        # Conservative fallback when the index does not expose reportDate.
+        if form in {"10-Q", "10-K", "20-F"} and (filed-quarter).days > 120:
+            return True
+    return False
+
+
 def build_company_forecast(company, indicators, price, at, events=(), sectors=()):
     """Combine available evidence without treating missing observations as neutral."""
     if at.utcoffset() is None or not math.isfinite(price) or price <= 0:
@@ -154,6 +177,8 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     drift = .6*scale*after_pricing
     width = scale*(1+(1-coverage)*.7+uncertainty*.5+priced_in*.3)
     missing = [key for key in weights if key not in components]
+    if financial_period_missing(company):
+        missing.append("latest_report_not_in_financials")
     if free_cash_margin is None and conversion is None:
         missing.append("cash_flow_quality")
     quarter = company.get("quarter", "")[:7]
