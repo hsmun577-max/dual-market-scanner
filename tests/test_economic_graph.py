@@ -25,6 +25,11 @@ def stock(symbol):
 
 
 class EconomicGraphTests(unittest.TestCase):
+    def test_market_presence_is_not_eligibility_for_another_countrys_agreement(self):
+        foreign=company('Produces online games in China and the United States')
+        foreign['country']='United States'
+        self.assertEqual(connect(foreign,frames([event()],AT),AT)['links'],[])
+
     def test_generic_product_region_links_do_not_need_ticker_rules(self):
         registry={name:company() for name in ('NEW_A','NEW_B')}
         self.assertEqual(discover(registry,[event()],AT),['NEW_A','NEW_B'])

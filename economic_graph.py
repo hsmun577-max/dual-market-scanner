@@ -76,11 +76,18 @@ def frames(events, at):
             # Scope is taken from the same sentence, not from unrelated page text.
             products={key for key,words in PRODUCTS.items() if contains(sentence,words)}
             regions={key for key,words in COUNTRIES.items() if contains(sentence,words)}
+            beneficiaries=set()
+            scope_words=[word for product in products for word in PRODUCTS[product]]
+            for country,aliases in COUNTRIES.items():
+                if any(re.search(re.escape(alias)+r'(?:의|산)?\s+'+re.escape(word)+r'(?:s|es)?',sentence,re.I)
+                       or (not alias.isascii() and re.search(re.escape(alias)+r'(?:의|산)?\s*'+re.escape(word),sentence))
+                       for alias in aliases for word in scope_words):
+                    beneficiaries.add(country)
             certainty='unconfirmed' if contains(sentence,UNCERTAIN) else 'announced_policy'
             direction=1 if up and not down else -1 if down and not up else 0
             if certainty=='unconfirmed': direction=0
             output.append(dict(event_id=identity,kind='market_access',products=sorted(products),
-                regions=sorted(regions),direction=direction,status=certainty,
+                regions=sorted(regions),beneficiary_regions=sorted(beneficiaries),direction=direction,status=certainty,
                 available_at=published.isoformat(),source_url=event.get('url'),sentence_index=index,
                 realization='시행·심사·계약 이행 이후; 매출 인식 시점 미확정'))
     return output
@@ -93,6 +100,8 @@ def connect(company, event_frames, at):
     for event in event_frames:
         observed=stamp(event.get('available_at'))
         if not observed or observed>at: continue
+        if event.get('beneficiary_regions') and business['home_country'] not in event['beneficiary_regions']:
+            continue
         products=set(business['products']) & set(event.get('products',[]))
         regions=set(business['countries']) & set(event.get('regions',[]))
         content={'screen_content','games','recorded_music','live_entertainment'}
