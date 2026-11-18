@@ -19,7 +19,10 @@ from websockets.exceptions import WebSocketException
 
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
 from signal_context import context_status
-from scanner import KR_SYMBOL_NAMES, US_SYMBOL_NAMES, calculate_indicators, classify_signal, clean_prices, rank_korean_candidates
+from candidate_selection import instrument_rejection_reason, rank_market_candidates, rank_recovery_candidates
+from sector_flow import format_sector_header
+from telegram_text import split_telegram_text
+from scanner import BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, sector_flow_snapshot, calculate_indicators, classify_signal, clean_prices, rank_korean_candidates
 
 
 # Common shares from the current watchlist. NXT subscription acceptance is checked per session.
@@ -559,7 +562,8 @@ def company_context(market, symbols, now):
     def fetch(symbol):
         suffix = ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS"
         ticker = yf.Ticker(symbol[4:] if overseas else symbol + suffix)
-        snapshot, risks = {}, []
+        snapshot, risks = {"filing_status": "unavailable" if overseas else (
+            "missing_dart_key" if not dart_key else "issuer_mapping_unavailable")}, []
         try:
             articles = ticker.get_news(count=12)
             snapshot["news"] = recent_company_news(articles, now)[:3]
@@ -596,6 +600,7 @@ def company_context(market, symbols, now):
         if overseas:
             try:
                 snapshot["filings"], filing_risks = us_company_filings(ticker, now)
+                snapshot["filing_status"] = "checked"
                 risks.extend({**record, "kind": "event", "market": market, "symbol": symbol,
                               "assessment": "risk"} for record in filing_risks)
             except Exception as exc:
@@ -603,9 +608,11 @@ def company_context(market, symbols, now):
         elif corp_codes.get(symbol):
             try:
                 snapshot["filings"], filing_risks = dart_disclosures(dart_key, corp_codes[symbol], now)
+                snapshot["filing_status"] = "checked"
                 risks.extend({**record, "kind": "event", "market": market, "symbol": symbol,
                               "assessment": "risk"} for record in filing_risks)
             except (requests.RequestException, ValueError, TypeError) as exc:
+                snapshot["filing_status"] = "unavailable"
                 print(f"{market} {symbol} DART unavailable ({type(exc).__name__})")
             try:
                 reports = dart_financial_reports(dart_key, corp_codes[symbol], now)
@@ -739,7 +746,7 @@ def has_premarket_liquidity(rows, end):
             price = float(row["last"])
         except (KeyError, TypeError, ValueError):
             continue
-        if first <= stamp < end and stamp not in seen and volume > 0 and 1 <= price < float("inf"):
+        if first <= stamp < end and stamp not in seen and volume > 0 and 5 <= price < float("inf"):
             seen.add(stamp)
             traded_value += price * volume
             buckets.add(int((stamp - first).total_seconds()) // 300)
@@ -764,7 +771,15 @@ def us_premarket_leaders(app_key, app_secret, now):
         if payload.get("rt_cd") != "0":
             print("US-late premarket ranking unavailable:", payload.get("msg_cd"))
             return []
-        tickers = list(dict.fromkeys(str(row.get("symb") or "") for row in payload.get("output2") or []))
+        tickers = []
+        for row in payload.get("output2") or []:
+            ticker = str(row.get("symb") or "")
+            name = row.get("knam") or row.get("enam") or row.get("name") or US_SYMBOL_NAMES.get(ticker, "")
+            if instrument_rejection_reason(ticker, name) is None:
+                tickers.append(ticker)
+                if name:
+                    US_SYMBOL_NAMES[ticker] = name
+        tickers = list(dict.fromkeys(tickers))
     except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
         print(f"US-late premarket ranking unavailable ({type(exc).__name__})")
         return []
@@ -834,8 +849,10 @@ def select_intraday_leaders(rows, limit=len(SYMBOLS)):
             gain = float(row.get("prdy_ctrt") or 0)
         except (ValueError, TypeError):
             continue
-        if re.fullmatch(r"[0-9A-Z]{6}", symbol) and turnover >= 100_000_000 and gain > 0:
-            leaders.setdefault(symbol, str(row.get("hts_kor_isnm") or symbol))
+        name = str(row.get("hts_kor_isnm") or symbol)
+        if (re.fullmatch(r"[0-9A-Z]{6}", symbol) and turnover >= 1_000_000_000 and 0 < gain <= 8
+                and instrument_rejection_reason(symbol, name) is None):
+            leaders.setdefault(symbol, name)
         if len(leaders) >= limit:
             break
     return leaders
@@ -852,8 +869,12 @@ def daily_candidates(previous_session, overseas=False):
             if fresh:
                 candidates = rank_korean_candidates(
                     [item for item in fresh if item["signal"]["stage"] in
-                     {"장전 관찰 후보", "장중 조건부 진입 후보"}], limit=len(SYMBOLS),
+                     {"장전 관찰 후보", "장중 조건부 진입 후보"}], limit=5,
                 )
+                existing = {item["symbol"] for item in candidates}
+                recoveries = rank_recovery_candidates(fresh, "KR", limit=len(SYMBOLS))
+                candidates.extend(item for item in recoveries if item["symbol"] not in existing)
+                candidates = candidates[:len(SYMBOLS)]
                 for item in candidates:
                     KR_SYMBOL_NAMES[item["symbol"]] = item.get("name") or item["symbol"]
                     KR_SYMBOL_NAMES[f"{item['symbol'].split('.')[0]}.KS"] = KR_SYMBOL_NAMES[item["symbol"]]
@@ -864,10 +885,17 @@ def daily_candidates(previous_session, overseas=False):
     if not overseas:
         print("직전 거래일 전 종목 스캔 자료 없음: 기존 감시 목록 사용")
     tickers = list(US_SYMBOLS) if overseas else [f"{symbol}.KS" for symbol in SYMBOLS]
+    market = "US" if overseas else "KR"
+    benchmark_symbol = BENCHMARKS[market]
     prices = yf.download(
-        tickers, period="1y", interval="1d", auto_adjust=True,
+        list(dict.fromkeys([*tickers, benchmark_symbol])), period="1y", interval="1d", auto_adjust=True,
         group_by="ticker", progress=False, threads=6, timeout=15,
     )
+    try:
+        benchmark = clean_prices(prices[benchmark_symbol].loc[prices[benchmark_symbol].index.date <= previous_session])
+    except (KeyError, ValueError):
+        print("시장 비교 자료 미확보: 일봉 후보 선정 보류")
+        return []
     candidates = []
     for ticker in tickers:
         try:
@@ -875,13 +903,16 @@ def daily_candidates(previous_session, overseas=False):
             history = clean_prices(history.loc[history.index.date <= previous_session])
             if history.index[-1].date() != previous_session:
                 continue
-            signal = classify_signal(calculate_indicators(history))
+            indicators = calculate_indicators(history, benchmark)
+            signal = classify_signal(indicators)
             if signal["stage"] in {"장전 관찰 후보", "장중 조건부 진입 후보"}:
-                candidates.append(f"DNAS{ticker}" if overseas else ticker.split(".")[0])
+                candidates.append({"market": market, "symbol": ticker,
+                                   "name": (US_SYMBOL_NAMES if overseas else KR_SYMBOL_NAMES).get(ticker, ticker),
+                                   "indicators": indicators, "signal": signal})
         except (KeyError, ValueError):
             print(f"일봉 자료 제외: {ticker}")
-    return candidates
-
+    selected = rank_market_candidates(candidates, market, limit=len(SYMBOLS))
+    return [f"DNAS{item['symbol']}" if overseas else item["symbol"].split(".")[0] for item in selected]
 
 def update_bar(bars, slot, event_time, price, size):
     bar = bars.get(slot)
@@ -918,6 +949,14 @@ def candidate_metrics(bars, quote, close_time):
 
 
 def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False, prior_highs=()):
+    ticker = symbol[4:] if overseas else symbol
+    name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (
+        KR_SYMBOL_NAMES.get(symbol + ".KS") or KR_SYMBOL_NAMES.get(symbol + ".KQ") or symbol)
+    reason = instrument_rejection_reason(symbol, name)
+    if reason:
+        return reason, None
+    if overseas and quote is not None and quote.get("ask", 0) < 5:
+        return "low_price", None
     status, metrics = evaluate_breakout(bars, quote, closes)
     if metrics is None:
         return status, None
@@ -1119,14 +1158,14 @@ def research_label(evidence, market, symbol, decision_at):
     return ("우호" if supportive else "우호 의견 미확인") + f" · {latest.astimezone(KST):%m/%d}"
 
 
-def format_notification(market, candidates, closes, companies=None):
+def format_notification(market, candidates, closes, companies=None, sectors=None):
     companies = companies or {}
     overseas = market.startswith("US-")
     session = {"US-early": "미국 프리장", "US-late": "미국 프리장 갱신",
                "NXT": "국내 NXT 프리장", "KRX": "국내 KRX 정규장"}[market]
     headline = "매수 신호" if candidates and candidates[0][4] is not None else "관찰 후보"
     timestamp = f"{closes:%m/%d %H:%M} ET · {closes.astimezone(KST):%H:%M} KST" if overseas else f"{closes:%m/%d %H:%M} KST"
-    lines = [f"{headline} | {session}", timestamp]
+    lines = format_sector_header(sectors, "US" if overseas else "KR") + ["", f"{headline} | {session}", timestamp]
     for symbol, ratio, spread, price, entry_limit, stop, projection in candidates[:5]:
         ticker = symbol[4:] if overseas else symbol
         name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else KR_SYMBOL_NAMES[f"{symbol}.KS"]
@@ -1201,21 +1240,22 @@ def format_notification(market, candidates, closes, companies=None):
     return "\n".join(lines)
 
 
-def notify(market, candidates, closes, token, chat_id, companies=None):
-    message = format_notification(market, candidates, closes, companies)
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message},
-            timeout=10, allow_redirects=False,
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Telegram 발송 실패 (HTTP {response.status_code})")
-        if response.json().get("ok") is not True:
-            raise RuntimeError("Telegram이 발송을 확인하지 않았습니다")
-    except (requests.RequestException, ValueError, AttributeError):
-        raise RuntimeError("Telegram 발송 응답 오류") from None
-    print(f"Telegram sent: {market} intraday candidates")
+def notify(market, candidates, closes, token, chat_id, companies=None, sectors=None):
+    message = format_notification(market, candidates, closes, companies, sectors)
+    for message in split_telegram_text(message):
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": message},
+                timeout=10, allow_redirects=False,
+            )
+            if response.status_code != 200:
+                raise RuntimeError(f"Telegram 발송 실패 (HTTP {response.status_code})")
+            if response.json().get("ok") is not True:
+                raise RuntimeError("Telegram이 발송을 확인하지 않았습니다")
+        except (requests.RequestException, ValueError, AttributeError):
+            raise RuntimeError("Telegram 발송 응답 오류") from None
+        print(f"Telegram sent: {market} intraday candidates")
 
 
 def filter_us_updates(candidates, today, path):
@@ -1304,6 +1344,7 @@ def main():
         if symbols:
             opens = collection_open(opens, datetime.now(local_zone))
         companies = {}
+        sector_snapshot = {"rows": sector_flow_snapshot("US" if overseas else "KR", datetime.now(local_zone))}
         if symbols:
             observed_market = market_evidence(market, previous_session, datetime.now(local_zone))
             evidence.extend(observed_market)
@@ -1330,7 +1371,7 @@ def main():
                     company = companies.setdefault(symbol, {})
                     company["research_label"] = research_label(evidence, market, symbol, decision_at)
                     company["event_score"] = event_impact(evidence, market, symbol, decision_at)
-                notify(market, candidates, decision_at, token, chat_id, companies)
+                notify(market, candidates, decision_at, token, chat_id, companies, sectors=sector_snapshot["rows"])
             else:
                 print(f"{market} 장중 알림 조건 충족 없음")
 
@@ -1338,6 +1379,7 @@ def main():
             resistance = prior_resistance(symbols, previous_session, overseas)
             def refresh_companies():
                 checked_at = datetime.now(local_zone)
+                sector_snapshot["rows"] = sector_flow_snapshot("US" if overseas else "KR", checked_at)
                 refreshed, events = company_context(market, symbols, checked_at)
                 events.extend(confirmed_contract_events(refreshed, market, checked_at))
                 return refreshed, events

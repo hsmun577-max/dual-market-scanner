@@ -1,0 +1,102 @@
+name: Updated daily alert delivery check
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/daily-alert-update.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify_and_deliver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Verify selection, sector header and daily company rendering
+        run: |
+          PYTHONPATH=. python tests/test_selection_update.py
+          PYTHONPATH=. python tests/test_sector_update.py
+          PYTHONPATH=. python tests/test_daily_delivery_update.py
+      - name: Prepare a fresh enriched message from the latest full scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import json, subprocess, os
+          from pathlib import Path
+          from datetime import datetime, timezone
+          from zoneinfo import ZoneInfo
+          from unittest.mock import patch, Mock
+          import scanner
+          
+          runs = json.loads(subprocess.run(["gh","run","list","--workflow","scanner.yml","--branch","main",
+              "--status","success","--limit","10","--json","databaseId"],check=True,capture_output=True,text=True).stdout)
+          report = None
+          for run in runs:
+              folder = Path("loaded")/str(run["databaseId"])
+              downloaded = subprocess.run(["gh","run","download",str(run["databaseId"]),"--name","scan-results","--dir",str(folder)],capture_output=True,text=True)
+              files = list(folder.rglob("latest.json"))
+              if downloaded.returncode == 0 and files:
+                  report = json.loads(files[0].read_text(encoding="utf-8-sig"))
+                  source_run = run["databaseId"]
+                  break
+          if report is None:
+              raise SystemExit("No saved full scan report available")
+          now = datetime.now(timezone.utc)
+          report["sectors"] = [row for market, zone in (("KR","Asia/Seoul"),("US","America/New_York"))
+                               for row in scanner.sector_flow_snapshot(market,now.astimezone(ZoneInfo(zone)))]
+          scanner.prepare_selected_analysis(report)
+          selected = [row for row in report["results"] if row.get("company_analysis_at")]
+          financials = [row for row in selected if "operating_margin_pct" in row.get("company_analysis",{})]
+          if not financials:
+              raise SystemExit("Daily alert company financial lookup still failed for every selected issuer")
+          Path("updated-daily-report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+          messages = []
+          def capture(*args,**kwargs):
+              messages.append(kwargs["json"]["text"])
+              return Mock(status_code=200,json=lambda:{"ok":True})
+          with patch.object(scanner.requests,"post",side_effect=capture):
+              scanner.send_telegram_summary(report)
+          assert messages and messages[0].startswith("섹터 매수세")
+          assert all(len(text)<=3800 for text in messages)
+          assert "미검증" not in "\n".join(messages)
+          Path("telegram-preview.md").write_text("\n\n---\n\n".join(messages),encoding="utf-8")
+          summary={"source_run":source_run,"source_generated_at":report["generated_at"],
+                   "company_checked_at":report["company_analysis_at"],"selected_issuers":len(selected),
+                   "financials_available":len(financials),"sector_snapshots":len(report["sectors"]),
+                   "message_parts":len(messages),
+                   "companies":[{"symbol":row["symbol"],"name":row.get("name"),
+                       "financials":row.get("fundamentals"),"analysis":row.get("company_analysis")} for row in selected]}
+          Path("daily-delivery-check.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("DAILY_ALERT_CHECK="+json.dumps(summary,ensure_ascii=False),flush=True)
+          
+          PY
+      - name: Deliver the updated report to the configured Telegram chat
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from scanner import send_telegram_summary
+          report=json.loads(Path("updated-daily-report.json").read_text(encoding="utf-8"))
+          send_telegram_summary(report)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: updated-daily-alert
+          path: |
+            telegram-preview.md
+            daily-delivery-check.json
+            updated-daily-report.json
+          if-no-files-found: ignore

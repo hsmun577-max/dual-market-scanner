@@ -2,6 +2,8 @@ import json
 import math
 import os
 import time
+import re
+from zoneinfo import ZoneInfo
 import argparse
 from io import BytesIO
 from pathlib import Path
@@ -11,6 +13,9 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import requests
+from candidate_selection import candidate_rejection_reason, rank_market_candidates, rank_recovery_candidates
+from sector_flow import fetch_intraday_sectors, format_sector_header
+from telegram_text import split_telegram_text
 import yfinance as yf
 
 KR_SYMBOL_NAMES = {
@@ -83,6 +88,9 @@ SECTOR_ETFS = {
     "KR": {
         "091160.KS": "반도체", "305720.KS": "2차전지", "244580.KS": "바이오",
         "091180.KS": "자동차", "091170.KS": "은행", "102970.KS": "증권",
+        "266370.KS": "IT·전자부품", "395160.KS": "AI반도체",
+        "117700.KS": "건설", "117680.KS": "철강", "140710.KS": "운송",
+        "487240.KS": "AI전력설비", "0115D0.KS": "조선", "0080G0.KS": "방산",
     },
     "US": {
         "XLK": "기술", "XLF": "금융", "XLE": "에너지", "XLV": "헬스케어",
@@ -334,6 +342,7 @@ def calculate_indicators(data, benchmark=None):
         "ma60": safe_float(ma60),
         "volume": safe_float(volume.iloc[-1]),
         "volume_ratio": safe_float(volume_ratio),
+        "average_turnover_20d": safe_float((close * volume).iloc[-21:-1].mean()),
         "return_5d": safe_float(return_5),
         "return_20d": safe_float(return_20),
         "relative_strength": safe_float(relative_strength),
@@ -380,8 +389,7 @@ def classify_signal(indicators, inverse=False):
         reasons.append("20일 고점 돌파")
 
     if indicators["rebound"]:
-        score += 2
-        reasons.append("급락 후 반등 징후")
+        reasons.append("급락 후 반등 · 추세 확인 필요")
 
     if indicators["overheated"]:
         return {
@@ -392,7 +400,11 @@ def classify_signal(indicators, inverse=False):
             "direction": direction
         }
 
-    if score >= 5:
+    if indicators.get("breakdown"):
+        stage = "하락 관찰"
+    elif indicators["rebound"]:
+        stage = "반등 관찰"
+    elif score >= 5:
         stage = "장중 조건부 진입 후보"
     elif score >= 3:
         stage = "장전 관찰 후보"
@@ -471,11 +483,12 @@ def scan_market(market, tickers, benchmark, names=None, prices=None):
                 "data_checked_at": datetime.now(
                     timezone.utc
                 ).isoformat(),
-                "fundamentals": "미검증",
-                "news_and_filings": "미검증",
+                "fundamentals": "발송 후보 선정 후 조회",
+                "news_and_filings": "발송 후보 선정 후 조회",
                 "institutional_flows": "미검증"
             }
 
+            result["selection_filter"] = candidate_rejection_reason(result, market) or "eligible"
             results.append(result)
             if prices is None:
                 print(f"{market} {symbol}: {signal['stage']}")
@@ -492,32 +505,48 @@ def scan_market(market, tickers, benchmark, names=None, prices=None):
     return results, errors
 
 def rank_korean_candidates(candidates, limit=5):
-    """Rank liquid trend candidates with a confirmed price or volume trigger."""
-    liquid = []
-    for item in candidates:
-        indicators = item["indicators"]
-        turnover = (indicators.get("price") or 0) * (indicators.get("volume") or 0)
-        positive_trend = (
-            (indicators.get("return_5d") or 0) > 0
-            and (indicators.get("return_20d") or 0) > 0
-            and (indicators.get("relative_strength") or 0) > 0
-            and (indicators.get("price") or 0) > (indicators.get("ma20") or 0) > 0
-        )
-        price_or_volume_trigger = bool(indicators.get("breakout")) or (
-            (indicators.get("volume_ratio") or 0) >= 2
-            and (indicators.get("return_5d") or 0) >= 0.05
-        )
-        if turnover >= 100_000_000 and positive_trend and price_or_volume_trigger:
-            liquid.append((item, turnover))
-    unusual = sorted(
-        (pair for pair in liquid if (pair[0]["indicators"].get("volume_ratio") or 0) >= 2),
-        key=lambda pair: (-pair[0]["indicators"]["volume_ratio"], -pair[1], pair[0]["symbol"]),
-    )
-    ranked = sorted(liquid, key=lambda pair: (-(pair[0]["signal"]["score"] - 2 * bool(pair[0]["indicators"].get("rebound"))), -pair[1], pair[0]["symbol"]))
-    selected = {}
-    for item, _ in unusual[:2] + ranked:
-        selected.setdefault(item["symbol"], item)
-    return list(selected.values())[:limit]
+    """Keep the public domestic selector on the shared market eligibility rules."""
+    return rank_market_candidates(candidates, "KR", limit)
+
+def prepare_selected_analysis(report):
+    """Fetch evidence for the actual daily alert candidates before saving and sending."""
+    from kis_intraday import company_context, KR_SYMBOL_NAMES as context_kr_names, US_SYMBOL_NAMES as context_us_names
+
+    checked = datetime.now(timezone.utc)
+    for market in ("KR", "US"):
+        pool = [item for item in report["results"] if item["market"] == market]
+        ranked = rank_market_candidates(pool, market)
+        recovery = rank_recovery_candidates(pool, market, limit=8)
+        symbols = {item["symbol"] for item in ranked}
+        selected = ranked + [item for item in recovery if item["symbol"] not in symbols][:3]
+        keys = {}
+        for item in selected:
+            symbol = item["symbol"].split(".")[0] if market == "KR" else "DNAS" + item["symbol"]
+            keys[symbol] = item
+            if market == "KR":
+                context_kr_names[item["symbol"]] = item.get("name") or item["symbol"]
+                context_kr_names[symbol + ".KS"] = item.get("name") or symbol
+            else:
+                context_us_names[item["symbol"]] = item.get("name") or item["symbol"]
+        if not keys:
+            continue
+        try:
+            companies, risks = company_context("KRX" if market == "KR" else "US-late", list(keys), checked)
+        except Exception as exc:
+            companies, risks = {}, []
+            print(f"{market} daily company analysis failed ({type(exc).__name__})")
+        for symbol, item in keys.items():
+            company = companies.get(symbol, {})
+            item["company_analysis"] = company
+            item["company_analysis_at"] = company.get("checked_at", checked.isoformat())
+            margin = company.get("operating_margin_pct")
+            item["fundamentals"] = ("영업흑자" if margin is not None and margin > 0 else
+                                    "영업적자" if margin is not None and margin < 0 else
+                                    "손익분기" if margin == 0 else "재무자료 조회 실패 또는 미제공")
+            item["news_and_filings"] = f"기사 {len(company.get('news', []))}건 · 공시 {len(company.get('filings', []))}건"
+            item["risk_headlines"] = list(dict.fromkeys(
+                row.get("headline", "") for row in risks if row.get("symbol") == symbol))[:2]
+    report["company_analysis_at"] = checked.isoformat()
 
 
 def telegram_candidate_line(item):
@@ -533,12 +562,37 @@ def telegram_candidate_line(item):
     if price is not None:
         price_label = f"{price:,.0f}원" if item["market"] == "KR" else f"${price:,.2f}"
         label = f"{label} · 일봉 스캔 기준가 {price_label}"
-    return (
-        f"• {label}\n"
-        f"  {signal['stage']} {signal['score']}점 · {reasons} · {data_date}\n"
-        f"  기업분석 {item.get('fundamentals', '미검증')} · 뉴스·공시 {item.get('news_and_filings', '미검증')}"
-    )
-
+    lines = [f"• {label}", f"  {signal['stage']} {signal['score']}점 · {reasons} · {data_date}"]
+    company = item.get("company_analysis", {})
+    if "operating_margin_pct" in company:
+        financial = f"  기업실적 · {company['quarter']} 영업이익률 {company['operating_margin_pct']:+.1f}%"
+        if "revenue_yoy_pct" in company:
+            financial += f" / 매출 전년 대비 {company['revenue_yoy_pct']:+.1f}%"
+        lines.append(financial + f" · {company.get('financial_source', 'Yahoo Finance')}")
+    else:
+        lines.append("  기업실적 · ETF는 기업 손익 적용 대상 아님" if re.search(
+            r"^(?:KODEX|TIGER|RISE|SOL|ACE|HANARO|PLUS|SPDR|iShares|Vanguard)|\bETF\b",
+            name or "", re.I) else "  기업실적 · 재무자료 조회 실패 또는 제공 자료 없음")
+    if company.get("filings"):
+        filing = company["filings"][0]
+        lines.append(f"  공시 · {filing['filing_date']} {filing['form'][:55]}")
+    else:
+        lines.append("  공시 · " + {"missing_dart_key":"DART API 키 미설정",
+                    "issuer_mapping_unavailable":"공시 발행사 매핑 실패",
+                    "unavailable":"조회 실패", "checked":"최근 공시 없음"}.get(
+                        company.get("filing_status"), "조회 결과 없음"))
+    if company.get("news"):
+        article = company["news"][0]
+        lines.append(f"  뉴스 · {article['source']} / {article['headline'][:85]}")
+    else:
+        lines.append("  뉴스 · 최근 24시간 검색 결과 없음" if company.get("news_status")=="no_recent_articles"
+                     else "  뉴스 · 조회 실패 또는 제공 자료 없음")
+    if item.get("risk_headlines"):
+        lines.append("  위험 확인 · " + " / ".join(item["risk_headlines"])[:110])
+    if item.get("company_analysis_at"):
+        stamp = datetime.fromisoformat(item["company_analysis_at"]).astimezone(ZoneInfo("Asia/Seoul"))
+        lines.append(f"  기업·뉴스 조회 {stamp:%m/%d %H:%M} KST")
+    return "\n".join(lines)
 
 def sector_metrics(prices, benchmark):
     data = prices[["Close", "Adj Close", "Volume"]].replace([np.inf, -np.inf], np.nan).dropna()
@@ -558,6 +612,9 @@ def sector_metrics(prices, benchmark):
     market_change = float(benchmark["Close"].iloc[-1] / benchmark["Close"].iloc[-2] - 1)
     ratio = float(turnover.iloc[-1] / average_turnover)
     relative = change - market_change
+    previous_ratio = (float(turnover.iloc[-2] / turnover.iloc[-22:-2].mean())
+                      if len(data) >= 22 and turnover.iloc[-22:-2].mean() > 0 else None)
+    early = change > 0 and relative > 0 and ratio >= 1.3
     return {
         "data_date": dates[-1].date().isoformat(),
         "return_pct": safe_float(change * 100),
@@ -565,6 +622,10 @@ def sector_metrics(prices, benchmark):
         "estimated_turnover": safe_float(turnover.iloc[-1]),
         "turnover_ratio": safe_float(ratio),
         "active": change > 0 and relative > 0 and ratio >= SECTOR_TURNOVER_THRESHOLD,
+        "early": early,
+        "starting": early and previous_ratio is not None and previous_ratio < 1.3,
+        "previous_turnover_ratio": previous_ratio,
+        "source": "daily_vs_20d",
     }
 
 
@@ -590,6 +651,35 @@ def scan_sectors(benchmarks):
     return results, errors
 
 
+def sector_flow_snapshot(market, now):
+    """Prefer dated intraday comparisons and fall back to the last completed daily session."""
+    sectors = SECTOR_ETFS[market]
+    try:
+        rows = fetch_intraday_sectors(sectors, BENCHMARKS[market], market, now)
+        if rows:
+            return rows
+    except Exception as exc:
+        print(f"{market} sector minute data unavailable ({type(exc).__name__})")
+    rows = []
+    try:
+        prices = yf.download([*sectors, BENCHMARKS[market]], period="3mo", interval="1d",
+                             auto_adjust=False, group_by="ticker", progress=False,
+                             threads=4, timeout=8, multi_level_index=True)
+        benchmark = prices[BENCHMARKS[market]]
+        benchmark = benchmark.loc[benchmark.index.date < now.date()]
+        for symbol, name in sectors.items():
+            try:
+                data = prices[symbol]
+                data = data.loc[data.index.date < now.date()]
+                metrics = sector_metrics(data, benchmark)
+                rows.append({"market": market, "symbol": symbol, "name": name, **metrics})
+            except (KeyError, ValueError):
+                continue
+    except Exception as exc:
+        print(f"{market} sector daily data unavailable ({type(exc).__name__})")
+    return rows
+
+
 def send_telegram_summary(report):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -603,12 +693,13 @@ def send_telegram_summary(report):
         item for item in report["results"]
         if item["signal"]["stage"] in {"장전 관찰 후보", "장중 조건부 진입 후보"}
     ]
-    sectors = [item for item in report.get("sectors", []) if item["active"]]
-    if not candidates and not sectors:
+    sectors = report.get("sectors", [])
+    if not candidates and not sectors and not any(rank_recovery_candidates(
+            [item for item in report["results"] if item["market"] == market], market) for market in ("KR", "US")):
         print("Telegram skipped: no watch candidates")
         return
 
-    lines = [
+    lines = format_sector_header(sectors) + [""] + [
         "듀얼스캐너 일봉 관찰 후보",
         "매수 진입가 · 미제시",
         f"조회 성공 {report['successful']}/{report['attempted']} · 후보 {len(candidates)}개",
@@ -618,43 +709,39 @@ def send_telegram_summary(report):
             (item for item in candidates if item["market"] == market),
             key=lambda item: (-item["signal"]["score"], item["symbol"]),
         )
-        if market == "KR":
-            ranked = rank_korean_candidates(ranked)
+        ranked = rank_market_candidates(ranked, market)
         if ranked:
             lines.append(f"\n[{market_name} 종목 후보]")
             lines.extend(telegram_candidate_line(item) for item in ranked[:5])
-    if sectors:
-        for market, market_name in (("KR", "국장"), ("US", "미장")):
-            ranked = sorted(
-                (item for item in sectors if item["market"] == market),
-                key=lambda item: (-item["turnover_ratio"], item["symbol"]),
-            )
-            if ranked:
-                lines.append(f"\n[{market_name} 섹터 거래 집중 · 대표 ETF]")
-            for item in ranked[:3]:
-                lines.append(
-                    f"• {item['name']} ({item['symbol']})  {item['return_pct']:+.2f}%\n"
-                    f"  거래대금 약 {item['turnover_ratio']:.2f}배 · "
-                    f"시장 대비 {item['market_excess_pct']:+.2f}%p · {item['data_date']}"
-                )
+    for market, market_name in (("KR", "국장"), ("US", "미장")):
+        main_symbols = {item["symbol"] for item in rank_market_candidates(
+            [item for item in report["results"] if item["market"] == market], market)}
+        recovery = [item for item in rank_recovery_candidates(
+            [item for item in report["results"] if item["market"] == market], market, limit=8)
+                    if item["symbol"] not in main_symbols][:3]
+        if recovery:
+            lines.append(f"\n[{market_name} 추세 회복 감시 · 장중 확인 전]")
+            lines.extend(telegram_candidate_line(item) for item in recovery)
     lines.append("\n전체 결과는 GitHub 실행 보고서")
 
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": "\n".join(lines)},
-            timeout=10,
-            allow_redirects=False,
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Telegram returned HTTP {response.status_code}")
-        body = response.json()
-        if not isinstance(body, dict) or body.get("ok") is not True:
-            raise RuntimeError("Telegram did not confirm delivery")
-    except (requests.RequestException, ValueError):
-        raise RuntimeError("Telegram request failed or returned invalid JSON") from None
-
-    print("Telegram sent: daily watch candidates")
+    messages = split_telegram_text("\n".join(lines))
+    for message in messages:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": message},
+                timeout=10,
+                allow_redirects=False,
+            )
+            if response.status_code != 200:
+                raise RuntimeError(f"Telegram returned HTTP {response.status_code}")
+            body = response.json()
+            if not isinstance(body, dict) or body.get("ok") is not True:
+                raise RuntimeError("Telegram did not confirm delivery")
+        except (requests.RequestException, ValueError):
+            raise RuntimeError("Telegram request failed or returned invalid JSON") from None
+    
+    print(f"Telegram confirmed: {len(messages)} daily report parts")
 
 
 def main():
@@ -758,12 +845,20 @@ def main():
             "일봉 기반이며 실시간 매수 확정 불가",
             "당일 미완성 봉 포함 가능",
             "실시간 VWAP 미구현",
-            "뉴스·공시·거시경제 연동 미구현",
-            "기업 펀더멘털 분석 미구현",
+            "기사·공시 조회는 발송 후보에 한정하며 거시 이벤트의 기업 실적 영향 정량평가는 미구현",
+            "발송 후보의 분기 손익·매출 증감은 조회하나 기업가치 전체 평가는 미구현",
             "백테스트 및 표본 외 검증 미구현",
             "실제 투자 승률 검증되지 않음"
         ]
     }
+
+    if os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("DART_API_KEY"):
+        checked = datetime.now(timezone.utc)
+        report["sectors"] = [
+            row for market, zone in (("KR", "Asia/Seoul"), ("US", "America/New_York"))
+            for row in sector_flow_snapshot(market, checked.astimezone(ZoneInfo(zone)))
+        ]
+        prepare_selected_analysis(report)
 
     output = REPORT_DIR / "latest.json"
 
