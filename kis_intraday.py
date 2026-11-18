@@ -197,7 +197,8 @@ def korean_company_news(symbol, now):
     if not name or name == symbol:
         return []
     response = requests.get("https://news.google.com/rss/search", params={
-        "q": f'"{name}" 주식 when:1d', "hl": "ko", "gl": "KR", "ceid": "KR:ko",
+        "q": f'"{name}" (실적 OR 수주 OR 공시 OR 매출 OR 투자 OR 규제) when:1d',
+        "hl": "ko", "gl": "KR", "ceid": "KR:ko",
     }, timeout=8)
     response.raise_for_status()
     articles = []
@@ -208,6 +209,8 @@ def korean_company_news(symbol, now):
         except (ValueError, TypeError):
             continue
         if name not in title or published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
+            continue
+        if not re.search(r"실적|수주|공시|매출|영업|공급|계약|배당|증자|자사주|인수|합병|파산|회생|거래정지|상장폐지|규제|제재|관세|수출|가이던스|contract|earnings", title, re.IGNORECASE):
             continue
         articles.append({"headline": title, "available_at": published.isoformat(),
                          "source": item.findtext("source", "Google News"),
@@ -936,7 +939,7 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     return "buy_signal", (symbol, *metrics, limit, stop, projection)
 
 
-async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False, resistance=None):
+async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False, resistance=None, refresh_context=None, companies=None):
     resistance = resistance or {}
     closes = opens + timedelta(minutes=15)
     feeds = FEEDS[market]
@@ -946,12 +949,31 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
     quotes = {}
     followup = {symbol: [] for symbol in symbols}
     evaluated = False
+    refresh_task = None
+    next_refresh = opens + timedelta(minutes=5)
     deadline = closes
     async with connect(FEED_URL, open_timeout=15, close_timeout=3) as socket:
         for tr_id, symbol in sorted(pending):
             await socket.send(json.dumps(subscription(approval, tr_id, symbol)))
         while True:
             received = datetime.now(KST)
+            if refresh_task is not None and refresh_task.done():
+                try:
+                    refreshed, events = refresh_task.result()
+                    if not evaluated:
+                        if companies is not None:
+                            companies.update(refreshed)
+                        evidence.extend(events)
+                        Path("signal-context.json").write_text(json.dumps(evidence), encoding="utf-8")
+                        print(f"{samples_path.stem} 기업·뉴스 갱신 완료 {received.isoformat()}", flush=True)
+                    else:
+                        print(f"{samples_path.stem} 판정 후 도착한 기업·뉴스 자료 제외", flush=True)
+                except Exception as exc:
+                    print(f"{samples_path.stem} 기업·뉴스 갱신 실패 ({type(exc).__name__})", flush=True)
+                refresh_task = None
+            if refresh_context is not None and not evaluated and received < closes and received >= next_refresh and refresh_task is None:
+                refresh_task = asyncio.create_task(asyncio.to_thread(refresh_context))
+                next_refresh = received + timedelta(minutes=5)
             seconds_left = (deadline - received).total_seconds()
             if seconds_left <= 0:
                 if evaluated:
@@ -991,7 +1013,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 deadline = closes + timedelta(minutes=30, seconds=30)
                 continue
             try:
-                raw = await asyncio.wait_for(socket.recv(decode=True), seconds_left)
+                raw = await asyncio.wait_for(socket.recv(decode=True), min(seconds_left, 60))
             except TimeoutError:
                 continue
             received = datetime.now(KST)
@@ -1048,6 +1070,11 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
             }
             output.write(json.dumps(row, allow_nan=False) + "\n")
     await notification
+    if refresh_task is not None:
+        try:
+            await refresh_task
+        except Exception as exc:
+            print(f"{samples_path.stem} 기업·뉴스 갱신 종료 ({type(exc).__name__})", flush=True)
 
 
 def event_impact(evidence, market, symbol, decision_at):
@@ -1309,12 +1336,18 @@ def main():
 
         if symbols:
             resistance = prior_resistance(symbols, previous_session, overseas)
+            def refresh_companies():
+                checked_at = datetime.now(local_zone)
+                refreshed, events = company_context(market, symbols, checked_at)
+                events.extend(confirmed_contract_events(refreshed, market, checked_at))
+                return refreshed, events
+
             wait_for_connection_window(opens)
             approval = request_approval(app_key, app_secret)
             opens = collection_open(scheduled_open, datetime.now(local_zone))
             if opens != scheduled_open:
                 print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=15):%H:%M}")
-            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds), resistance=resistance))
+            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds), resistance=resistance, refresh_context=refresh_companies, companies=companies))
         else:
             print(f"{market} 감시 후보 없음")
             publish([])
