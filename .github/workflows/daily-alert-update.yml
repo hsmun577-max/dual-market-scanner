@@ -22,7 +22,7 @@ jobs:
           PYTHONPATH=. python tests/test_selection_update.py
           PYTHONPATH=. python tests/test_sector_update.py
           PYTHONPATH=. python tests/test_daily_delivery_update.py
-      - name: Prepare a fresh enriched message from the latest full scan
+      - name: Prepare a fresh message with verified income statement field names
         env:
           GH_TOKEN: ${{ github.token }}
           DART_API_KEY: ${{ secrets.DART_API_KEY }}

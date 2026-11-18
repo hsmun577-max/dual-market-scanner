@@ -239,17 +239,19 @@ def dart_financial_reports(api_key, corp_code, now):
 
 
 def company_financials(statement, today):
+    revenue_key = next((key for key in ("TotalRevenue", "Total Revenue") if key in statement.index), None)
+    income_key = next((key for key in ("OperatingIncome", "Operating Income") if key in statement.index), None)
+    if revenue_key is None or income_key is None:
+        return {}
     quarters = sorted((col for col in statement.columns if col.date() < today), reverse=True)
     for quarter in quarters:
-        if not {"Total Revenue", "Operating Income"}.issubset(statement.index):
-            return {}
-        sales, income = (float(statement.loc[key, quarter]) for key in ("Total Revenue", "Operating Income"))
+        sales, income = (float(statement.loc[key, quarter]) for key in (revenue_key, income_key))
         if not math.isfinite(sales) or sales <= 0 or not math.isfinite(income):
             continue
         result = {"quarter": quarter.date().isoformat(), "operating_margin_pct": 100 * income / sales}
         prior = next((col for col in quarters if 350 <= (quarter - col).days <= 380), None)
         if prior is not None:
-            prior_sales = float(statement.loc["Total Revenue", prior])
+            prior_sales = float(statement.loc[revenue_key, prior])
             if math.isfinite(prior_sales) and prior_sales > 0:
                 result["revenue_yoy_pct"] = 100 * (sales / prior_sales - 1)
         return result

@@ -24,7 +24,9 @@ def instrument_rejection_reason(symbol, name, asset_type=""):
     if CASH_OR_BOND.search(label):
         return "cash_or_bond_product"
     if (COMPLEX_ETF.search(label) or ticker in KNOWN_COMPLEX
-            or asset_type in {"inverse_etf", "leveraged_etf"}):
+            or asset_type in {"inverse_etf", "leveraged_etf"}
+            or (re.search(r"Direxion|디렉시온|ProShares|프로셰어즈", label, re.I)
+                and re.search(r"\bbear\b|베어", label, re.I))):
         return "complex_product"
     return None
 

@@ -6,6 +6,18 @@ from telegram_text import split_telegram_text
 
 
 class DailyDeliveryTests(unittest.TestCase):
+    def test_actual_yahoo_field_names_and_pretty_aliases(self):
+        import pandas as pd
+        from datetime import date
+        from kis_intraday import company_financials
+        columns=pd.to_datetime(['2026-09-30','2025-09-30'])
+        raw=pd.DataFrame([[1200,1000],[180,100]],index=['TotalRevenue','OperatingIncome'],columns=columns)
+        actual=company_financials(raw,date(2026,11,18))
+        pretty=company_financials(raw.rename(index={'TotalRevenue':'Total Revenue','OperatingIncome':'Operating Income'}),date(2026,11,18))
+        self.assertEqual(actual,pretty)
+        self.assertEqual(actual['operating_margin_pct'],15)
+        self.assertAlmostEqual(actual['revenue_yoy_pct'],20)
+
     def row(self):
         return dict(market='KR',symbol='005930.KS',name='삼성전자',asset_type='stock_or_etf',
             signal=dict(score=6,stage='장중 조건부 진입 후보',reasons=['거래량 증가']),
