@@ -16,6 +16,7 @@ import requests
 from candidate_selection import candidate_rejection_reason, rank_market_candidates, rank_recovery_candidates
 from sector_flow import fetch_intraday_sectors, format_sector_header
 from telegram_text import split_telegram_text
+from company_forecast import build_company_forecast
 import yfinance as yf
 
 KR_SYMBOL_NAMES = {
@@ -295,6 +296,7 @@ def calculate_indicators(data, benchmark=None):
     )
 
     relative_strength = None
+    market_return = None
 
     if benchmark is not None:
         aligned = pd.concat(
@@ -342,6 +344,10 @@ def calculate_indicators(data, benchmark=None):
         "ma60": safe_float(ma60),
         "volume": safe_float(volume.iloc[-1]),
         "volume_ratio": safe_float(volume_ratio),
+        "volatility_20d": safe_float(volatility_20),
+        "atr14_pct": safe_float(100 * pd.concat([high-low, (high-close.shift()).abs(),
+            (low-close.shift()).abs()],axis=1).max(axis=1).tail(14).mean()/price),
+        "market_return_20d": safe_float(market_return),
         "average_turnover_20d": safe_float((close * volume).iloc[-21:-1].mean()),
         "return_5d": safe_float(return_5),
         "return_20d": safe_float(return_20),
@@ -544,55 +550,32 @@ def prepare_selected_analysis(report):
                                     "영업적자" if margin is not None and margin < 0 else
                                     "손익분기" if margin == 0 else "재무자료 조회 실패 또는 미제공")
             item["news_and_filings"] = f"기사 {len(company.get('news', []))}건 · 공시 {len(company.get('filings', []))}건"
+            item["company_forecast"] = build_company_forecast(company, {**company.get("price_indicators", {}), **item["indicators"]},
+                item["indicators"]["price"], datetime.now(timezone.utc),
+                [row for row in risks if row.get("symbol") == symbol], report.get("sectors", []))
             item["risk_headlines"] = list(dict.fromkeys(
                 row.get("headline", "") for row in risks if row.get("symbol") == symbol))[:2]
     report["company_analysis_at"] = checked.isoformat()
 
 
 def telegram_candidate_line(item):
-    signal = item["signal"]
-    indicators = item["indicators"]
-    data_date = indicators["data_date"]
-    reasons = " · ".join(signal["reasons"][:2])
+    forecast = item.get("company_forecast", {})
+    signal = item.get("signal", {})
+    entry = signal.get("entry_limit")
+    score = forecast.get("composite_score")
+    if signal.get("confirmed") is not True or score is None or entry is None:
+        return ""
     symbol = item["symbol"]
-    name = item.get("name") or KR_SYMBOL_NAMES.get(symbol)
-    code = symbol.split(".")[0] if item["market"] == "KR" else symbol
-    label = f"{name} ({code})" if name else code
-    price = indicators.get("price")
-    if price is not None:
-        price_label = f"{price:,.0f}원" if item["market"] == "KR" else f"${price:,.2f}"
-        label = f"{label} · 일봉 스캔 기준가 {price_label}"
-    lines = [f"• {label}", f"  {signal['stage']} {signal['score']}점 · {reasons} · {data_date}"]
-    company = item.get("company_analysis", {})
-    if "operating_margin_pct" in company:
-        financial = f"  기업실적 · {company['quarter']} 영업이익률 {company['operating_margin_pct']:+.1f}%"
-        if "revenue_yoy_pct" in company:
-            financial += f" / 매출 전년 대비 {company['revenue_yoy_pct']:+.1f}%"
-        lines.append(financial + f" · {company.get('financial_source', 'Yahoo Finance')}")
-    else:
-        lines.append("  기업실적 · ETF는 기업 손익 적용 대상 아님" if re.search(
-            r"^(?:KODEX|TIGER|RISE|SOL|ACE|HANARO|PLUS|SPDR|iShares|Vanguard)|\bETF\b",
-            name or "", re.I) else "  기업실적 · 재무자료 조회 실패 또는 제공 자료 없음")
-    if company.get("filings"):
-        filing = company["filings"][0]
-        lines.append(f"  공시 · {filing['filing_date']} {filing['form'][:55]}")
-    else:
-        lines.append("  공시 · " + {"missing_dart_key":"DART API 키 미설정",
-                    "issuer_mapping_unavailable":"공시 발행사 매핑 실패",
-                    "unavailable":"조회 실패", "checked":"최근 공시 없음"}.get(
-                        company.get("filing_status"), "조회 결과 없음"))
-    if company.get("news"):
-        article = company["news"][0]
-        lines.append(f"  뉴스 · {article['source']} / {article['headline'][:85]}")
-    else:
-        lines.append("  뉴스 · 최근 24시간 검색 결과 없음" if company.get("news_status")=="no_recent_articles"
-                     else "  뉴스 · 조회 실패 또는 제공 자료 없음")
-    if item.get("risk_headlines"):
-        lines.append("  위험 확인 · " + " / ".join(item["risk_headlines"])[:110])
-    if item.get("company_analysis_at"):
-        stamp = datetime.fromisoformat(item["company_analysis_at"]).astimezone(ZoneInfo("Asia/Seoul"))
-        lines.append(f"  기업·뉴스 조회 {stamp:%m/%d %H:%M} KST")
-    return "\n".join(lines)
+    overseas = item["market"] == "US"
+    name = item.get("name") or symbol
+    code = symbol if overseas else symbol.split(".")[0]
+    entry_label = f"$" + f"{entry:,.2f}" if overseas else f"{entry:,.0f}원"
+    target, upside = forecast["base_price"], forecast["bull_price"]
+    target_label = f"$" + f"{target:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{target:,.0f} / {upside:,.0f}원"
+    return (f"• {name} ({code}) · 종합 {score:.1f}/100\n"
+            f"  진입 상한 {entry_label}\n"
+            f"  5거래일 분석 목표 · 기준/상승 {target_label}\n"
+            "  손절 −2% · 기본 익절 +6% (실제 체결가 기준)")
 
 def sector_metrics(prices, benchmark):
     data = prices[["Close", "Adj Close", "Volume"]].replace([np.inf, -np.inf], np.nan).dropna()
@@ -689,40 +672,16 @@ def send_telegram_summary(report):
     if not token or not chat_id:
         raise RuntimeError("Telegram requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
 
-    candidates = [
-        item for item in report["results"]
-        if item["signal"]["stage"] in {"장전 관찰 후보", "장중 조건부 진입 후보"}
-    ]
-    sectors = report.get("sectors", [])
-    if not candidates and not sectors and not any(rank_recovery_candidates(
-            [item for item in report["results"] if item["market"] == market], market) for market in ("KR", "US")):
-        print("Telegram skipped: no watch candidates")
-        return
-
-    lines = format_sector_header(sectors) + [""] + [
-        "듀얼스캐너 일봉 관찰 후보",
-        "매수 진입가 · 미제시",
-        f"조회 성공 {report['successful']}/{report['attempted']} · 후보 {len(candidates)}개",
-    ]
-    for market, market_name in (("KR", "국장"), ("US", "미장")):
-        ranked = sorted(
-            (item for item in candidates if item["market"] == market),
-            key=lambda item: (-item["signal"]["score"], item["symbol"]),
-        )
-        ranked = rank_market_candidates(ranked, market)
-        if ranked:
-            lines.append(f"\n[{market_name} 종목 후보]")
-            lines.extend(telegram_candidate_line(item) for item in ranked[:5])
-    for market, market_name in (("KR", "국장"), ("US", "미장")):
-        main_symbols = {item["symbol"] for item in rank_market_candidates(
-            [item for item in report["results"] if item["market"] == market], market)}
-        recovery = [item for item in rank_recovery_candidates(
-            [item for item in report["results"] if item["market"] == market], market, limit=8)
-                    if item["symbol"] not in main_symbols][:3]
-        if recovery:
-            lines.append(f"\n[{market_name} 추세 회복 감시 · 장중 확인 전]")
-            lines.extend(telegram_candidate_line(item) for item in recovery)
-    lines.append("\n전체 결과는 GitHub 실행 보고서")
+    lines = format_sector_header(report.get("sectors", []))
+    confirmed = [item for item in report["results"]
+                 if item.get("signal", {}).get("confirmed") is True
+                 and item.get("signal", {}).get("entry_limit") is not None
+                 and item.get("company_forecast", {}).get("composite_score") is not None]
+    lines.extend(["", "매수 신호"])
+    if not confirmed:
+        lines.append("확인된 매수 신호 없음")
+    for item in confirmed[:5]:
+        lines.append(telegram_candidate_line(item))
 
     messages = split_telegram_text("\n".join(lines))
     for message in messages:

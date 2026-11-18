@@ -19,6 +19,7 @@ from websockets.exceptions import WebSocketException
 
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
 from signal_context import context_status
+from company_forecast import build_company_forecast
 from candidate_selection import instrument_rejection_reason, rank_market_candidates, rank_recovery_candidates
 from sector_flow import format_sector_header
 from telegram_text import split_telegram_text
@@ -248,12 +249,16 @@ def company_financials(statement, today):
         sales, income = (float(statement.loc[key, quarter]) for key in (revenue_key, income_key))
         if not math.isfinite(sales) or sales <= 0 or not math.isfinite(income):
             continue
-        result = {"quarter": quarter.date().isoformat(), "operating_margin_pct": 100 * income / sales}
+        result = {"quarter": quarter.date().isoformat(), "operating_margin_pct": 100 * income / sales,
+                  "revenue_amount": sales, "operating_income_amount": income}
         prior = next((col for col in quarters if 350 <= (quarter - col).days <= 380), None)
         if prior is not None:
             prior_sales = float(statement.loc[revenue_key, prior])
             if math.isfinite(prior_sales) and prior_sales > 0:
                 result["revenue_yoy_pct"] = 100 * (sales / prior_sales - 1)
+                prior_income = float(statement.loc[income_key, prior])
+                if math.isfinite(prior_income):
+                    result["operating_margin_yoy_pp"] = 100 * (income / sales - prior_income / prior_sales)
         return result
     return {}
 
@@ -540,11 +545,94 @@ def dart_quarterly_financials(api_key, corp_code, filings):
     if sales is None or sales <= 0 or operating is None:
         return {}
     snapshot = {"quarter": f"{year}-{month}", "operating_margin_pct": 100 * operating / sales,
-                "financial_source": f"DART {financial_scope}", "financial_filing_url": report["url"]}
+                "financial_source": f"DART {financial_scope}", "financial_filing_url": report["url"],
+                "revenue_amount": sales, "operating_income_amount": operating}
     prior_sales = amount(revenue, "frmtrm_q_amount")
     if prior_sales is not None and prior_sales > 0:
         snapshot["revenue_yoy_pct"] = 100 * (sales / prior_sales - 1)
+        prior_operating = amount(income, "frmtrm_q_amount")
+        if prior_operating is not None:
+            snapshot["operating_margin_yoy_pp"] = 100 * (operating / sales - prior_operating / prior_sales)
+    all_accounts = {row.get("account_id"):row for row in body.get("list",[])
+                    if row.get("rcept_no")==receipt and row.get("account_id")}
+    cfo = all_accounts.get("ifrs-full_CashFlowsFromUsedInOperatingActivities")
+    if cfo:
+        cash = amount(cfo,"thstrm_amount")
+        ytd_income = amount(income,"thstrm_add_amount") if month!="03" else operating
+        if cash is not None and ytd_income is not None and ytd_income>0:
+            snapshot["operating_cash_conversion"] = cash/ytd_income
+            snapshot["cashflow_period"] = f"{year} year-to-date through {month}"
+    liabilities = all_accounts.get("ifrs-full_Liabilities")
+    equity = all_accounts.get("ifrs-full_Equity")
+    if liabilities and equity:
+        total_liabilities, total_equity = amount(liabilities,"thstrm_amount"), amount(equity,"thstrm_amount")
+        if total_liabilities is not None and total_equity is not None and total_equity>0:
+            snapshot["liabilities_to_equity"] = total_liabilities/total_equity
     return snapshot
+
+
+def company_quality_metrics(ticker, snapshot, now):
+    """Read operating cash, leverage and earnings expectations with dated statements."""
+    result = {}
+    try:
+        info = ticker.get_info() or {}
+        for source, target in (("trailingPE","trailing_pe"),("forwardPE","forward_pe"),
+                               ("forwardEps","forward_eps"),("trailingEps","trailing_eps")):
+            value = info.get(source)
+            if isinstance(value,(int,float)) and math.isfinite(value):
+                result[target] = float(value)
+        for source,target in (("sector","sector"),("industry","industry"),
+                              ("quoteType","quote_type"),("financialCurrency","financial_currency")):
+            if info.get(source):
+                result[target] = info[source]
+    except Exception as exc:
+        result["profile_error"] = type(exc).__name__
+    if result.get("quote_type") == "ETF":
+        return result
+
+    def value(frame, keys, column):
+        key = next((key for key in keys if key in frame.index), None)
+        if key is None:
+            return None
+        number = float(frame.loc[key,column])
+        return number if math.isfinite(number) else None
+
+    quarter = snapshot.get("quarter","")[:7]
+    try:
+        flow = ticker.get_cash_flow(freq="quarterly")
+        column = next((column for column in sorted(flow.columns, reverse=True)
+                       if column.date() < now.date() and str(column.date())[:7] == quarter), None)
+        if column is not None:
+            cash = value(flow,("OperatingCashFlow","Operating Cash Flow"),column)
+            free = value(flow,("FreeCashFlow","Free Cash Flow"),column)
+            revenue, income = snapshot.get("revenue_amount"), snapshot.get("operating_income_amount")
+            if free is not None and revenue is not None and revenue>0:
+                result["free_cash_flow_margin_pct"] = 100*free/revenue
+            if cash is not None and income is not None and income>0:
+                result["operating_cash_conversion"] = cash/income
+            result["cashflow_quarter"] = str(column.date())
+    except Exception as exc:
+        result["cashflow_error"] = type(exc).__name__
+    if result.get("sector") in {"Financial Services","Real Estate"}:
+        result["leverage_comparison"] = "industry_specific_model_required"
+        return result
+    try:
+        balance = ticker.get_balance_sheet(freq="quarterly")
+        columns = sorted((column for column in balance.columns if column.date()<now.date()), reverse=True)
+        if columns:
+            column = columns[0]
+            debt = value(balance,("TotalDebt","Total Debt"),column)
+            cash = value(balance,("CashCashEquivalentsAndShortTermInvestments",
+                                  "Cash Cash Equivalents And Short Term Investments",
+                                  "CashAndCashEquivalents","Cash And Cash Equivalents"),column)
+            equity = value(balance,("StockholdersEquity","Stockholders Equity",
+                                    "CommonStockEquity","Common Stock Equity"),column)
+            if debt is not None and cash is not None and equity is not None and equity>0:
+                result["net_debt_to_equity"] = (debt-cash)/equity
+            result["balance_sheet_quarter"] = str(column.date())
+    except Exception as exc:
+        result["balance_sheet_error"] = type(exc).__name__
+    return result
 
 
 def company_context(market, symbols, now):
@@ -561,6 +649,17 @@ def company_context(market, symbols, now):
     elif not overseas:
         print(f"{market} DART_API_KEY missing; domestic disclosures unavailable")
 
+    history_prices = None
+    benchmark_symbol = BENCHMARKS["US" if overseas else "KR"]
+    mapped_tickers = {symbol: (symbol[4:] if overseas else symbol + (
+        ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS")) for symbol in symbols}
+    try:
+        history_prices = yf.download([*mapped_tickers.values(), benchmark_symbol], period="6mo",
+                                     auto_adjust=False, group_by="ticker", progress=False,
+                                     threads=4, timeout=8, multi_level_index=True)
+    except Exception as exc:
+        print(f"{market} company price history unavailable ({type(exc).__name__})")
+
     def fetch(symbol):
         suffix = ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS"
         ticker = yf.Ticker(symbol[4:] if overseas else symbol + suffix)
@@ -569,6 +668,7 @@ def company_context(market, symbols, now):
         try:
             articles = ticker.get_news(count=12)
             snapshot["news"] = recent_company_news(articles, now)[:3]
+            snapshot["news_status"] = "ok" if snapshot["news"] else "no_recent_articles"
             risks.extend(headline_risks(market, symbol, articles, now))
         except Exception as exc:
             print(f"{market} {symbol} news unavailable ({type(exc).__name__})")
@@ -584,7 +684,7 @@ def company_context(market, symbols, now):
                 snapshot["news_status"] = "unavailable"
                 print(f"{market} {symbol} Korean news unavailable ({type(exc).__name__})")
         else:
-            snapshot["news_status"] = "ok" if snapshot.get("news") else "unavailable_or_empty"
+            snapshot["news_status"] = "ok" if snapshot.get("news") else snapshot.get("news_status", "unavailable")
         try:
             snapshot.update(company_financials(ticker.get_income_stmt(freq="quarterly"), now.date()))
         except Exception as exc:
@@ -621,9 +721,23 @@ def company_context(market, symbols, now):
                 dart_financials = dart_quarterly_financials(dart_key, corp_codes[symbol], reports)
                 if dart_financials:
                     snapshot.pop("revenue_yoy_pct", None)
+                    snapshot.pop("operating_margin_yoy_pp", None)
                     snapshot.update(dart_financials)
             except (requests.RequestException, ValueError, TypeError) as exc:
                 print(f"{market} {symbol} DART financials unavailable ({type(exc).__name__})")
+        snapshot["market"] = "US" if overseas else "KR"
+        snapshot.update(company_quality_metrics(ticker, snapshot, now))
+        if history_prices is not None:
+            try:
+                data = history_prices[mapped_tickers[symbol]]
+                benchmark = history_prices[benchmark_symbol]
+                local_day = now.astimezone(ZoneInfo("America/New_York") if overseas else KST).date()
+                data = clean_prices(data.loc[data.index.date < local_day])
+                benchmark = clean_prices(benchmark.loc[benchmark.index.date < local_day])
+                snapshot["price_indicators"] = calculate_indicators(data, benchmark)
+            except (KeyError, ValueError, TypeError) as exc:
+                snapshot["price_history_error"] = type(exc).__name__
+        snapshot["available_at"] = datetime.now(now.tzinfo).isoformat()
         snapshot["checked_at"] = now.isoformat()
         snapshot["financial_status"] = "ok" if "operating_margin_pct" in snapshot else "unavailable"
         return symbol, snapshot, risks
@@ -950,7 +1064,7 @@ def candidate_metrics(bars, quote, close_time):
     return evaluate_breakout(bars, quote, close_time)[1]
 
 
-def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False, prior_highs=()):
+def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False, prior_highs=(), company=None, sectors=()):
     ticker = symbol[4:] if overseas else symbol
     name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (
         KR_SYMBOL_NAMES.get(symbol + ".KS") or KR_SYMBOL_NAMES.get(symbol + ".KQ") or symbol)
@@ -971,16 +1085,24 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     status = context_status(evidence, window, symbol, closes)
     if status != "supported":
         return status, None
-    stop = protective_stop(bars, limit, quote["bid"], overseas)
-    if stop is None:
-        return "invalid_support_stop", None
-    projection = price_projection(bars, limit, prior_highs, overseas)
-    if projection is None:
-        return "no_upside_above_entry", None
+    company = company if company is not None else {}
+    applicable = [row for row in evidence if row.get("symbol") in (symbol, "*")
+                  and row.get("market") in (window, "*")]
+    forecast = build_company_forecast(company, company.get("price_indicators", {}),
+                                      limit, closes, applicable, sectors)
+    company["forecast"] = forecast
+    if forecast["composite_score"] is None:
+        return "composite_assessment_incomplete", None
+    if forecast["composite_score"] <= 50 or forecast["base_price"] <= limit:
+        return "composite_outlook_not_positive", None
+    stop = limit * 0.98
+    if quote["bid"] <= stop:
+        return "entry_below_fixed_stop", None
+    projection = (forecast["base_price"], "종합평가 5거래일 시나리오")
     return "buy_signal", (symbol, *metrics, limit, stop, projection)
 
 
-async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False, resistance=None, refresh_context=None, companies=None):
+async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False, resistance=None, refresh_context=None, companies=None, sector_snapshot=None):
     resistance = resistance or {}
     closes = opens + timedelta(minutes=15)
     feeds = FEEDS[market]
@@ -1023,8 +1145,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 print(f"{market} 구독 검증 {len(symbols) - len(rejected)}/{len(symbols)}")
                 candidates = []
                 decisions = {}
-                event_scores = {symbol: event_impact(evidence, samples_path.stem, symbol, closes)
-                                for symbol in symbols}
+                composite_scores = {}
                 for symbol in symbols:
                     if symbol in rejected:
                         decisions[symbol] = "subscription_failed"
@@ -1032,8 +1153,11 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                     status, candidate = evaluate_candidate(
                         bars[symbol], quotes.get(symbol), closes, samples_path.stem, symbol,
                         evidence, market == "US", observation_only, resistance.get(symbol, ()),
+                        company=(companies or {}).get(symbol),
+                        sectors=(sector_snapshot or {}).get("rows", []),
                     )
                     decisions[symbol] = status
+                    composite_scores[symbol] = (companies or {}).get(symbol, {}).get("forecast", {}).get("composite_score")
                     if candidate is not None:
                         candidates.append(candidate)
                 counts = {status: sum(value == status for value in decisions.values())
@@ -1042,13 +1166,13 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 for symbol, status in decisions.items():
                     print(f"{samples_path.stem} {symbol} 판정 {status}", flush=True)
                 samples_path.with_name(f"{samples_path.stem}-decisions-replay.json").write_text(
-                    json.dumps({"signal_at": closes.isoformat(), "counts": counts, "symbols": decisions, "event_scores": event_scores},
+                    json.dumps({"signal_at": closes.isoformat(), "counts": counts, "symbols": decisions, "composite_scores": composite_scores},
                                indent=2), encoding="utf-8",
                 )
                 if len(rejected) == len(symbols):
                     raise RuntimeError("개장 전 구독 승인에 성공한 종목이 없습니다")
                 notification = asyncio.create_task(asyncio.to_thread(
-                    on_signal, sorted(candidates, key=lambda row: (-event_scores[row[0]], -row[1], row[0]))
+                    on_signal, sorted(candidates, key=lambda row: (-(composite_scores.get(row[0]) or 0), -row[1], row[0]))
                 ))
                 evaluated = True
                 deadline = closes + timedelta(minutes=30, seconds=30)
@@ -1163,84 +1287,27 @@ def research_label(evidence, market, symbol, decision_at):
 def format_notification(market, candidates, closes, companies=None, sectors=None):
     companies = companies or {}
     overseas = market.startswith("US-")
-    session = {"US-early": "미국 프리장", "US-late": "미국 프리장 갱신",
-               "NXT": "국내 NXT 프리장", "KRX": "국내 KRX 정규장"}[market]
-    headline = "매수 신호" if candidates and candidates[0][4] is not None else "관찰 후보"
-    timestamp = f"{closes:%m/%d %H:%M} ET · {closes.astimezone(KST):%H:%M} KST" if overseas else f"{closes:%m/%d %H:%M} KST"
-    lines = format_sector_header(sectors, "US" if overseas else "KR") + ["", f"{headline} | {session}", timestamp]
-    for symbol, ratio, spread, price, entry_limit, stop, projection in candidates[:5]:
+    confirmed = [row for row in candidates if row[4] is not None
+                 and companies.get(row[0], {}).get("forecast", {}).get("composite_score") is not None]
+    timestamp = f"{closes:%m/%d %H:%M} ET" if overseas else f"{closes:%m/%d %H:%M} KST"
+    lines = format_sector_header(sectors, "US" if overseas else "KR") + ["", f"매수 신호 · {timestamp}"]
+    if not confirmed:
+        lines.append("확인된 매수 신호 없음")
+    for symbol, ratio, spread, price, entry_limit, stop, projection in confirmed[:5]:
         ticker = symbol[4:] if overseas else symbol
-        name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else KR_SYMBOL_NAMES[f"{symbol}.KS"]
-        price_label = f"${price:,.2f}" if overseas else f"{price:,}원"
-        lines.extend(["", f"{name} ({ticker}) · 스캔 기준가 {price_label} (5분봉 종가)"])
-        if entry_limit is not None:
-            # Round the display down so it never exceeds the strategy's price cap.
-            step = Decimal("0.01" if overseas else "1")
-            limit = Decimal(str(entry_limit)).quantize(step, rounding=ROUND_DOWN)
-            limit_label = f"${limit:,.2f}" if overseas else f"{limit:,}원"
-            stop_label = f"${stop:,.2f}" if overseas else f"{stop:,.0f}원"
-            risk_pct = (1 - stop / float(limit)) * 100
-            target, target_reason = projection
-            target_label = f"${target:,.2f}" if overseas else f"{target:,.0f}원"
-            target_pct = (target / float(limit) - 1) * 100
-            expires = closes + timedelta(seconds=30)
-            lines.extend([
-                f"매수 진입 상한 {limit_label} · {expires:%H:%M:%S}까지 ({'ET' if overseas else 'KST'})",
-                "상한 초과·시간 경과·진입 전 손절선 이탈 시 진입 보류",
-                f"손절선 {stop_label} · 진입 상한 대비 −{risk_pct:.2f}%",
-                "손절 근거 · 돌파 5분봉 저점 아래 0.1% / 매도 가능 호가가 손절선 이하이면 청산",
-                f"목표 매도가 {target_label} · 진입 상한 대비 +{target_pct:.2f}%\n목표가 근거 · {target_reason}",
-                "매도 가능 호가가 목표가에 도달하면 익절 · 신호 후 30분 경과 시 청산",
-                "확인 · 시황 우호 / 수집된 일정·위험 뉴스 필터 통과",
-            ])
-        else:
-            lines.append("매수 진입가 미제시 · 관찰만")
-        lines.append(f"근거 · 5분봉 고점 돌파 / 거래량 {ratio:.2f}배 / 호가 간격 {spread:.2f}%")
-        company = companies.get(symbol, {})
-        if company.get("checked_at"):
-            checked = datetime.fromisoformat(company["checked_at"]).astimezone(KST)
-            lines.append(f"기업·뉴스 조회 · {checked:%m/%d %H:%M} KST")
-        lines.append(f"증권사 의견(참고) · {company.get('research_label', '최근 자료 미확보')}")
-        if company.get("event_score"):
-            lines.append(f"종목 이벤트 점수 · {company['event_score']:+d}")
-        if "operating_margin_pct" in company:
-            financials = f"기업실적 · {company['quarter']} 분기 영업이익률 {company['operating_margin_pct']:.1f}%"
-            if "revenue_yoy_pct" in company:
-                financials += f" / 매출 전년 동기 대비 {company['revenue_yoy_pct']:+.1f}%"
-            lines.append(financials + f" · {company.get('financial_source', 'Yahoo Finance')}")
-        else:
-            lines.append("기업실적 · 자료 미확보")
-        if overseas:
-            if company.get("filings"):
-                filing = company["filings"][0]
-                day = (filing.get("accepted_at") or filing["filing_date"])[:10]
-                scope = "SEC 접수 확인" if filing.get("accepted_at") else "공시 목록 · 접수 시각 미확인"
-                lines.append(f"공시 · {day} {filing['form']} ({scope})")
-            else:
-                lines.append("SEC 공시 · 최근 자료 미확보")
-        elif company.get("filings"):
-            filing = company["filings"][0]
-            lines.append(f"DART 공시 · {filing['filing_date']} {filing['form'][:70]}")
-            contract = next((item for item in company["filings"] if item.get("contract")), None)
-            if contract:
-                details = contract["contract"]
-                values = []
-                if "amount_krw" in details:
-                    values.append(f"계약금액 {details['amount_krw']:,}원")
-                if "revenue_ratio_pct" in details:
-                    values.append(f"최근 매출 대비 {details['revenue_ratio_pct']:g}%")
-                lines.append(f"공급계약 · {contract['filing_date']} / " + " / ".join(values))
-        else:
-            lines.append("DART 공시 · 최근 자료 미확보")
-        if company.get("news"):
-            article = company["news"][0]
-            stamp = datetime.fromisoformat(article["available_at"]).astimezone(KST)
-            lines.append(f"최근 기사 · {stamp:%m/%d %H:%M} KST {article['source']} / {article['headline'][:90]}")
-        else:
-            lines.append("최근 기사 · 24시간 내 검색 결과 없음" if company.get("news_status") == "no_recent_articles"
-                         else "최근 기사 · 조회 실패 또는 자료 미확보")
+        name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (
+            KR_SYMBOL_NAMES.get(symbol+".KS") or KR_SYMBOL_NAMES.get(symbol+".KQ") or symbol)
+        forecast = companies[symbol]["forecast"]
+        step = Decimal("0.01" if overseas else "1")
+        limit = Decimal(str(entry_limit)).quantize(step, rounding=ROUND_DOWN)
+        entry_label = f"$" + f"{limit:,.2f}" if overseas else f"{limit:,.0f}원"
+        base, upside = forecast["base_price"], forecast["bull_price"]
+        target_label = f"$" + f"{base:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{base:,.0f} / {upside:,.0f}원"
+        lines.extend(["", f"• {name} ({ticker}) · 종합 {forecast['composite_score']:.1f}/100",
+                      f"진입 상한 {entry_label} · {(closes+timedelta(seconds=30)):%H:%M:%S}까지",
+                      f"5거래일 분석 목표 · 기준/상승 {target_label}",
+                      "손절 −2% · 기본 익절 +6% (실제 체결가 기준)"])
     return "\n".join(lines)
-
 
 def notify(market, candidates, closes, token, chat_id, companies=None, sectors=None):
     message = format_notification(market, candidates, closes, companies, sectors)
@@ -1372,7 +1439,6 @@ def main():
                 for symbol, *_ in candidates:
                     company = companies.setdefault(symbol, {})
                     company["research_label"] = research_label(evidence, market, symbol, decision_at)
-                    company["event_score"] = event_impact(evidence, market, symbol, decision_at)
                 notify(market, candidates, decision_at, token, chat_id, companies, sectors=sector_snapshot["rows"])
             else:
                 print(f"{market} 장중 알림 조건 충족 없음")
@@ -1391,7 +1457,7 @@ def main():
             opens = collection_open(scheduled_open, datetime.now(local_zone))
             if opens != scheduled_open:
                 print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=15):%H:%M}")
-            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds), resistance=resistance, refresh_context=refresh_companies, companies=companies))
+            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds), resistance=resistance, refresh_context=refresh_companies, companies=companies, sector_snapshot=sector_snapshot))
         else:
             print(f"{market} 감시 후보 없음")
             publish([])

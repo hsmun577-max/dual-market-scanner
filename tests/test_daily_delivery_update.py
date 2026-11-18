@@ -40,16 +40,18 @@ class DailyDeliveryTests(unittest.TestCase):
         context.assert_called_once()
         self.assertEqual(row['fundamentals'],'영업흑자')
         text=scanner.telegram_candidate_line(row)
-        self.assertIn('영업이익률 +12.0%',text)
-        self.assertIn('매출 전년 대비 +20.0%',text)
-        self.assertIn('DART 연결',text)
+        self.assertEqual(text,'')
+        self.assertEqual(row['company_analysis']['operating_margin_pct'],12.)
+        self.assertEqual(row['company_analysis']['revenue_yoy_pct'],20.)
+        self.assertIsNone(row['company_forecast']['composite_score'])
         self.assertNotIn('미검증',text)
         with patch.dict(os.environ,{'TELEGRAM_BOT_TOKEN':'fake','TELEGRAM_CHAT_ID':'fake'}), patch.object(scanner.requests,'post') as post:
             post.return_value=Mock(status_code=200,json=lambda:{'ok':True})
             scanner.send_telegram_summary(report)
         messages=[call.kwargs['json']['text'] for call in post.call_args_list]
         self.assertTrue(messages[0].startswith('섹터 매수세'))
-        self.assertIn('DART 연결','\n'.join(messages))
+        self.assertNotIn('DART 연결','\n'.join(messages))
+        self.assertIn('확인된 매수 신호 없음','\n'.join(messages))
         self.assertTrue(all(len(message)<=3800 for message in messages))
 
     def test_long_reports_are_split_and_failures_are_not_relabelled_verified(self):
@@ -57,8 +59,8 @@ class DailyDeliveryTests(unittest.TestCase):
         row=self.row()
         row['company_analysis']={'filing_status':'missing_dart_key','news_status':'unavailable'}
         text=scanner.telegram_candidate_line(row)
-        self.assertIn('DART API 키 미설정',text)
-        self.assertIn('재무자료 조회 실패',text)
+        self.assertEqual(text,'')
+        self.assertEqual(row['company_analysis']['filing_status'],'missing_dart_key')
         self.assertNotIn('분석 완료',text)
 
 

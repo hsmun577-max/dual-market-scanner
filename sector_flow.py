@@ -78,21 +78,16 @@ def fetch_intraday_sectors(sectors, benchmark, market, now):
 
 def format_sector_header(rows, market=None):
     markets = (market,) if market else ("KR", "US")
-    lines = ["섹터 매수세 · 대표 ETF 가격·거래대금 추정"]
+    lines = ["섹터 매수세 · 대표 ETF 추정"]
     for code in markets:
-        available = [row for row in rows or [] if row.get("market") == code]
+        available = [row for row in rows or [] if row.get("market")==code]
         selected = sorted((row for row in available if row.get("early") or row.get("active")),
-                          key=lambda row: (-int(bool(row.get("starting"))), -row["turnover_ratio"]))[:3]
-        label = "국장" if code == "KR" else "미장"
+                          key=lambda row: (-int(bool(row.get("starting"))),-row["turnover_ratio"]))[:3]
+        label = "국장" if code=="KR" else "미장"
         if not selected:
-            latest = max((row["data_date"] for row in available), default="")
-            lines.append(f"{label} · 확인된 유입 조짐 없음 · 자료 기준 {latest}" if available else f"{label} · 섹터 자료 미확보")
+            lines.append(f"{label} · 확인된 유입 조짐 없음" if available else f"{label} · 자료 미확보")
         for row in selected:
-            state = "유입 시작 추정" if row.get("starting") else "집중 추정" if row.get("active") else "유입 조짐"
-            intraday = row.get("source") == "15m_vs_prior_same_time"
-            stamp = (datetime.fromisoformat(row["data_as_of"]).strftime("%m/%d %H:%M")
-                     + (" KST" if code == "KR" else " ET")) if intraday else row["data_date"] + " 일봉"
-            comparison = "최근 15분/과거 동시간대" if intraday else "해당 일자/20일 평균"
-            lines.extend([f"• {label} {row['name']} · {state}",
-                          f"  거래대금 {row['turnover_ratio']:.2f}배 ({comparison}) · 가격 {row['return_pct']:+.2f}% · 시장 대비 {row['market_excess_pct']:+.2f}%p · {stamp}"])
+            state = "유입 초기" if row.get("starting") else "집중" if row.get("active") else "유입 조짐"
+            stamp = datetime.fromisoformat(row["data_as_of"]).strftime("%m/%d %H:%M") if row.get("data_as_of") else row["data_date"]
+            lines.append(f"• {label} {row['name']} · {state} · 거래대금 {row['turnover_ratio']:.1f}배 · {stamp}")
     return lines

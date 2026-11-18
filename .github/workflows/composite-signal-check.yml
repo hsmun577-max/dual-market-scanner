@@ -1,0 +1,90 @@
+name: Composite signal and compact message check
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/composite-signal-check.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Verify composite scores, signal gates and compact payload
+        run: |
+          PYTHONPATH=. python tests/test_composite_signal.py
+          PYTHONPATH=. python tests/test_daily_delivery_update.py
+          PYTHONPATH=. python tests/test_sector_update.py
+          PYTHONPATH=. python tests/test_selection_update.py
+      - name: Evaluate current company, market and event data without sending
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json, subprocess, os
+          from pathlib import Path
+          from datetime import datetime, timezone
+          from zoneinfo import ZoneInfo
+          from unittest.mock import patch, Mock
+          import scanner
+          
+          runs=json.loads(subprocess.run(["gh","run","list","--workflow","scanner.yml","--branch","main",
+              "--status","success","--limit","5","--json","databaseId"],check=True,capture_output=True,text=True).stdout)
+          source_run=None
+          for run in runs:
+              folder=Path("source")/str(run["databaseId"])
+              process=subprocess.run(["gh","run","download",str(run["databaseId"]),"--name","scan-results","--dir",str(folder)],capture_output=True)
+              files=list(folder.rglob("latest.json"))
+              if process.returncode==0 and files:
+                  report=json.loads(files[0].read_text(encoding="utf-8-sig"))
+                  source_run=run["databaseId"]
+                  break
+          if source_run is None:
+              raise SystemExit("No saved full scan available")
+          now=datetime.now(timezone.utc)
+          report["sectors"]=[row for market,zone in (("KR","Asia/Seoul"),("US","America/New_York"))
+                             for row in scanner.sector_flow_snapshot(market,now.astimezone(ZoneInfo(zone)))]
+          scanner.prepare_selected_analysis(report)
+          assessed=[row for row in report["results"] if "company_forecast" in row]
+          messages=[]
+          with patch.dict(os.environ,{"TELEGRAM_BOT_TOKEN":"not-sent","TELEGRAM_CHAT_ID":"not-sent"}), patch.object(scanner.requests,"post") as post:
+              post.side_effect=lambda *args,**kwargs:(messages.append(kwargs["json"]["text"]) or Mock(status_code=200,json=lambda:{"ok":True}))
+              scanner.send_telegram_summary(report)
+          assert messages and messages[0].startswith("섹터 매수세")
+          assert not any(word in "\n".join(messages) for word in ("영업이익률","최근 기사","일봉 관찰 후보","증권사 의견"))
+          summary={"source_run":source_run,"checked_at":datetime.now(timezone.utc).isoformat(),
+                   "assessed":len(assessed),"complete":sum(row["company_forecast"]["composite_score"] is not None for row in assessed),
+                   "preview_parts":len(messages),"telegram_sent":False,
+                   "confirmed_buy_signals_in_daily_report":sum(row.get("signal",{}).get("confirmed") is True for row in report["results"]),
+                   "assessments":[{"symbol":row["symbol"],"name":row.get("name"),"forecast":row["company_forecast"],
+                                   "company":row["company_analysis"]} for row in assessed],
+                   "profitability_validation":"not established; no point-in-time historical financial replay performed"}
+          for row in assessed:
+              forecast=row["company_forecast"]
+              if forecast["composite_score"] is not None:
+                  assert forecast["assessment_status"]=="complete" and len(forecast["components"])==7
+              else:
+                  assert forecast["missing_dimensions"]
+          Path("composite-check.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+          Path("compact-preview.md").write_text("\n\n---\n\n".join(messages),encoding="utf-8")
+          Path("composite-assessed-report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("COMPOSITE_CHECK="+json.dumps(summary,ensure_ascii=False),flush=True)
+          
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: composite-signal-check
+          path: |
+            composite-check.json
+            compact-preview.md
+            composite-assessed-report.json
+          if-no-files-found: ignore
