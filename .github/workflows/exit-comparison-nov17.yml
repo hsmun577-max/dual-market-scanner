@@ -130,6 +130,28 @@ jobs:
                   data.index = data.index.tz_convert("UTC")
                   data = data[~data.index.duplicated()].sort_index()
                   data = data.loc[data.index < calendar.session_close(END)]
+                  # Repair only missing/zero-volume bars and opening-price conflicts from finer observations.
+                  observed = data.reindex(expected)
+                  missing = observed["Volume"].isna() | (observed["Volume"] <= 0)
+                  opening_conflict = expected[0] not in data.index or abs(float(data.loc[expected[0],"Open"])/entry-1)>0.01
+                  result["repaired_from_1m"] = 0
+                  if missing.any() or opening_conflict:
+                      try:
+                          fine = yf.Ticker(row["symbol"]).history(start=row["entry_date"], end="2026-11-18",
+                              interval="1m", auto_adjust=False, prepost=False, raise_errors=True, timeout=15)
+                          if not fine.empty and fine.index.tz is not None:
+                              fine.index = fine.index.tz_convert("UTC")
+                              aggregate = fine.resample("5min", origin="start_day").agg(
+                                  {"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
+                              for stamp, bar in aggregate.iterrows():
+                                  if bar["Volume"] > 0 and (stamp not in data.index or float(data.loc[stamp,"Volume"]) <= 0
+                                          or (stamp == expected[0] and opening_conflict)):
+                                      for column in ("Open","High","Low","Close","Volume"):
+                                          data.loc[stamp,column] = bar[column]
+                                      result["repaired_from_1m"] += 1
+                              data = data.sort_index()
+                      except Exception as exc:
+                          result["one_minute_fallback_error"] = type(exc).__name__
                   if expected[0] not in data.index:
                       result["status"]="missing_entry_bar"
                       return result
