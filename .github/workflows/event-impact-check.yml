@@ -1,4 +1,4 @@
-name: Company and world event impact audit
+name: Company, world and FX earnings impact audit
 on:
   workflow_dispatch:
   push:

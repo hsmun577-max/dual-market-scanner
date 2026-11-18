@@ -54,11 +54,14 @@ class Paragraphs(HTMLParser):
 
 
 def allowed_url(url):
-    parsed=urlparse(url or '')
-    host=(parsed.hostname or '').lower()
-    return (parsed.scheme=='https' and not parsed.username and not parsed.password
-            and parsed.port in (None,443)
-            and any(host==domain or host.endswith('.'+domain) for domain in ALLOWED))
+    try:
+        parsed=urlparse(url or '')
+        host=(parsed.hostname or '').lower()
+        return (parsed.scheme=='https' and not parsed.username and not parsed.password
+                and parsed.port in (None,443)
+                and any(host==domain or host.endswith('.'+domain) for domain in ALLOWED))
+    except (ValueError,AttributeError):
+        return False
 
 
 def article_text(url):
@@ -238,6 +241,12 @@ def analyze_events(company, events, at, feed_coverage=()):
         business_profile_available=bool(company.get('business_description')),exposures=sorted(exposure(company)),
         positive_drivers=positive,negative_drivers=negative,uncertainties=uncertain,
         assessed_events=assessed,unread_events=unsupported,feed_coverage=list(feed_coverage),
+        fx_sensitivity=currency_sensitivity(company, {
+            code: 1. for code in set((company.get('currency_exposure') or {}).get('revenue_shares', {}))
+            | set((company.get('currency_exposure') or {}).get('operating_cost_shares', {}))
+            if code != company.get('financial_currency')},at),
+        earnings_sensitivity=earnings_bridge(company.get('revenue_amount'),company.get('operating_income_amount'),
+            company.get('variable_cost_share'),company.get('earnings_scenario_assumptions') or {}),
         quantified_earnings_impact=None,
         limitations=['자동 규칙에 의한 인과 가설이며 사실로 확정된 실적 예측이 아님',
                     '고객별 매출·가격·원가·계약 이행 자료 없이는 영향액 산출 불가',
@@ -269,3 +278,47 @@ def earnings_bridge(base_revenue, operating_income, variable_cost_share, assumpt
     return dict(status='sensitivity_only',revenue=sales,operating_income=profit,
                 revenue_change=sales-base_revenue,operating_income_change=profit-operating_income,
                 source_assumptions=assumptions,interpretation='조건부 민감도이며 실제 실적 예측치가 아님')
+
+
+def currency_sensitivity(company, changes, at):
+    """Translation sensitivity to FX against the reporting currency.
+
+    Positive change means one foreign currency unit buys more reporting currency.
+    Operating revenue and operating costs are modeled separately; financial debt FX
+    and hedge P&L are separate from operating income. Shares must come from a dated
+    source, and missing hedge information must not be treated as zero hedging.
+    """
+    data=company.get('currency_exposure') or {}
+    available=timestamp(data.get('available_at'))
+    sales=data.get('revenue_shares'); costs=data.get('operating_cost_shares')
+    revenue=company.get('revenue_amount'); income=company.get('operating_income_amount')
+    missing=[]
+    if not data.get('source_url') or not available or available>at: missing.append('dated_exposure_source')
+    if not company.get('financial_currency'): missing.append('reporting_currency')
+    if str(data.get('period',''))[:7] != str(company.get('quarter',''))[:7]: missing.append('matching_financial_period')
+    for key,shares in [('revenue_shares',sales),('operating_cost_shares',costs)]:
+        if (not isinstance(shares,dict) or not shares
+                or any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or not 0<=v<=1 for v in shares.values())
+                or sum(shares.values())>1.000001): missing.append(key)
+    if any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) for v in (revenue,income)):
+        missing.append('financial_base')
+    elif revenue<=0 or income>revenue: missing.append('financial_base')
+    if missing: return dict(status='missing_currency_exposure',missing=missing,operating_income_change=None)
+    currencies=(set(sales)|set(costs))-{company.get('financial_currency')}
+    if any(code not in changes or isinstance(changes[code],bool) or not isinstance(changes[code],(int,float))
+           or not math.isfinite(changes[code]) or changes[code]<-100 for code in currencies):
+        return dict(status='missing_fx_scenario',missing=sorted(currencies-set(changes)),operating_income_change=None)
+    sales_effect=revenue*sum(sales.get(code,0)*changes[code]/100 for code in currencies)
+    cost_effect=(revenue-income)*sum(costs.get(code,0)*changes[code]/100 for code in currencies)
+    operating_effect=sales_effect-cost_effect
+    result=dict(status='conditional_fx_sensitivity',reporting_currency=company.get('financial_currency'),
+        foreign_currency_change_pct=changes,revenue_change=sales_effect,operating_cost_change=cost_effect,
+        unhedged_operating_income_change=operating_effect,operating_income_change=None,
+        source_url=data['source_url'],period=data['period'],hedge_status='unavailable',
+        debt_fx_effect='not modeled: debt currency, amount and maturity needed',
+        interpretation='환율 가정에 따른 민감도이며 환율·실적 예측치가 아님')
+    hedge=data.get('net_operating_hedge_coverage')
+    if isinstance(hedge,(int,float)) and not isinstance(hedge,bool) and math.isfinite(hedge) and 0<=hedge<=1:
+        result.update(after_hedge_economic_effect=operating_effect*(1-hedge),hedge_status='scenario_coverage_available',
+                      hedge_accounting='경제적 노출 상쇄치; 헤지손익의 손익계산서 분류는 별도 확인 필요')
+    return result

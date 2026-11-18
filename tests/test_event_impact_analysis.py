@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import unittest
-from event_impact_analysis import analyze_events, earnings_bridge, allowed_url
+from event_impact_analysis import analyze_events, earnings_bridge, currency_sensitivity, allowed_url
 AT=datetime(2026,11,18,13,tzinfo=timezone.utc)
 COVER=[dict(source='official',status='checked')]
 
@@ -14,6 +14,37 @@ def event(text, **changes):
 
 
 class EventImpactTests(unittest.TestCase):
+    def fx_company(self):
+        return dict(quarter='2026-09-30',financial_currency='KRW',revenue_amount=1000.,operating_income_amount=100.,
+            currency_exposure=dict(period='2026-09-30',source_url='https://dart.fss.or.kr/example',
+                available_at=(AT-timedelta(days=1)).isoformat(),revenue_shares={'USD':.8,'KRW':.2},
+                operating_cost_shares={'USD':.2,'KRW':.8}))
+
+    def test_export_sales_and_dollar_costs_are_separate(self):
+        result=currency_sensitivity(self.fx_company(),{'USD':10.},AT)
+        self.assertAlmostEqual(result['revenue_change'],80.)
+        self.assertAlmostEqual(result['operating_cost_change'],18.)
+        self.assertAlmostEqual(result['unhedged_operating_income_change'],62.)
+        self.assertIsNone(result['operating_income_change'])
+        self.assertEqual(result['hedge_status'],'unavailable')
+
+    def test_importer_can_lose_even_when_currency_rises(self):
+        company=self.fx_company()
+        company['currency_exposure'].update(revenue_shares={'KRW':1.},operating_cost_shares={'USD':.8,'KRW':.2})
+        result=currency_sensitivity(company,{'USD':10.},AT)
+        self.assertEqual(result['revenue_change'],0.)
+        self.assertAlmostEqual(result['unhedged_operating_income_change'],-72.)
+
+    def test_hedging_is_not_added_to_reported_operating_income(self):
+        company=self.fx_company(); company['currency_exposure']['net_operating_hedge_coverage']=.5
+        result=currency_sensitivity(company,{'USD':10.},AT)
+        self.assertAlmostEqual(result['after_hedge_economic_effect'],31.)
+        self.assertIsNone(result['operating_income_change'])
+
+    def test_no_currency_mix_no_fabricated_impact(self):
+        company=self.fx_company(); del company['currency_exposure']['operating_cost_shares']
+        self.assertEqual(currency_sensitivity(company,{'USD':10.},AT)['status'],'missing_currency_exposure')
+
     def test_same_input_cost_event_has_opposite_business_effect(self):
         e=event('Energy costs increased.')
         producer=analyze_events(dict(business_description='Oil exploration and production'),[e],AT,COVER)
