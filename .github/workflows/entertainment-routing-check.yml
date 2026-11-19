@@ -6,6 +6,10 @@ on:
       - 'economic_graph.py'
       - 'event_impact_analysis.py'
       - 'entertainment_audit.py'
+      - 'kis_intraday.py'
+      - 'scanner.py'
+      - 'company_forecast.py'
+      - 'tests/test_entertainment_routing.py'
       - '.github/workflows/entertainment-routing-check.yml'
 permissions:
   contents: read
@@ -30,6 +34,7 @@ jobs:
           PYTHONPATH=. python tests/test_daily_delivery_update.py
           PYTHONPATH=. python tests/test_delivery_policy.py
       - name: Compare actual archived entertainment decisions
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python entertainment_audit.py
