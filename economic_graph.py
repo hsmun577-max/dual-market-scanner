@@ -77,6 +77,16 @@ def frames(events, at):
         body=event.get('body','')
         if len(body)<400: continue
         for index,sentence in enumerate(re.split(r'(?<=[.!?。])\s+|\n+',body)):
+            if (contains(sentence,('문화교류','문화 교류','한한령','공연 재개'))
+                    and contains(sentence,('강화','추진','확대','재개','모색'))
+                    and not contains(sentence,UNCERTAIN)
+                    and contains(sentence,COUNTRIES['China'])
+                    and contains(sentence,COUNTRIES['South Korea'])):
+                output.append(dict(event_id=identity,kind='cultural_cooperation_expectation',
+                    products=['screen_content','games','recorded_music','live_entertainment'],
+                    regions=['China','South Korea'],beneficiary_regions=['South Korea'],direction=0,
+                    status='expectation_only',available_at=published.isoformat(),source_url=event.get('url'),
+                    sentence_index=index,realization='시장 기대 관찰; 공연 허가·계약·매출 미확정'))
             up=contains(sentence,ACCESS_UP); down=contains(sentence,ACCESS_DOWN)
             if not up and not down: continue
             # Scope is taken from the same sentence, not from unrelated page text.
@@ -111,6 +121,14 @@ def connect(company, event_frames, at):
         products=set(business['products']) & set(event.get('products',[]))
         regions=set(business['countries']) & set(event.get('regions',[]))
         content={'screen_content','games','recorded_music','live_entertainment'}
+        if event.get('kind')=='cultural_cooperation_expectation':
+            if products and regions:
+                expectations.append(dict(event_id=event['event_id'],source_url=event['source_url'],
+                    channel='market_expectations',direction=0,watch_bias='positive_policy_sympathy',
+                    matched_regions=sorted(regions),confidence=.1,quantified=False,
+                    path='문화교류 논의 → 콘텐츠 업종 기대 변화 → 수급·가격 반응 관찰',
+                    uncertainty='공연 허가·계약·매출 증가 확정 아님'))
+            continue
         if (regions and not products and set(business['products']) & content
                 and set(event.get('products',[])) & content and event.get('direction',0)>0):
             expectations.append(dict(event_id=event['event_id'],source_url=event['source_url'],

@@ -1,0 +1,41 @@
+name: Entertainment routing verification
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'economic_graph.py'
+      - 'event_impact_analysis.py'
+      - 'entertainment_audit.py'
+      - '.github/workflows/entertainment-routing-check.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5'
+      - name: Verify company event routing and sector message
+        run: |
+          PYTHONPATH=. python tests/test_entertainment_routing.py
+          PYTHONPATH=. python tests/test_economic_graph.py
+          PYTHONPATH=. python tests/test_event_impact_analysis.py
+          PYTHONPATH=. python tests/test_composite_signal.py
+          PYTHONPATH=. python tests/test_sector_leadership.py
+          PYTHONPATH=. python tests/test_daily_delivery_update.py
+          PYTHONPATH=. python tests/test_delivery_policy.py
+      - name: Compare actual archived entertainment decisions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python entertainment_audit.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: entertainment-selection-audit
+          path: entertainment-audit.json
+          if-no-files-found: ignore

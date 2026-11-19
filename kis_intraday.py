@@ -737,6 +737,10 @@ def company_context(market, symbols, now):
         snapshot["market"] = "US" if overseas else "KR"
         snapshot.update(company_quality_metrics(ticker, snapshot, now))
         snapshot["source_symbol"] = mapped_tickers[symbol]
+        official_name = (US_SYMBOL_NAMES.get(symbol[4:]) if overseas else
+                         KR_SYMBOL_NAMES.get(mapped_tickers[symbol]))
+        if official_name:
+            snapshot["entity_aliases"] = list(dict.fromkeys([*snapshot.get("entity_aliases", []), official_name]))
         company_events = []
         for news in snapshot.get("news", [])[:3]:
             body, body_status = article_text(news.get("url"))

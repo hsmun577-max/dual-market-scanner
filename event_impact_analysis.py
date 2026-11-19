@@ -158,7 +158,14 @@ def direct_company_event(event, company):
     simplified=re.sub(r',?\s+(?:Holdings|Corporation|Corp\.?|Inc\.?|Limited|Ltd\.?).*$', '',name,flags=re.I).strip()
     if simplified and len(simplified)>=5: aliases=[*aliases,simplified]
     aliases=[*aliases,name]
-    return any(len(alias.strip())>=4 and alias.lower().strip() in text for alias in aliases if isinstance(alias,str))
+    for alias in aliases:
+        if not isinstance(alias,str): continue
+        alias=alias.strip().casefold()
+        if re.search(r'[가-힣]',alias):
+            if len(alias)>=3 and alias in text: return True
+        elif len(alias)>=3 and re.search(r'(?<![a-z0-9])'+re.escape(alias)+r'(?![a-z0-9])',text):
+            return True
+    return False
 
 
 def _direction(sentence):
@@ -350,13 +357,20 @@ def korean_policy_events(now):
         response=requests.get('https://www.korea.kr/main.do',headers=HEADERS,timeout=5,allow_redirects=False)
         response.raise_for_status()
         parser=Links(); parser.feed(response.text)
+        # The homepage alone drops material news quickly; include the latest policy and briefing lists.
+        for listing in ('https://www.korea.kr/news/policyNewsList.do',
+                        'https://www.korea.kr/briefing/briefingHomeList.do'):
+            try:
+                page=requests.get(listing,headers=HEADERS,timeout=5,allow_redirects=False)
+                if page.status_code==200: parser.feed(page.text)
+            except requests.RequestException: pass
         links=[]
         for href,title in parser.rows:
             url=urljoin('https://www.korea.kr/',href)
-            if ('policyNewsView.do?' in url or 'pressReleaseView.do?' in url) and allowed_url(url):
-                if re.search(r'FTA|정상|관세|금리|수출|콘텐츠|제재|협상|에너지|반도체',title,re.I):
+            if any(path in url for path in ('policyNewsView.do?','pressReleaseView.do?','presidentView.do?')) and allowed_url(url):
+                if re.search(r'FTA|정상|관세|금리|수출|콘텐츠|제재|협상|에너지|반도체|문화교류|문화 교류|한한령|공연|음악|게임',title,re.I):
                     links.append((url,title))
-        for url,title in list(dict.fromkeys(links))[:8]:
+        for url,title in list(dict.fromkeys(links))[:16]:
             text,body_status=article_text(url)
             rows.append(dict(event_id=url,url=url,headline=title,source='대한민국 정책브리핑',
                 available_at=datetime.now(now.tzinfo).isoformat(),availability_basis='first_seen_not_original_publication',
