@@ -38,11 +38,16 @@ def main():
             forecast_status=r.get('company_forecast',{}).get('assessment_status'),
             missing=r.get('company_forecast',{}).get('missing_dimensions'),
             score=r.get('company_forecast',{}).get('composite_score'),
+            event_status=r.get('company_analysis',{}).get('event_analysis',{}).get('status'),
+            event_graph_status=r.get('company_analysis',{}).get('event_analysis',{}).get('economic_graph',{}).get('status'),
+            unread_material_events=[e for e in r.get('company_analysis',{}).get('event_analysis',{}).get('unread_events',[]) if e.get('required')],
             price_date=r['indicators'].get('data_date')) for r in rows])
     Path('preopen-repair-audit.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2),encoding='utf-8')
     print('PREOPEN_REPAIR_AUDIT='+json.dumps(audit,ensure_ascii=False),flush=True)
     if not report['buy_evaluation']['connected'] or report['buy_evaluation']['evaluated']!=4:
         raise RuntimeError('All four requested issuers must reach the production decision function')
     if len(rows)!=4: raise RuntimeError('Requested issuer missing from the full scan')
+    if any(r.get('company_forecast',{}).get('assessment_status')!='complete' for r in rows):
+        raise RuntimeError('Live issuer assessments still incomplete; inspect missing evidence in the audit artifact')
 
 if __name__=='__main__':main()

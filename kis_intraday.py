@@ -202,8 +202,12 @@ def korean_company_news(symbol, now):
     name = KR_SYMBOL_NAMES.get(symbol + ".KS") or KR_SYMBOL_NAMES.get(symbol + ".KQ")
     if not name or name == symbol:
         return []
+    from issuer_news import issuer_news
+    from event_impact_analysis import issuer_name_in_text
+    direct = issuer_news(symbol,name,now)
+    if direct: return direct
     response = requests.get("https://news.google.com/rss/search", params={
-        "q": f'"{name}" (실적 OR 수주 OR 공시 OR 매출 OR 투자 OR 규제) when:1d',
+        "q": f'"{name}" (실적 OR 수주 OR 공시 OR 매출 OR 투자 OR 규제 OR 공연 OR 문화교류 OR 한한령) when:1d',
         "hl": "ko", "gl": "KR", "ceid": "KR:ko",
     }, timeout=8)
     response.raise_for_status()
@@ -214,9 +218,9 @@ def korean_company_news(symbol, now):
             published = parsedate_to_datetime(item.findtext("pubDate", ""))
         except (ValueError, TypeError):
             continue
-        if name not in title or published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
+        if not issuer_name_in_text(title,name) or published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
             continue
-        if not re.search(r"실적|수주|공시|매출|영업|공급|계약|배당|증자|자사주|인수|합병|파산|회생|거래정지|상장폐지|규제|제재|관세|수출|가이던스|contract|earnings", title, re.IGNORECASE):
+        if not re.search(r"실적|수주|공시|매출|영업|공급|계약|배당|증자|자사주|인수|합병|파산|회생|거래정지|상장폐지|규제|제재|관세|수출|가이던스|공연|문화교류|한한령|contract|earnings", title, re.IGNORECASE):
             continue
         articles.append({"headline": title, "available_at": published.isoformat(),
                          "source": item.findtext("source", "Google News"),

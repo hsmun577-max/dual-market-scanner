@@ -58,7 +58,10 @@ def main():
     allowed,reason=delivery_status(args.market,datetime.now(timezone.utc))
     os.environ['DELIVERY_MARKET']=args.market
     sent=False
-    if allowed: sent=bool(scanner.send_telegram_summary(report))
+    if allowed:
+        evaluate_preopen(report,previous_session,datetime.now(timezone.utc))
+        Path('preopen-analysis.json').write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8')
+        sent=bool(scanner.send_telegram_summary(report))
     result=dict(**window,checked_at=datetime.now(timezone.utc).isoformat(),sent=sent,reason=reason)
     Path('preopen-delivery.json').write_text(json.dumps(result),encoding='utf-8')
     print('PREOPEN_DELIVERY='+json.dumps(result),flush=True)

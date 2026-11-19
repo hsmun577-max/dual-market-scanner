@@ -54,7 +54,8 @@ def evaluate_preopen(report, previous_session, at=None):
                 expires_session=report.get('preopen_session'),stop_pct=.02,take_profit_pct=.06)
             recommendations.append(row['symbol'])
         counts[status]+=1; row['preopen_decision']=status
-    incomplete={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch'}
+    incomplete={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch',
+                'missing_indicators','invalid_average_price'}
     evaluated=sum(counts.values())
     report['buy_evaluation']=dict(completed=bool(evaluated) and not any(counts[s] for s in incomplete),
         connected=True,mode='conditional_preopen',scope='analysed_candidates',

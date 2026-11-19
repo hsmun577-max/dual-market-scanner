@@ -1,7 +1,7 @@
 """Auditable causal event analysis. Rule inferences are not verified earnings forecasts."""
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import urlparse,parse_qs,urlencode,urlunparse,urljoin
 from xml.etree import ElementTree
 import math
 import re
@@ -10,7 +10,8 @@ from economic_graph import frames as event_frames, connect as connect_business
 
 ALLOWED = ('federalreserve.gov', 'ecb.europa.eu', 'sec.gov', 'reuters.com',
            'finance.yahoo.com', 'cnbc.com', 'hanaw.com', 'samsungpop.com',
-           'yna.co.kr', 'dart.fss.or.kr', 'eia.gov', 'ofac.treasury.gov', 'korea.kr', 'motir.go.kr')
+           'yna.co.kr', 'dart.fss.or.kr', 'eia.gov', 'ofac.treasury.gov', 'korea.kr', 'motir.go.kr',
+           'n.news.naver.com')
 HEADERS = {'User-Agent': 'DualMarketScanner research https://github.com/hsmun577-max/dual-market-scanner'}
 CHANNELS = {
  'demand': ('demand', 'orders', 'backlog', '수요', '수주', '수주잔고'),
@@ -65,25 +66,71 @@ def allowed_url(url):
         return False
 
 
-def article_text(url):
+def canonical_article_url(url):
+    parsed=urlparse(url or '')
+    if parsed.hostname and (parsed.hostname=='korea.kr' or parsed.hostname.endswith('.korea.kr')):
+        news_id=parse_qs(parsed.query).get('newsId')
+        if news_id:
+            return urlunparse((parsed.scheme,parsed.netloc,parsed.path,'',urlencode({'newsId':news_id[0]}),''))
+    return url
+
+
+class ArticleBody(HTMLParser):
+    """Capture semantic article containers, including publishers using div instead of p."""
+    def __init__(self):
+        super().__init__();self.stack=[];self.parts=[]
+    def handle_starttag(self,tag,attrs):
+        attrs=dict(attrs);label=attrs.get('id','')+' '+attrs.get('class','')
+        capture=(self.stack[-1][1] if self.stack else False) or tag=='article' or bool(re.search(
+            r'(?i)(?:^|[\s_-])(?:view_cont|view_con|view-content|article_body|articleBody|dic_area|newsct_article|article-view-content-div)(?:$|\s)',label))
+        skip=(self.stack[-1][2] if self.stack else False) or tag in ('script','style','nav','header','footer')
+        if tag=='br' and capture and not skip:self.parts.append('\n')
+        if tag not in ('br','img','hr','meta','link','input','source','wbr','area','base','embed','param','track'):
+            self.stack.append((tag,capture,skip))
+    def handle_endtag(self,tag):
+        for index in range(len(self.stack)-1,-1,-1):
+            if self.stack[index][0]==tag:
+                if self.stack[index][1] and not self.stack[index][2]:self.parts.append('\n')
+                self.stack=self.stack[:index];break
+    def handle_data(self,data):
+        if self.stack and self.stack[-1][1] and not self.stack[-1][2]:self.parts.append(data)
+
+
+_BODY_CACHE={}
+
+
+def article_text(url, redirects=0):
     """Read public allowed publishers; no redirect to arbitrary hosts or paywall bypass."""
+    url=canonical_article_url(url)
     if not allowed_url(url): return '', 'publisher_not_supported'
+    cached=_BODY_CACHE.get(url)
+    if cached and cached[0]>datetime.now(timezone.utc):return cached[1]
     try:
         response=requests.get(url,headers=HEADERS,timeout=5,allow_redirects=False,stream=True)
         try:
             response.raise_for_status()
+            if response.status_code in (301,302,303,307,308) and redirects<2:
+                destination=urljoin(url,response.headers.get('Location',''))
+                if destination!=url and allowed_url(destination):return article_text(destination,redirects+1)
             if response.status_code != 200: return '', 'redirect_or_unavailable'
             if 'html' not in response.headers.get('Content-Type','').lower(): return '', 'not_html'
             body=bytearray()
             for chunk in response.iter_content(16384):
                 body.extend(chunk)
                 if len(body)>600000: return '', 'body_too_large'
-            parser=Paragraphs(); parser.feed(bytes(body).decode(response.encoding or 'utf-8',errors='replace'))
+            encoding=response.encoding
+            if not encoding or encoding.lower()=='iso-8859-1':encoding='utf-8'
+            document=bytes(body).decode(encoding,errors='replace')
+            parser=ArticleBody();parser.feed(document)
+            if len(''.join(parser.parts))<400:
+                parser=Paragraphs();parser.feed(document)
             text=re.sub(r'[ \t]+',' ',''.join(parser.parts)).strip()
             if len(text)<400: return '', 'body_insufficient'
             if any(marker in text[:1200].lower() for marker in ('verify you are human','access denied','subscribe to continue')):
                 return '', 'access_restricted'
-            return text, 'public_body'
+            result=(text,'public_body')
+            _BODY_CACHE[url]=(datetime.now(timezone.utc)+timedelta(minutes=5),result)
+            return result
         finally:
             response.close()
     except (requests.RequestException,ValueError): return '', 'download_failed'
@@ -150,6 +197,16 @@ def exposure(company):
     return {key for key,words in groups.items() if any(word in text for word in words)}
 
 
+def issuer_name_in_text(text, alias):
+    if not isinstance(alias,str):return False
+    alias=alias.strip()
+    if len(alias)<3:return False
+    if re.search(r'[가-힣]',alias):
+        return bool(re.search(r'(?<![가-힣a-zA-Z0-9])'+re.escape(alias)+
+            r'(?:(?![가-힣a-zA-Z0-9])|(?:은|는|이|가|의|을|를|와|과|도|에서|으로|로)(?![가-힣a-zA-Z0-9]))',text,re.I))
+    return bool(re.search(r'(?<![a-z0-9])'+re.escape(alias)+r'(?![a-z0-9])',text,re.I))
+
+
 def direct_company_event(event, company):
     # The ticker's news feed can contain market-wide and unrelated articles.
     text=(event.get('headline','')+' '+event.get('body','')).lower()
@@ -158,14 +215,7 @@ def direct_company_event(event, company):
     simplified=re.sub(r',?\s+(?:Holdings|Corporation|Corp\.?|Inc\.?|Limited|Ltd\.?).*$', '',name,flags=re.I).strip()
     if simplified and len(simplified)>=5: aliases=[*aliases,simplified]
     aliases=[*aliases,name]
-    for alias in aliases:
-        if not isinstance(alias,str): continue
-        alias=alias.strip().casefold()
-        if re.search(r'[가-힣]',alias):
-            if len(alias)>=3 and alias in text: return True
-        elif len(alias)>=3 and re.search(r'(?<![a-z0-9])'+re.escape(alias)+r'(?![a-z0-9])',text):
-            return True
-    return False
+    return any(issuer_name_in_text(text,alias) for alias in aliases)
 
 
 def _direction(sentence):
@@ -211,6 +261,7 @@ def analyze_events(company, events, at, feed_coverage=()):
         body=event.get('body','')
         if len(body)<400:
             unsupported.append(dict(url=event.get('url'),required=direct_company_event(event,company),
+                body_status=event.get('body_status'),
                 reason='본문 미확보: 제목만으로 실적 영향 확정 금지'))
             continue
         direct=direct_company_event(event,company)
@@ -369,8 +420,10 @@ def korean_policy_events(now):
             url=urljoin('https://www.korea.kr/',href)
             if any(path in url for path in ('policyNewsView.do?','pressReleaseView.do?','presidentView.do?')) and allowed_url(url):
                 if re.search(r'FTA|정상|관세|금리|수출|콘텐츠|제재|협상|에너지|반도체|문화교류|문화 교류|한한령|공연|음악|게임',title,re.I):
-                    links.append((url,title))
-        for url,title in list(dict.fromkeys(links))[:16]:
+                    links.append((canonical_article_url(url),title))
+        unique={}
+        for url,title in links:unique.setdefault(url,title)
+        for url,title in list(unique.items())[:16]:
             text,body_status=article_text(url)
             rows.append(dict(event_id=url,url=url,headline=title,source='대한민국 정책브리핑',
                 available_at=datetime.now(now.tzinfo).isoformat(),availability_basis='first_seen_not_original_publication',

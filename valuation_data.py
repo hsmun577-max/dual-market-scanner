@@ -51,14 +51,16 @@ def apply_peer_valuations(companies, at):
         for field in ('trailing_pe','price_to_book'):
             own=finite(company.get(field))
             if own is None or own<=0: continue
-            peers=[]
+            peers=[]; seen_peers=set()
             for key,row in companies.items():
                 if key==symbol or row.get('source_symbol')==company.get('source_symbol') and row.get('source_symbol'):
                     continue
                 if tuple(row.get(k) for k in ('market','country','industry'))!=group or not usable(row):
                     continue
                 value=finite(row.get(field))
-                if value is not None and value>0: peers.append((key,value))
+                identity=row.get('source_symbol') or key
+                if value is not None and value>0 and identity not in seen_peers:
+                    peers.append((key,value)); seen_peers.add(identity)
             if len(peers)<3: continue
             reference=median(value for _,value in peers)
             company['peer_valuation']=dict(metric=field,own_multiple=own,peer_median=reference,

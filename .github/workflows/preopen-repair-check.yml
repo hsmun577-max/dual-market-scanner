@@ -20,6 +20,7 @@ jobs:
       - name: Verify valuation, risk gates, decision and message paths
         run: |
           PYTHONPATH=. python tests/test_preopen_signals.py
+          PYTHONPATH=. python tests/test_news_body_pipeline.py
           PYTHONPATH=. python tests/test_entertainment_routing.py
           PYTHONPATH=. python tests/test_economic_graph.py
           PYTHONPATH=. python tests/test_event_impact_analysis.py
