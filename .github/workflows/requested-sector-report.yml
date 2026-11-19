@@ -68,7 +68,7 @@ jobs:
                                       "errors":[e for e in report.get("errors",[]) if "156100" in str(e)]}
           Path("requested-signal-diagnosis.json").write_text(json.dumps(diagnosis,ensure_ascii=False,indent=2),encoding="utf-8")
           print("SIGNAL_DIAGNOSIS="+json.dumps(diagnosis,ensure_ascii=False),flush=True)
-          message=format_report(data)+"\n\n매수 판정 상태\n기존 '매수 신호 없음'은 장전 매수 판정 미연결로 잘못 표시됐습니다.\n미판정·자료 부족과 실제 조건 미충족을 구분하도록 수정했습니다."
+          message="섹터 보고 정정 · 시장군·제조 전체 묶음 제외\n\n"+format_report(data)+"\n\n매수 판정 상태\n기존 '매수 신호 없음'은 장전 매수 판정 미연결로 잘못 표시됐습니다.\n미판정·자료 부족과 실제 조건 미충족을 구분하도록 수정했습니다."
           Path("requested-sector-message.txt").write_text(message,encoding="utf-8")
           for part in split_telegram_text(message):
               try:

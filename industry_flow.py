@@ -25,7 +25,8 @@ def industries(content):
         code=line[1:5].decode('ascii',errors='ignore')
         name=line[5:45].decode('cp949',errors='replace').strip()
         if not code.isdigit() or code[0] not in '01' or not 5<=int(code[1:])<=99: continue
-        if not name or any(word in name for word in ('대형','중형','소형','종합','제조업','KOSPI','KOSDAQ','코스피','코스닥','벤처','우량','중견','신성장')): continue
+        if (not name or name in {'제조','제조업'} or any(word in name for word in (
+                '대형','중형','소형','종합','KOSPI','KOSDAQ','코스피','코스닥','벤처','우량','중견','신성장','기술성장'))): continue
         rows.append(dict(code=code,name=name,exchange='KSP' if code[0]=='0' else 'KSQ'))
     return rows
 
@@ -91,7 +92,7 @@ def snapshot(day=None):
 def format_report(data):
     day=data['business_date']; label=f'{day[:4]}-{day[4:6]}-{day[6:]}'
     lines=[f'주요 섹터 수급 · {label}',f"조회 {datetime.fromisoformat(data['observed_at']):%H:%M} KST · 당일 누적·잠정",
-           '외국인+기관 순매수 기준 · 업종별 중복 합산 금지']
+           '외국인+기관 순매수 기준 · 시장군·제조 전체 묶음 제외']
     for exchange,title in [('KSP','코스피'),('KSQ','코스닥')]:
         rows=[row for row in data['rows'] if row['exchange']==exchange]
         selected=sorted(rows,key=lambda row:(-row['combined_net'],-row['return_pct']))[:3]

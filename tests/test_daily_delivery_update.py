@@ -6,6 +6,22 @@ from telegram_text import split_telegram_text
 
 
 class DailyDeliveryTests(unittest.TestCase):
+    def test_daily_selection_excludes_partial_current_session_and_keeps_previous(self):
+        import pandas as pd
+        from datetime import datetime, timezone
+        frame = pd.DataFrame({'Close':[4200,4505]}, index=pd.to_datetime(['2026-11-18','2026-11-19']))
+        now = datetime(2026,11,19,1,56,tzinfo=timezone.utc)
+        selected = scanner.completed_daily_prices(frame,'KR',now)
+        self.assertEqual(list(selected.Close),[4200])
+        self.assertEqual(len(frame),2)
+
+    def test_daily_selection_uses_us_local_date(self):
+        import pandas as pd
+        from datetime import datetime, timezone
+        frame = pd.DataFrame({'Close':[1,2]},index=pd.to_datetime(['2026-11-17','2026-11-18']))
+        now = datetime(2026,11,19,1,0,tzinfo=timezone.utc)
+        self.assertEqual(list(scanner.completed_daily_prices(frame,'US',now).Close),[1])
+
     def test_actual_yahoo_field_names_and_pretty_aliases(self):
         import pandas as pd
         from datetime import date

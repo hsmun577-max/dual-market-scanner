@@ -453,14 +453,28 @@ def build_risk_plan(price, stop_pct=0.02,
         )
     }
 
+def completed_daily_prices(data, market, now=None):
+    """Daily candidate selection uses previous local dates; live entries use intraday data."""
+    zone = ZoneInfo('Asia/Seoul' if market == 'KR' else 'America/New_York')
+    local_day = (now or datetime.now(timezone.utc)).astimezone(zone).date()
+    dates = pd.DatetimeIndex(data.index)
+    if dates.tz is not None:
+        dates = dates.tz_convert(zone)
+    return data.loc[dates.date < local_day].copy()
+
+
 def scan_market(market, tickers, benchmark, names=None, prices=None):
     names = names or {}
     results = []
     errors = []
 
+    selection_now = datetime.now(timezone.utc)
+    if benchmark is not None:
+        benchmark = completed_daily_prices(benchmark, market, selection_now)
     for symbol in dict.fromkeys(tickers):
         try:
             data = download_prices(symbol) if prices is None else clean_prices(prices[symbol])
+            data = completed_daily_prices(data, market, selection_now)
 
             indicators = calculate_indicators(
                 data, benchmark

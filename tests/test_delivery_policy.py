@@ -32,6 +32,11 @@ class DeliveryTests(unittest.TestCase):
 
 
 class IndustryTests(unittest.TestCase):
+    def test_excludes_listing_groups_and_manufacturing_parent(self):
+        rows = b''.join(b'0'+code+name.encode('cp949').ljust(40,b' ')+b'\n' for code,name in [
+            (b'0005','기술성장기업'),(b'0006','제조'),(b'0007','제약')])
+        self.assertEqual([row['name'] for row in industries(rows)],['제약'])
+
     def test_master_layout_uses_byte_width_not_overlapping_name(self):
         data=b'0'+b'0005'+'음식료품'.encode('cp949').ljust(40,b' ')+b'\n'
         self.assertEqual(industries(data)[0]['name'],'음식료품')
