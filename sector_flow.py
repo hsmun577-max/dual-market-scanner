@@ -77,23 +77,15 @@ def fetch_intraday_sectors(sectors, benchmark, market, now):
 
 
 def format_sector_header(rows, market=None):
-    markets = (market,) if market else ("KR", "US")
-    lines = ["섹터 매수세 · 대표 ETF 추정"]
-    for code in markets:
-        available = [row for row in rows or [] if row.get("market")==code]
-        selected = sorted(available, key=lambda row: (
-            -float(row.get("market_excess_pct") or 0),
-            -float(row.get("return_pct") or 0),
-            -float(row.get("turnover_ratio") or 0)))[:3]
-        label = "국장" if code=="KR" else "미장"
-        if not selected:
-            lines.append(f"{label} · 데이터 확인 실패 · 수급 판단 보류")
-        for rank, row in enumerate(selected, 1):
-            positive = row.get("return_pct", 0) > 0 and row.get("market_excess_pct", 0) > 0
-            state = ("유입 초기" if row.get("starting") else "집중" if row.get("active")
-                     else "유입 조짐" if row.get("early") else "상대 강세" if positive
-                     else "상대 방어 · 유입 미확정")
-            stamp = datetime.fromisoformat(row["data_as_of"]).strftime("%m/%d %H:%M") if row.get("data_as_of") else row["data_date"]
-            basis = "15분" if row.get("source") == "15m_vs_prior_same_time" else "종료 일봉·실시간 아님"
-            lines.append(f"• {label} {rank}. {row['name']} · {state} · {row.get('return_pct', 0):+.1f}% / 시장대비 {row.get('market_excess_pct', 0):+.1f}%p · 거래대금 {row['turnover_ratio']:.1f}배 · {stamp} ({basis})")
-    return lines
+    available=[row for row in rows or [] if market is None or row.get('market')==market]
+    ranked=sorted(available,key=lambda row:(
+        -float(row.get('market_excess_pct') or 0),
+        -float(row.get('return_pct') or 0),
+        -float(row.get('turnover_ratio') or 0)))
+    selected=[]; names=set()
+    for row in ranked:
+        name=row.get('name')
+        if not name or name in names: continue
+        selected.append(name); names.add(name)
+        if len(selected)==2: break
+    return ['오늘의 주요 섹터']+[f'{i}위 {name}' for i,name in enumerate(selected,1)]+(['확인 불가'] if not selected else [])

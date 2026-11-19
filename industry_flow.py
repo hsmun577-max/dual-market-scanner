@@ -89,22 +89,38 @@ def snapshot(day=None):
                 turnover_share=True,breadth_counts=True,persistence=False,twenty_day_intensity=False))
 
 
+def rank_leading_sectors(data, limit=2):
+    """Our observable leadership ranking; not a reproduction of a broker's proprietary model."""
+    rows=[]
+    for original in data.get('rows',[]):
+        row=dict(original)
+        up,down=row.get('advances'),row.get('declines')
+        if up is None or down is None or up+down<=0:
+            continue
+        row['breadth']=up/(up+down)
+        required=('return_pct','market_excess_pct','turnover_share_pct','combined_net')
+        if any(number(row.get(key)) is None for key in required):
+            continue
+        rows.append(row)
+    def percentile(value,key,exchange):
+        peers=[r[key] for r in rows if r['exchange']==exchange]
+        return (sum(v<value for v in peers)+.5*sum(v==value for v in peers))/len(peers)
+    for row in rows:
+        row['leadership_score']=sum(weight*percentile(row[key],key,row['exchange'])
+            for key,weight in [('market_excess_pct',.40),('turnover_share_pct',.25),('breadth',.20),('combined_net',.15)])
+    # A sector with falling prices or predominantly declining constituents is not a leader.
+    eligible=[r for r in rows if r['return_pct']>0 and r['market_excess_pct']>0 and r['breadth']>.5]
+    ranked=sorted(eligible,key=lambda r:(-r['leadership_score'],-r['market_excess_pct'],r['name']))
+    selected=[]; names=set()
+    for row in ranked:
+        if row['name'] in names: continue
+        selected.append(row); names.add(row['name'])
+        if len(selected)>=limit: break
+    return selected
+
+
 def format_report(data):
-    day=data['business_date']; label=f'{day[:4]}-{day[4:6]}-{day[6:]}'
-    lines=[f'주요 섹터 수급 · {label}',f"조회 {datetime.fromisoformat(data['observed_at']):%H:%M} KST · 당일 누적·잠정",
-           '외국인+기관 순매수 기준 · 시장군·제조 전체 묶음 제외']
-    for exchange,title in [('KSP','코스피'),('KSQ','코스닥')]:
-        rows=[row for row in data['rows'] if row['exchange']==exchange]
-        selected=sorted(rows,key=lambda row:(-row['combined_net'],-row['return_pct']))[:3]
-        lines.append(''); lines.append(title)
-        if not selected: lines.append('수급 자료 미확보 · 유입 없음으로 판단하지 않음')
-        for rank,row in enumerate(selected,1):
-            state='순매수 유입' if row['combined_net']>0 else '순매도 우위' if row['combined_net']<0 else '순매수 중립'
-            groups=f"외인 {'순매수' if row['foreign_net']>0 else '순매도' if row['foreign_net']<0 else '중립'} / 기관 {'순매수' if row['institution_net']>0 else '순매도' if row['institution_net']<0 else '중립'}"
-            extra=[]
-            if row['market_excess_pct'] is not None: extra.append(f"시장대비 {row['market_excess_pct']:+.1f}%p")
-            if row['turnover_share_pct'] is not None: extra.append(f"거래대금 비중 {row['turnover_share_pct']:.1f}%")
-            if row['advances'] is not None and row['declines'] is not None: extra.append(f"상승 {row['advances']:.0f} / 하락 {row['declines']:.0f}종목")
-            lines.extend([f"{rank}. {row['name']} · {state} · {row['return_pct']:+.1f}%",groups,' · '.join(extra)])
-    lines.append('\n지속·가속 여부는 이번 단일 조회로 확정하지 않음')
-    return '\n'.join(lines)
+    selected=rank_leading_sectors(data)
+    return '\\n'.join(['오늘의 주요 섹터']+
+        [f"{rank}위 {row['name']}" for rank,row in enumerate(selected,1)]+
+        (['확인 불가'] if not selected else []))

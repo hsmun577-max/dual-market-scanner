@@ -65,9 +65,9 @@ class DailyDeliveryTests(unittest.TestCase):
             post.return_value=Mock(status_code=200,json=lambda:{'ok':True})
             scanner.send_telegram_summary(report)
         messages=[call.kwargs['json']['text'] for call in post.call_args_list]
-        self.assertTrue(messages[0].startswith('섹터 매수세'))
+        self.assertTrue(messages[0].startswith('오늘의 주요 섹터'))
         self.assertNotIn('DART 연결','\n'.join(messages))
-        self.assertIn('매수 판정 미완료','\n'.join(messages))
+        self.assertIn('분석 미완료','\n'.join(messages))
         self.assertTrue(all(len(message)<=3800 for message in messages))
 
     def test_long_reports_are_split_and_failures_are_not_relabelled_verified(self):

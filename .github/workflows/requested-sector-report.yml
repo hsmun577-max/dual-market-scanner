@@ -22,6 +22,8 @@ jobs:
           PYTHONPATH=. python tests/test_delivery_policy.py
           PYTHONPATH=. python tests/test_daily_delivery_update.py
           PYTHONPATH=. python tests/test_composite_signal.py
+          PYTHONPATH=. python tests/test_sector_leadership.py
+          PYTHONPATH=. python tests/test_economic_graph.py
       - name: Fetch current official investor flows and send requested report
         env:
           GH_TOKEN: ${{ github.token }}
@@ -66,9 +68,37 @@ jobs:
           else:
               diagnosis["lnk_biomed"]={"symbol":"156100.KQ","in_latest_report":False,
                                       "errors":[e for e in report.get("errors",[]) if "156100" in str(e)]}
+          from economic_graph import load_profiles,profile,connect,frames,select_analysis_candidates
+          from event_impact_analysis import world_events
+          at=datetime.now(ZoneInfo("UTC"))
+          registry=load_profiles()
+          events,coverage=world_events(at)
+          event_frames=frames(events,at)
+          old_linked=report.get("event_discovery",{}).get("linked_symbols",[])
+          selected=select_analysis_candidates([r for r in report["results"] if r["market"]=="KR"],"KR",old_linked)
+          selected_symbols={r["symbol"] for r in selected}
+          enter=[]
+          for code in ["352820","041510","122870","035900"]:
+              row=next((r for r in report["results"] if r["symbol"].split(".")[0]==code),None)
+              company=next((v for k,v in registry.items() if k.split(".")[0]==code),{})
+              graph=connect(company,event_frames,at)
+              enter.append(dict(symbol=code,name=row.get("name") if row else None,
+                  scanned=row is not None,indicators=row.get("indicators") if row else None,
+                  rejection=candidate_rejection_reason(row,"KR") if row else "missing_from_scan",
+                  selected_now=row["symbol"] in selected_symbols if row else False,
+                  analysed_then="company_analysis" in row if row else False,
+                  forecast=row.get("company_forecast") if row else None,
+                  profile=graph["profile"],event_status=graph["status"],
+                  event_links=graph.get("links"),expectation_links=graph.get("expectation_links")))
+          enter_audit=dict(source_generated_at=report.get("generated_at"),companies=enter,
+              prior_event_discovery=report.get("event_discovery"),current_feed_coverage=coverage,
+              current_event_headlines=[e.get("headline") for e in events],
+              event_frames=event_frames)
+          Path("requested-entertainment-diagnosis.json").write_text(json.dumps(enter_audit,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("ENTERTAINMENT_DIAGNOSIS="+json.dumps(enter_audit,ensure_ascii=False),flush=True)
           Path("requested-signal-diagnosis.json").write_text(json.dumps(diagnosis,ensure_ascii=False,indent=2),encoding="utf-8")
           print("SIGNAL_DIAGNOSIS="+json.dumps(diagnosis,ensure_ascii=False),flush=True)
-          message="섹터 보고 정정 · 시장군·제조 전체 묶음 제외\n\n"+format_report(data)+"\n\n매수 판정 상태\n기존 '매수 신호 없음'은 장전 매수 판정 미연결로 잘못 표시됐습니다.\n미판정·자료 부족과 실제 조건 미충족을 구분하도록 수정했습니다."
+          message=format_report(data)
           Path("requested-sector-message.txt").write_text(message,encoding="utf-8")
           for part in split_telegram_text(message):
               try:

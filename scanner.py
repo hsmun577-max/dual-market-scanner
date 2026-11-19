@@ -709,8 +709,7 @@ def send_telegram_summary(report):
             lines.append("매수 조건 충족 종목 없음")
         else:
             assessed=[row for row in report['results'] if row.get('company_forecast',{}).get('composite_score') is not None]
-            lines.append(f"매수 판정 미완료 · 종합평가 확보 {len(assessed)}개")
-            lines.append('미판정 상태를 매수 기회 없음으로 해석하지 마세요')
+            lines.append("분석 미완료")
     for item in confirmed[:5]:
         lines.append(telegram_candidate_line(item))
 

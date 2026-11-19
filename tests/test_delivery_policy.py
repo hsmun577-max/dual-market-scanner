@@ -44,7 +44,7 @@ class IndustryTests(unittest.TestCase):
         self.assertIsNone(number('')); self.assertEqual(number('-1,234'),-1234.)
     def test_missing_flow_not_no_flow(self):
         text=format_report(dict(business_date='20261119',observed_at='2026-11-19T16:00:00+09:00',rows=[]))
-        self.assertIn('자료 미확보',text)
+        self.assertIn('확인 불가',text)
         self.assertNotIn('유입 없음\n',text)
 
 
