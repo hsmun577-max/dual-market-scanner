@@ -11,12 +11,12 @@ jobs:
   stop:
     runs-on: ubuntu-latest
     steps:
-      - name: Cancel prior revision of US-late collection
+      - name: Cancel pre-policy US-early runner
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: hsmun577-max/dual-market-scanner
         run: |
-          status=$(gh run view 44288567581 --json status --jq .status)
+          status=$(gh run view 44472017219 --json status --jq .status)
           if [ "$status" != completed ]; then
-            gh run cancel 44288567581
+            gh run cancel 44472017219
           fi
