@@ -1,0 +1,90 @@
+name: Requested current sector report and signal diagnosis
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/requested-sector-report.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5'
+      - name: Verify timing and message regression checks
+        run: |
+          PYTHONPATH=. python tests/test_delivery_policy.py
+          PYTHONPATH=. python tests/test_daily_delivery_update.py
+          PYTHONPATH=. python tests/test_composite_signal.py
+      - name: Fetch current official investor flows and send requested report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import requests
+          from industry_flow import snapshot,format_report
+          from profile_universe import restore_index
+          from candidate_selection import candidate_rejection_reason,liquidity_rejection_reason,rank_recovery_candidates
+          from telegram_text import split_telegram_text
+          
+          data=snapshot()
+          Path("requested-sector-flow.json").write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
+          if not data["rows"]:
+              print("SECTOR_DIAGNOSTIC="+json.dumps({"rows":0,"missing":data["missing"][:10]},ensure_ascii=False),flush=True)
+              raise RuntimeError("No verified current-day industry flow; refusing to send yesterday as today")
+          restore_index()
+          report=json.loads(Path("opening-scan/latest.json").read_text(encoding="utf-8-sig"))
+          stock=next((row for row in report["results"] if row["symbol"]=="156100.KQ"),None)
+          assessed=[row for row in report["results"] if "company_forecast" in row]
+          diagnosis={"source_generated_at":report.get("generated_at"),"scanned":len(report["results"]),
+              "assessed":len(assessed),"complete_composites":sum(r["company_forecast"].get("composite_score") is not None for r in assessed),
+              "confirmed_flags":sum(r.get("signal",{}).get("confirmed") is True for r in report["results"]),
+              "daily_buy_evaluation_was_connected":bool(report.get("buy_evaluation",{}).get("completed")),
+              "lnk_biomed":None}
+          if stock:
+              recovery=rank_recovery_candidates([stock],"KR")
+              diagnosis["lnk_biomed"]={"symbol":stock["symbol"],"name":stock.get("name"),
+                  "indicators":stock["indicators"],"signal":stock["signal"],
+                  "liquidity_rejection":liquidity_rejection_reason(stock,"KR"),
+                  "trend_rejection":candidate_rejection_reason(stock,"KR"),
+                  "recovery_eligible":bool(recovery),"company_analysis_performed":"company_analysis" in stock,
+                  "forecast":stock.get("company_forecast")}
+          else:
+              diagnosis["lnk_biomed"]={"symbol":"156100.KQ","in_latest_report":False,
+                                      "errors":[e for e in report.get("errors",[]) if "156100" in str(e)]}
+          Path("requested-signal-diagnosis.json").write_text(json.dumps(diagnosis,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("SIGNAL_DIAGNOSIS="+json.dumps(diagnosis,ensure_ascii=False),flush=True)
+          message=format_report(data)+"\n\n매수 판정 상태\n기존 '매수 신호 없음'은 장전 매수 판정 미연결로 잘못 표시됐습니다.\n미판정·자료 부족과 실제 조건 미충족을 구분하도록 수정했습니다."
+          Path("requested-sector-message.txt").write_text(message,encoding="utf-8")
+          for part in split_telegram_text(message):
+              try:
+                  response=requests.post("https://api.telegram.org/bot"+os.environ["TELEGRAM_BOT_TOKEN"]+"/sendMessage",
+                      json={"chat_id":os.environ["TELEGRAM_CHAT_ID"],"text":part},timeout=10,allow_redirects=False)
+              except requests.RequestException:
+                  raise RuntimeError("Telegram network error") from None
+              if response.status_code!=200 or response.json().get("ok") is not True: raise RuntimeError("Telegram delivery not confirmed")
+          print("REQUESTED_SECTOR_DELIVERY="+json.dumps({"business_date":data["business_date"],"rows":len(data["rows"]),"sent":True,"message":message},ensure_ascii=False),flush=True)
+          
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: requested-sector-and-signal-diagnosis
+          path: |
+            requested-*.json
+            requested-sector-message.txt
+          if-no-files-found: ignore

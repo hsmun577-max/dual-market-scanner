@@ -54,8 +54,6 @@ jobs:
       - name: Run scanner
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SCAN_MODE: ${{ inputs.mode || 'full' }}
         run: python scanner.py --mode "$SCAN_MODE"
 

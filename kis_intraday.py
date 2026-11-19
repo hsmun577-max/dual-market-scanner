@@ -20,6 +20,7 @@ from websockets.exceptions import WebSocketException
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
 from signal_context import context_status
 from company_forecast import build_company_forecast
+from delivery_policy import delivery_status
 from event_impact_analysis import article_text, world_events, analyze_events
 from candidate_selection import instrument_rejection_reason, rank_market_candidates, rank_recovery_candidates
 from sector_flow import format_sector_header
@@ -1334,8 +1335,16 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
     return "\n".join(lines)
 
 def notify(market, candidates, closes, token, chat_id, companies=None, sectors=None):
+    allowed,reason=delivery_status(market,datetime.now(KST))
+    if not allowed:
+        print('Telegram skipped: '+reason)
+        return
     message = format_notification(market, candidates, closes, companies, sectors)
     for message in split_telegram_text(message):
+        allowed,reason=delivery_status(market,datetime.now(KST))
+        if not allowed:
+            print('Telegram skipped before send: '+reason)
+            return
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",

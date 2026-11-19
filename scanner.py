@@ -17,6 +17,7 @@ from candidate_selection import candidate_rejection_reason, rank_market_candidat
 from sector_flow import fetch_intraday_sectors, format_sector_header
 from telegram_text import split_telegram_text
 from company_forecast import build_company_forecast
+from delivery_policy import delivery_status
 import yfinance as yf
 
 KR_SYMBOL_NAMES = {
@@ -678,20 +679,33 @@ def send_telegram_summary(report):
         return
     if not token or not chat_id:
         raise RuntimeError("Telegram requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
+    allowed,reason=delivery_status(os.getenv('DELIVERY_MARKET'),datetime.now(timezone.utc))
+    if not allowed:
+        print('Telegram skipped: '+reason)
+        return
 
-    lines = format_sector_header(report.get("sectors", []))
+    lines = report.get('sector_header_override') or format_sector_header(report.get("sectors", []))
     confirmed = [item for item in report["results"]
                  if item.get("signal", {}).get("confirmed") is True
                  and item.get("signal", {}).get("entry_limit") is not None
                  and item.get("company_forecast", {}).get("composite_score") is not None]
     lines.extend(["", "매수 신호"])
     if not confirmed:
-        lines.append("확인된 매수 신호 없음")
+        if report.get('buy_evaluation',{}).get('completed') is True:
+            lines.append("매수 조건 충족 종목 없음")
+        else:
+            assessed=[row for row in report['results'] if row.get('company_forecast',{}).get('composite_score') is not None]
+            lines.append(f"매수 판정 미완료 · 종합평가 확보 {len(assessed)}개")
+            lines.append('미판정 상태를 매수 기회 없음으로 해석하지 마세요')
     for item in confirmed[:5]:
         lines.append(telegram_candidate_line(item))
 
     messages = split_telegram_text("\n".join(lines))
     for message in messages:
+        allowed,reason=delivery_status(os.getenv('DELIVERY_MARKET'),datetime.now(timezone.utc))
+        if not allowed:
+            print('Telegram skipped before send: '+reason)
+            return
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
@@ -708,6 +722,7 @@ def send_telegram_summary(report):
             raise RuntimeError("Telegram request failed or returned invalid JSON") from None
     
     print(f"Telegram confirmed: {len(messages)} daily report parts")
+    return True
 
 
 def main():

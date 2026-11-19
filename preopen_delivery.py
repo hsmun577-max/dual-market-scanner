@@ -1,0 +1,59 @@
+"""Prepare analysis ahead of an exchange opening and deliver only in its window."""
+import argparse
+from datetime import datetime,timedelta,timezone
+import json
+import os
+from pathlib import Path
+import time
+from zoneinfo import ZoneInfo
+from delivery_policy import plan,delivery_status
+
+
+def main():
+    parser=argparse.ArgumentParser()
+    parser.add_argument('market',choices=['NXT','KRX','US_PRE','US'])
+    args=parser.parse_args(); now=datetime.now(timezone.utc)
+    window=plan(args.market,now)
+    if not window:
+        print('PREOPEN_SKIPPED=closed_or_unsupported_session'); return
+    deadline=datetime.fromisoformat(window['expires_at']); target=datetime.fromisoformat(window['target_at'])
+    print('PREOPEN_PLAN='+json.dumps(window),flush=True)
+    if now>=deadline:
+        print('PREOPEN_SKIPPED=missed_delivery_window'); return
+    prepare_at=target-timedelta(minutes=30)
+    while datetime.now(timezone.utc)<prepare_at:
+        time.sleep(min(30,max(0,(prepare_at-datetime.now(timezone.utc)).total_seconds())))
+    from profile_universe import restore_index
+    restore_index()
+    source=Path('opening-scan/latest.json')
+    if not source.is_file(): raise RuntimeError('No completed full scan available for preopen analysis')
+    report=json.loads(source.read_text(encoding='utf-8-sig'))
+    market='US' if args.market.startswith('US') else 'KR'
+    report['results']=[row for row in report['results'] if row['market']==market]
+    import scanner
+    local=datetime.now(ZoneInfo('America/New_York' if market=='US' else 'Asia/Seoul'))
+    report['sectors']=scanner.sector_flow_snapshot(market,local)
+    scanner.prepare_selected_analysis(report)
+    if market=='KR':
+        try:
+            import exchange_calendars
+            from industry_flow import snapshot,format_report
+            cal=exchange_calendars.get_calendar('XKRX')
+            previous=cal.previous_session(window['session_date']).strftime('%Y%m%d')
+            data=snapshot(previous)
+            if data['rows']:
+                report['sector_header_override']=format_report(data).split('\n')
+        except Exception as exc:
+            print('Industry investor data unavailable: '+type(exc).__name__,flush=True)
+    while datetime.now(timezone.utc)<target:
+        time.sleep(min(20,max(0,(target-datetime.now(timezone.utc)).total_seconds())))
+    allowed,reason=delivery_status(args.market,datetime.now(timezone.utc))
+    os.environ['DELIVERY_MARKET']=args.market
+    sent=False
+    if allowed: sent=bool(scanner.send_telegram_summary(report))
+    result=dict(**window,checked_at=datetime.now(timezone.utc).isoformat(),sent=sent,reason=reason)
+    Path('preopen-delivery.json').write_text(json.dumps(result),encoding='utf-8')
+    print('PREOPEN_DELIVERY='+json.dumps(result),flush=True)
+
+
+if __name__=='__main__': main()
