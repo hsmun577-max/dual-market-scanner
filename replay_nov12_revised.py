@@ -20,14 +20,15 @@ def safe_error(exc): return type(exc).__name__
 def event_index(key):
     found=[]; coverage=[]
     for kind in ['B','I']:
-        for page in range(1,21):
+        for page in range(1,101):
             r=requests.get('https://opendart.fss.or.kr/api/list.json',params=dict(crtfc_key=key,
                 bgn_de='20261029',end_de='20261111',pblntf_ty=kind,page_count=100,page_no=page),timeout=15)
             r.raise_for_status(); d=r.json()
             if d.get('status') not in {'000','013'}: raise ValueError('DART index unavailable')
             found.extend(d.get('list',[]))
             if page>=int(d.get('total_page',0)): break
-        coverage.append(dict(type=kind,pages=page,total_pages=d.get('total_page',0),truncated=page<int(d.get('total_page',0))))
+        if page<int(d.get('total_page',0)): raise ValueError('Incomplete historical DART pagination')
+        coverage.append(dict(type=kind,pages=page,total_pages=d.get('total_page',0),truncated=False))
     return found,coverage
 
 def price_reference(row,prices):
@@ -75,6 +76,8 @@ def main():
         valuation_status=dict(status='downloaded',rows=len(fundamental),date='2026-11-11')
     except Exception as exc:
         fundamental=None;valuation_status=dict(status='unavailable',error=safe_error(exc))
+        if isinstance(exc,subprocess.CalledProcessError):
+            valuation_status['diagnostic']=(exc.stderr or b'').decode('utf-8',errors='replace')[-1800:]
     print('START_DATED_PRICE_DOWNLOAD',valuation_status,flush=True)
     symbols=[r['symbol'] for r in selected+controls]
     daily=yf.download(symbols+['^KS11'],start='2026-06-01',end='2026-11-19',group_by='ticker',
@@ -120,6 +123,7 @@ def main():
         financial_reconstruction_count=sum(bool(r['company_analysis'].get('quarter')) for r in reconstructed if r['symbol'] in selected_symbols),
         complete_forecasts=sum(r['company_forecast']['assessment_status']=='complete' for r in reconstructed if r['symbol'] in selected_symbols),
         conditional_buy_count=len(signals),missing_dimensions=dict(missing),decisions=decision,
+        historical_validation_complete=False,
         strategy_statistics=dict(status='not_estimable_missing_historical_evidence',trades=None,win_rate=None,net_return=None),
         price_reference_is_not_strategy_return=True,errors=errors,results=reconstructed,
         limitations=['No historical world/issuer news body coverage or dated business exposure/sector snapshot',
