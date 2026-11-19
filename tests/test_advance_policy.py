@@ -20,6 +20,14 @@ def company():
         profile_available_at='2026-11-12T00:00:00+09:00')
 
 class AdvanceTests(unittest.TestCase):
+    def test_changed_article_body_is_not_backdated_to_older_publication(self):
+        old=event();changed={**event(),'body':event()['body']+' 새로운 정책 내용'}
+        first=merge_index([old],[changed],AT)[0]
+        self.assertFalse(first['publication_verified'])
+        self.assertEqual(first['available_at'],AT.isoformat())
+        repeated=merge_index([first],[changed],AT+timedelta(hours=1))[0]
+        self.assertFalse(repeated['publication_verified'])
+        self.assertEqual(repeated['available_at'],AT.isoformat())
     def test_same_date_coarse_timestamp_outcome_supersedes_preparation(self):
         c=company();c['event_analysis']={'economic_graph':connect(c,frames([event()],AT),AT)}
         c['price_history']=[dict(close=100,available_at='2026-11-13T16:00:00+09:00')]

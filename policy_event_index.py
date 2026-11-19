@@ -1,7 +1,7 @@
 """Persist public government policy evidence between runs, preserving publication and first observation."""
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
-import json,os,subprocess
+import json,os,subprocess,re
 from urllib.parse import urlparse
 
 PATH=Path('reports/policy-event-index.json')
@@ -46,7 +46,18 @@ def merge_index(old,new,at):
         if previous:
             if len(row.get('body',''))<400 and len(previous.get('body',''))>=400:continue
             if previous.get('publication_verified') and not row.get('publication_verified'):continue
-            if previous.get('publication_verified') and row.get('publication_verified'):
+            same_body=re.sub(r'\s+',' ',previous.get('body','')).strip()==re.sub(r'\s+',' ',row.get('body','')).strip()
+            old_modified=previous.get('source_modified_date') or previous.get('source_published_date')
+            new_modified=row.get('source_modified_date')
+            verified_revision=bool(old_modified and new_modified and new_modified>old_modified)
+            if same_body and previous.get('revision_pending') and not verified_revision:
+                row.update(available_at=previous['available_at'],publication_verified=False,
+                    availability_basis='changed_body_revision_time_unverified',revision_pending=True)
+            elif not same_body:
+                if not verified_revision:
+                    row.update(available_at=at.isoformat(),publication_verified=False,
+                        availability_basis='changed_body_revision_time_unverified',revision_pending=True)
+            elif previous.get('publication_verified') and row.get('publication_verified'):
                 row['available_at']=min(previous['available_at'],row['available_at'],key=lambda v:stamp(v))
         merged[key]=row
     return list(merged.values())
