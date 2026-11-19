@@ -5,6 +5,7 @@ These are uncalibrated scenarios. Data coverage is not a probability of profit.
 
 import math
 from datetime import datetime, timedelta
+from catalyst_policy import SECTOR_PROXIES,catalyst_context
 
 
 def _number(mapping, key):
@@ -104,12 +105,7 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     if terms:
         components["price_and_demand"] = sum(w*v for w,v in terms)/sum(w for w,_ in terms)
         evidence["price_and_demand"] = {"return_5d":momentum,"relative_strength":strength,"volume_ratio":volume}
-    sector_names = {"Technology":{"기술","반도체","AI반도체","IT·전자부품"},
-        "Financial Services":{"금융","은행","증권"},"Healthcare":{"헬스케어","바이오"},
-        "Industrials":{"산업재","운송","조선","방산"},"Energy":{"에너지"},
-        "Basic Materials":{"소재","철강"},"Utilities":{"유틸리티","AI전력설비"},
-        "Consumer Defensive":{"필수소비재"},"Consumer Cyclical":{"경기소비재","자동차"},
-        "Real Estate":{"부동산"},"Communication Services":{"커뮤니케이션","미디어·엔터","K콘텐츠"}}
+    sector_names = SECTOR_PROXIES
     matched = []
     for row in sectors:
         if company.get("market") and row.get("market") != company["market"]:
@@ -195,6 +191,9 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     extension = max(0,price/ma20-1) if ma20 is not None and ma20>0 else 0.
     # A rise that has already occurred reduces the remaining event/earnings scenario.
     priced_in = min(.8, max(0,(momentum or 0)-.05)/.15 + max(0,extension-.03)/.12)
+    catalyst=catalyst_context(company,indicators,price,at,sectors)
+    if catalyst['eligible']:
+        priced_in=min(.8,catalyst['post_available_return_pct']/(1.5*indicators['atr14_pct']))
     daily_volatility = _number(indicators,"volatility_20d")
     atr = _number(indicators,"atr14_pct")
     volatility_source = "observed_daily_returns"
@@ -230,6 +229,7 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     return {"model":"uncalibrated_multifactor_scenarios_v1","generated_at":at.isoformat(),
         "horizon_sessions":5,"data_coverage":round(coverage,4),
         "components":components,"weights":weights,"evidence":evidence,"priced_in_fraction":round(priced_in,4),
+        "catalyst_context":catalyst,
         "assessment_status":"complete" if complete else "incomplete",
         "missing_dimensions":missing,
         "composite_score":round(max(0,min(100,50+50*after_pricing)),1) if complete else None,

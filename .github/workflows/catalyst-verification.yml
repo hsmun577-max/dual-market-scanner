@@ -1,0 +1,46 @@
+name: Catalyst entry policy verification
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/catalyst-verification.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5'
+      - name: Verify generalized catalyst, pricing, controls and existing rules
+        run: |
+          PYTHONPATH=. python tests/test_catalyst_policy.py
+          PYTHONPATH=. python tests/test_preopen_signals.py
+          PYTHONPATH=. python tests/test_news_body_pipeline.py
+          PYTHONPATH=. python tests/test_entertainment_routing.py
+          PYTHONPATH=. python tests/test_economic_graph.py
+          PYTHONPATH=. python tests/test_event_impact_analysis.py
+          PYTHONPATH=. python tests/test_composite_signal.py
+          PYTHONPATH=. python tests/test_sector_leadership.py
+          PYTHONPATH=. python tests/test_daily_delivery_update.py
+          PYTHONPATH=. python tests/test_delivery_policy.py
+      - name: Check frozen entertainment mechanism and observed intraday prices
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+        run: python -u catalyst_validation.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: catalyst-policy-evidence
+          path: |
+            catalyst-verification.json
+            catalyst-report.json
+            catalyst-message-preview.txt
+          if-no-files-found: ignore

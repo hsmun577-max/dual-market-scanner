@@ -29,7 +29,7 @@ def domestic_valuations(symbols, client=None):
             observed=datetime.now(timezone.utc).isoformat()
             values={'valuation_source':'KIS inquire-price','valuation_observed_at':observed}
             for source,target in [('per','trailing_pe'),('pbr','price_to_book'),
-                                  ('eps','trailing_eps'),('bps','book_value_per_share')]:
+                                  ('eps','trailing_eps'),('bps','book_value_per_share'),('aspr_unit','price_tick')]:
                 value=finite(row.get(source))
                 if value is not None: values[target]=value
             result[symbol]=values

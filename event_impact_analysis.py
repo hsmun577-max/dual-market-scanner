@@ -97,6 +97,7 @@ class ArticleBody(HTMLParser):
 
 
 _BODY_CACHE={}
+_ARTICLE_METADATA={}
 
 
 def article_text(url, redirects=0):
@@ -121,6 +122,8 @@ def article_text(url, redirects=0):
             encoding=response.encoding
             if not encoding or encoding.lower()=='iso-8859-1':encoding='utf-8'
             document=bytes(body).decode(encoding,errors='replace')
+            from event_publication import publication_metadata
+            _ARTICLE_METADATA[url]=publication_metadata(document,url,datetime.now(timezone.utc))
             parser=ArticleBody();parser.feed(document)
             if len(''.join(parser.parts))<400:
                 parser=Paragraphs();parser.feed(document)
@@ -425,8 +428,10 @@ def korean_policy_events(now):
         for url,title in links:unique.setdefault(url,title)
         for url,title in list(unique.items())[:16]:
             text,body_status=article_text(url)
+            metadata=_ARTICLE_METADATA.get(url,dict(available_at=datetime.now(now.tzinfo).isoformat(),
+                publication_verified=False,availability_basis='first_seen_not_original_publication'))
             rows.append(dict(event_id=url,url=url,headline=title,source='대한민국 정책브리핑',
-                available_at=datetime.now(now.tzinfo).isoformat(),availability_basis='first_seen_not_original_publication',
+                **metadata,
                 body=text,body_status=body_status,scope='world'))
         status='checked' if links else 'listing_unparsed_or_no_matching_links'
     except (requests.RequestException,ValueError): pass

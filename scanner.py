@@ -601,6 +601,14 @@ def telegram_candidate_line(item):
     target, upside = forecast["base_price"], forecast["bull_price"]
     target_label = f"$" + f"{target:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{target:,.0f} / {upside:,.0f}원"
     label = '조건부 매수' if conditional else '매수 확인'
+    if conditional and preopen.get('strategy')=='event_catalyst':
+        floor=preopen['entry_floor']
+        floor_label=f'${floor:,.2f}' if overseas else f'{floor:,.0f}원'
+        upper_label=f'${upside:,.2f}' if overseas else f'{upside:,.0f}원'
+        return (f"• {name} ({code}) · 호재형 조건부 매수 · 종합 {score:.1f}/100\n"
+                f"  매수 구간 {floor_label}~{entry_label} · 시초가 구간 충족 시\n"
+                f"  기준 종가 {preopen['reference_date']} · 상승 시나리오 목표 {upper_label}\n"
+                "  손절 −2% · 기본 익절 +6% (실제 체결가 기준)")
     basis = f" · {preopen['reference_date']} 종가 기준" if conditional else ''
     return (f"• {name} ({code}) · {label} · 종합 {score:.1f}/100\n"
             f"  매수 상한 {entry_label}{basis}\n"

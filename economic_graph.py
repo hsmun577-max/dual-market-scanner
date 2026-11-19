@@ -86,6 +86,8 @@ def frames(events, at):
                     products=['screen_content','games','recorded_music','live_entertainment'],
                     regions=['China','South Korea'],beneficiary_regions=['South Korea'],direction=0,
                     status='expectation_only',available_at=published.isoformat(),source_url=event.get('url'),
+                    publication_verified=event.get('publication_verified',False),
+                    availability_basis=event.get('availability_basis'),
                     sentence_index=index,realization='시장 기대 관찰; 공연 허가·계약·매출 미확정'))
             up=contains(sentence,ACCESS_UP); down=contains(sentence,ACCESS_DOWN)
             if not up and not down: continue
@@ -105,6 +107,8 @@ def frames(events, at):
             output.append(dict(event_id=identity,kind='market_access',products=sorted(products),
                 regions=sorted(regions),beneficiary_regions=sorted(beneficiaries),direction=direction,status=certainty,
                 available_at=published.isoformat(),source_url=event.get('url'),sentence_index=index,
+                publication_verified=event.get('publication_verified',False),
+                availability_basis=event.get('availability_basis'),
                 realization='시행·심사·계약 이행 이후; 매출 인식 시점 미확정'))
     return output
 
@@ -124,6 +128,8 @@ def connect(company, event_frames, at):
         if event.get('kind')=='cultural_cooperation_expectation':
             if products and regions:
                 expectations.append(dict(event_id=event['event_id'],source_url=event['source_url'],
+                    available_at=event.get('available_at'),publication_verified=event.get('publication_verified',False),
+                    availability_basis=event.get('availability_basis'),
                     channel='market_expectations',direction=0,watch_bias='positive_policy_sympathy',
                     matched_regions=sorted(regions),confidence=.1,quantified=False,
                     path='문화교류 논의 → 콘텐츠 업종 기대 변화 → 수급·가격 반응 관찰',
@@ -132,6 +138,8 @@ def connect(company, event_frames, at):
         if (regions and not products and set(business['products']) & content
                 and set(event.get('products',[])) & content and event.get('direction',0)>0):
             expectations.append(dict(event_id=event['event_id'],source_url=event['source_url'],
+                available_at=event.get('available_at'),publication_verified=event.get('publication_verified',False),
+                availability_basis=event.get('availability_basis'),
                 channel='market_expectations',direction=0,watch_bias='positive_policy_sympathy',
                 matched_regions=sorted(regions),confidence=.1,quantified=False,
                 path='인접 콘텐츠 업종의 정책 변화 → 시장의 개방 기대 확산 → 밸류에이션 반응 관찰',

@@ -775,6 +775,7 @@ def company_context(market, symbols, now):
         for news in snapshot.get("news", [])[:3]:
             body, body_status = article_text(news.get("url"))
             company_events.append({**news, "body": body, "body_status": body_status,
+                                   "publication_verified":True,"availability_basis":"source_news_timestamp",
                                    "event_id": news.get("url"), "scope": "company"})
         snapshot["event_analysis"] = analyze_events(snapshot, [*global_events, *company_events],
                                                      datetime.now(now.tzinfo), global_coverage)
@@ -786,6 +787,11 @@ def company_context(market, symbols, now):
                 data = clean_prices(data.loc[data.index.date < local_day])
                 benchmark = clean_prices(benchmark.loc[benchmark.index.date < local_day])
                 snapshot["price_indicators"] = calculate_indicators(data, benchmark)
+                zone=ZoneInfo('America/New_York') if overseas else KST
+                from catalyst_policy import completed_bar_available_at
+                snapshot['price_history']=[dict(date=day.date().isoformat(),close=float(bar['Close']),
+                    available_at=completed_bar_available_at(day.date(),'US' if overseas else 'KR'))
+                    for day,bar in data.tail(35).iterrows()]
             except (KeyError, ValueError, TypeError) as exc:
                 snapshot["price_history_error"] = type(exc).__name__
         snapshot["available_at"] = datetime.now(now.tzinfo).isoformat()

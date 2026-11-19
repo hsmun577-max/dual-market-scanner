@@ -37,25 +37,45 @@ def evaluate_preopen(report, previous_session, at=None):
             link.get('watch_bias')=='positive_policy_sympathy' and link.get('source_url')
             for link in graph.get('expectation_links',[]))
         trend_reason=candidate_rejection_reason(row,row['market'])
+        catalyst=forecast.get('catalyst_context',{}).get('eligible') is True
+        entry_limit=price; entry_floor=None; strategy='trend'
         if reason: status=reason
         elif values['ma20']<=0: status='invalid_average_price'
         elif values.get('breakdown'): status='breakdown'
-        elif values.get('overheated') or values.get('return_5d',0)>.12 or price/values['ma20']>1.08:
+        elif not catalyst and (values.get('overheated') or values.get('return_5d',0)>.12 or price/values['ma20']>1.08):
             status='extended_price'
         elif trend_reason and not event_support: status=trend_reason
         elif forecast['composite_score']<60: status='composite_score_below_policy'
+        elif catalyst:
+            tick=company.get('price_tick',.01 if row['market']=='US' else None)
+            upper=forecast.get('bull_price')
+            if not isinstance(tick,(int,float)) or not math.isfinite(tick) or tick<=0:
+                status='entry_tick_missing'
+            elif not isinstance(upper,(int,float)) or not math.isfinite(upper) or forecast['base_price']<=price:
+                status='catalyst_outlook_not_positive'
+            else:
+                raw=min(price*(1+values['atr14_pct']/100),upper/1.06)
+                entry_limit=round(math.floor(raw/tick)*tick,2)
+                if entry_limit<price:
+                    status='insufficient_catalyst_upside_room'
+                else:
+                    status='conditional_buy';entry_floor=price;strategy='event_catalyst'
         elif not math.isfinite(forecast.get('base_price',float('nan'))) or forecast['base_price']/price-1<.033:
             status='insufficient_expected_reward'
         else:
             status='conditional_buy'
-            row['preopen_signal']=dict(status=status,confirmed=False,entry_limit=price,
+        if status=='conditional_buy':
+            row['preopen_signal']=dict(status=status,confirmed=False,entry_limit=entry_limit,
+                entry_floor=entry_floor,strategy=strategy,
                 reference_price=price,reference_date=previous_session,generated_at=at.isoformat(),
-                entry_basis='previous_session_close_limit_not_current_market_quote',
+                entry_basis='source_dated_catalyst_volatility_band' if catalyst else 'previous_session_close_limit_not_current_market_quote',
+                fresh_execution_quote_required=True,
+                target_basis='upside_scenario_not_expected_return' if catalyst else 'base_scenario',
                 expires_session=report.get('preopen_session'),stop_pct=.02,take_profit_pct=.06)
             recommendations.append(row['symbol'])
         counts[status]+=1; row['preopen_decision']=status
     incomplete={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch',
-                'missing_indicators','invalid_average_price'}
+                'missing_indicators','invalid_average_price','entry_tick_missing'}
     evaluated=sum(counts.values())
     report['buy_evaluation']=dict(completed=bool(evaluated) and not any(counts[s] for s in incomplete),
         connected=True,mode='conditional_preopen',scope='analysed_candidates',
