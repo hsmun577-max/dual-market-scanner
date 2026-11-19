@@ -1,5 +1,5 @@
 """Point-in-time audit and reconstruction; never turn missing evidence into a buy."""
-import copy,json,os,subprocess
+import copy,json,os,subprocess,sys
 from pathlib import Path
 from datetime import datetime,timedelta
 from zoneinfo import ZoneInfo
@@ -51,6 +51,7 @@ def main():
     assert generated<=AT,'Future archive'
     pool=[r for r in report['results'] if r['market']=='KR' and r['indicators'].get('data_date')=='2026-11-11']
     key=os.environ['DART_API_KEY']; errors={}
+    print('START_DATED_EVENT_INDEX',flush=True)
     try: events,coverage=event_index(key)
     except Exception as exc: events=[];coverage=[];errors['dart_event_index']=safe_error(exc)
     # Dated material disclosures expand research before chart ranking, not after observing winners.
@@ -59,15 +60,22 @@ def main():
     selected_symbols={r['symbol'] for r in selected}
     controls=[r for r in pool if r['symbol'] in CONTROLS-selected_symbols]
     print('ARCHIVE',len(pool),'RESEARCH',len(selected),'CONTROLS',len(controls),flush=True)
+    print('START_CORPORATE_CODE_DOWNLOAD',flush=True)
     codes=dart_company_codes(key)
+    print('START_HISTORICAL_VALUATION_PROBE',flush=True)
     try:
-        from pykrx import stock
-        fundamental=stock.get_market_fundamental('20261111',market='ALL')
+        import pandas as pd
+        # pykrx has unbounded upstream HTTP calls. Isolate the optional probe.
+        subprocess.run([sys.executable,'-c',"from pykrx import stock; stock.get_market_fundamental('20261111',market='ALL').to_csv('nov12-evidence/historical-fundamentals.csv')"],
+                       timeout=45,check=True,capture_output=True)
+        fundamental=pd.read_csv(OUT/'historical-fundamentals.csv',index_col=0,dtype={'티커':str})
+        fundamental.index=fundamental.index.astype(str).str.zfill(6)
         if fundamental.empty: raise ValueError('Empty historical fundamentals')
         fundamental.to_csv(OUT/'historical-fundamentals.csv')
         valuation_status=dict(status='downloaded',rows=len(fundamental),date='2026-11-11')
     except Exception as exc:
         fundamental=None;valuation_status=dict(status='unavailable',error=safe_error(exc))
+    print('START_DATED_PRICE_DOWNLOAD',valuation_status,flush=True)
     symbols=[r['symbol'] for r in selected+controls]
     daily=yf.download(symbols+['^KS11'],start='2026-06-01',end='2026-11-19',group_by='ticker',
         auto_adjust=False,progress=False,threads=6,timeout=15,multi_level_index=True)
@@ -106,6 +114,7 @@ def main():
     signals=[r for r in reconstructed if r.get('preopen_decision')=='conditional_buy']
     result=dict(decision_at=AT.isoformat(),evaluation_through='2026-11-18 KRX close',
         archive_run=43031791802,archive_generated_at=report['generated_at'],universe_count=len(pool),
+        archived_kr_count=sum(r['market']=='KR' for r in report['results']),
         research_count=len(selected),control_count=len(controls),dated_event_index_count=len(events),
         event_index_coverage=coverage,event_candidate_count=len(event_symbols),valuation=valuation_status,
         financial_reconstruction_count=sum(bool(r['company_analysis'].get('quarter')) for r in reconstructed if r['symbol'] in selected_symbols),
@@ -120,4 +129,8 @@ def main():
             '0 validated buys under missing evidence does not mean 0% return or 0% win rate'])
     (OUT/'replay-result.json').write_text(json.dumps(result,ensure_ascii=False,allow_nan=False,default=str),encoding='utf-8')
     print('REPLAY_SUMMARY',json.dumps({k:v for k,v in result.items() if k not in {'results','decisions'}},ensure_ascii=False),flush=True)
+    print('REPLAY_ROWS',json.dumps([dict(symbol=r['symbol'],name=r['name'],selection=r['research_selection'],
+        quarter=r['company_analysis'].get('quarter'),financial_error=r['company_analysis'].get('financial_error'),
+        price_error=r.get('price_reconstruction_error'),missing=r['company_forecast']['missing_dimensions'],
+        decision=r.get('preopen_decision'),price_reference=r['historical_price_reference']) for r in reconstructed],ensure_ascii=False),flush=True)
 if __name__=='__main__':main()

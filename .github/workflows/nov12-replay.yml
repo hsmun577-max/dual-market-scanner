@@ -6,7 +6,7 @@ on:
       - '.github/workflows/nov12-replay.yml'
 permissions:
   contents: read
-  actions: read
+  actions: write
 jobs:
   replay:
     runs-on: ubuntu-latest
@@ -17,6 +17,10 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5' pykrx
+      - name: Stop superseded unbounded data probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel 44537332639 || true
       - name: Reconstruct dated evidence and evaluate current buy rules
         env:
           GH_TOKEN: ${{ github.token }}
