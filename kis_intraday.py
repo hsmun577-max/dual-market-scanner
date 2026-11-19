@@ -643,8 +643,25 @@ def company_quality_metrics(ticker, snapshot, now):
     return result
 
 
+def restore_business_profile(snapshot, cached, now):
+    """Reuse observed issuer metadata without refreshing its evidence timestamp."""
+    from economic_graph import profile
+    if not profile(cached, now)['usable']:
+        return snapshot
+    if snapshot.get('business_description'):
+        return snapshot
+    for key in ('business_description','sector','industry','country','company_name',
+                'profile_available_at','profile_source','business_relationships'):
+        if cached.get(key) is not None:
+            snapshot[key] = cached[key]
+    snapshot['business_profile_reused'] = True
+    return snapshot
+
+
 def company_context(market, symbols, now):
     from concurrent.futures import ThreadPoolExecutor
+    from economic_graph import load_profiles
+    cached_profiles = load_profiles()
 
     overseas = market.startswith("US-")
     global_events, global_coverage = world_events(now)
@@ -737,6 +754,8 @@ def company_context(market, symbols, now):
         snapshot["market"] = "US" if overseas else "KR"
         snapshot.update(company_quality_metrics(ticker, snapshot, now))
         snapshot["source_symbol"] = mapped_tickers[symbol]
+        restore_business_profile(snapshot, cached_profiles.get(mapped_tickers[symbol], {}),
+                                 datetime.now(now.tzinfo))
         official_name = (US_SYMBOL_NAMES.get(symbol[4:]) if overseas else
                          KR_SYMBOL_NAMES.get(mapped_tickers[symbol]))
         if official_name:

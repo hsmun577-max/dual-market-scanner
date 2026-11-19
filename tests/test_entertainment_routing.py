@@ -31,6 +31,21 @@ class EntertainmentRoutingTests(unittest.TestCase):
         self.assertTrue(direct_company_event({'headline':'하이브 중국 공연 기대'}, {'entity_aliases':['하이브']}))
         self.assertTrue(direct_company_event({'headline':'JYP concert plans'}, {'entity_aliases':['JYP']}))
         self.assertFalse(direct_company_event({'headline':'XYZJYP unrelated'}, {'entity_aliases':['JYP']}))
+class ProfileReuseTests(unittest.TestCase):
+    def test_failed_refresh_reuses_profile_without_claiming_new_evidence(self):
+        from kis_intraday import restore_business_profile
+        observed=(AT-timedelta(days=1)).isoformat()
+        cached=dict(business_description='Music production in South Korea',sector='Communication Services',
+                    industry='Entertainment',country='South Korea',profile_available_at=observed)
+        restored=restore_business_profile({'profile_error':'HTTPError'},cached,AT)
+        self.assertEqual(restored['profile_available_at'],observed)
+        self.assertEqual(restored['sector'],'Communication Services')
+        self.assertNotIn('forward_pe',restored)
+        stale={**cached,'profile_available_at':(AT-timedelta(days=181)).isoformat()}
+        self.assertNotIn('sector',restore_business_profile({},stale,AT))
+        future={**cached,'profile_available_at':(AT+timedelta(seconds=1)).isoformat()}
+        self.assertNotIn('sector',restore_business_profile({},future,AT))
+
 class ResearchCapacityTests(unittest.TestCase):
     def test_linked_issuers_beyond_old_eight_slot_cap_are_researched_before_chart_trend(self):
         from economic_graph import select_analysis_candidates
