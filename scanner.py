@@ -637,6 +637,7 @@ def sector_metrics(prices, benchmark):
 
 def scan_sectors(benchmarks):
     results, errors = [], []
+    selection_now = datetime.now(timezone.utc)
     for market, sectors in SECTOR_ETFS.items():
         try:
             prices = yf.download(
@@ -649,7 +650,10 @@ def scan_sectors(benchmarks):
             continue
         for symbol, name in sectors.items():
             try:
-                metrics = sector_metrics(prices[symbol], benchmarks.get(market))
+                benchmark = benchmarks.get(market)
+                if benchmark is not None:
+                    benchmark = completed_daily_prices(benchmark, market, selection_now)
+                metrics = sector_metrics(completed_daily_prices(prices[symbol], market, selection_now), benchmark)
                 results.append({"market": market, "symbol": symbol, "name": name, **metrics})
             except (KeyError, ValueError) as exc:
                 errors.append({"market": market, "symbol": symbol, "error": str(exc)})

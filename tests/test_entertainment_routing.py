@@ -31,6 +31,18 @@ class EntertainmentRoutingTests(unittest.TestCase):
         self.assertTrue(direct_company_event({'headline':'하이브 중국 공연 기대'}, {'entity_aliases':['하이브']}))
         self.assertTrue(direct_company_event({'headline':'JYP concert plans'}, {'entity_aliases':['JYP']}))
         self.assertFalse(direct_company_event({'headline':'XYZJYP unrelated'}, {'entity_aliases':['JYP']}))
+class ResearchCapacityTests(unittest.TestCase):
+    def test_linked_issuers_beyond_old_eight_slot_cap_are_researched_before_chart_trend(self):
+        from economic_graph import select_analysis_candidates
+        rows=[]
+        for i in range(12):
+            rows.append(dict(symbol=f'T{i:02}.KS',name='일반기업',signal={'score':0},
+                indicators=dict(price=10000,volume=2000000+i,volume_ratio=2,
+                    ma20=12000,ma60=14000,return_5d=-.02,return_20d=-.1,
+                    relative_strength=-.1,average_turnover_20d=20000000000+i)))
+        selected=select_analysis_candidates(rows,'KR',[r['symbol'] for r in rows])
+        self.assertEqual({r['symbol'] for r in selected},{r['symbol'] for r in rows})
+
 class CompositeRoutingTests(unittest.TestCase):
     def test_content_proxy_and_policy_expectation_are_scored_without_fake_earnings(self):
         from company_forecast import build_company_forecast
