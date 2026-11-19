@@ -1,0 +1,45 @@
+name: Policy event early discovery index
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/policy-event-index.yml'
+  schedule:
+    - cron: '17 * * * 1-5'
+      timezone: Asia/Seoul
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: policy-event-index
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Keep source-dated policy preparations before market price signals
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import datetime,timezone
+          from event_impact_analysis import world_events
+          from economic_graph import frames
+          at=datetime.now(timezone.utc)
+          events,coverage=world_events(at)
+          result=frames(events,datetime.now(timezone.utc))
+          print(json.dumps({"events":len(events),"advance_frames":sum(r.get("kind")=="pre_event_policy_watch" for r in result),"coverage":coverage},ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: policy-event-index
+          path: reports/policy-event-index.json
+          if-no-files-found: ignore

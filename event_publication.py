@@ -25,16 +25,26 @@ def publication_metadata(document,url,now):
     raw=parser.values+re.findall(r'"datePublished"\s*:\s*"([^"]+)"',document)
     day_values=[' '.join(parser.date_text)]
     korea=bool(re.search(r'https://(?:www\.|m\.)?korea\.kr/',url or ''))
+    if korea:
+        for match in re.finditer(r'<h[12][^>]*>.*?</h[12]>',document,re.I|re.S):
+            title=re.sub('<[^>]+>','',match.group()).strip()
+            if len(title)>=8:
+                # Publisher article header only; do not use dates from the article's photos or body.
+                fragment=document[match.end():match.end()+3500]
+                day_values.append(re.sub('<[^>]+>',' ',fragment))
     for value in raw:
         try:
-            at=datetime.fromisoformat(value.strip().replace('Z','+00:00'))
+            value=value.strip()
+            at=datetime.fromisoformat(value.replace('Z','+00:00'))
+            if at.utcoffset() is None and korea and re.search(r'[T ]\d{2}:\d{2}',value):
+                at=at.replace(tzinfo=ZoneInfo('Asia/Seoul'))
             if at.utcoffset() is not None and at<=now:
                 return dict(available_at=at.isoformat(),publication_verified=True,availability_basis='source_published_time')
         except ValueError:pass
         day_values.append(value)
     if korea:
         for text in day_values:
-            match=re.search(r'\b(20\d{2})[.\-/](\d{2})[.\-/](\d{2})\b',text)
+            match=re.search(r'\b(20\d{2})[.\-/](\d{2})[.\-/](\d{2})(?!\d)',text)
             if not match:continue
             day='-'.join(match.groups())
             at=datetime.fromisoformat(day).replace(tzinfo=ZoneInfo('Asia/Seoul'))+timedelta(days=1)

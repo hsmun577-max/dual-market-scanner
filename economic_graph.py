@@ -1,5 +1,6 @@
 """Shared event -> product/region -> business exposure graph, independent of ticker."""
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import re
 
 PRODUCTS = {
@@ -76,6 +77,30 @@ def frames(events, at):
         seen.add(identity)
         body=event.get('body','')
         if len(body)<400: continue
+        # Public diplomatic preparations can identify exposed businesses before an outcome or price surge.
+        if (event.get('publication_verified') is True
+                and contains(body,COUNTRIES['China']) and contains(body,COUNTRIES['South Korea'])
+                and contains(body,('다음 주','다음주','예정','ahead of','upcoming'))
+                and contains(body,('정상회담','정상회의','summit'))
+                and contains(body,('인적교류','문화','서비스','콘텐츠','cultural','services'))
+                and contains(body,('협상','협력','교류','cooperation','negotiation'))):
+            local=published.astimezone(ZoneInfo('Asia/Seoul'))
+            anchor=local.date()
+            if event.get('source_published_date'):
+                try:anchor=datetime.fromisoformat(event['source_published_date']).date()
+                except ValueError:pass
+            if contains(body,('다음 주','다음주')):
+                first=anchor+timedelta(days=7-anchor.weekday())
+                last=first+timedelta(days=6)
+            else:
+                first=anchor;last=first+timedelta(days=7)
+            output.append(dict(event_id=identity,kind='pre_event_policy_watch',
+                products=['screen_content','games','recorded_music','live_entertainment','tourism'],
+                regions=['China','South Korea'],beneficiary_regions=['South Korea'],direction=0,
+                status='preparation_not_outcome',available_at=published.isoformat(),source_url=event.get('url'),
+                publication_verified=True,availability_basis=event.get('availability_basis'),
+                event_window_start=first.isoformat(),event_window_end=last.isoformat(),
+                realization='예정된 협의의 결과는 미확정; 해당 기업의 수혜 가능성 사전 검토'))
         for index,sentence in enumerate(re.split(r'(?<=[.!?。])\s+|\n+',body)):
             if (contains(sentence,('문화교류','문화 교류','한한령','공연 재개'))
                     and contains(sentence,('강화','추진','확대','재개','모색'))
@@ -125,12 +150,17 @@ def connect(company, event_frames, at):
         products=set(business['products']) & set(event.get('products',[]))
         regions=set(business['countries']) & set(event.get('regions',[]))
         content={'screen_content','games','recorded_music','live_entertainment'}
-        if event.get('kind')=='cultural_cooperation_expectation':
+        if event.get('kind') in {'cultural_cooperation_expectation','pre_event_policy_watch'}:
+            if event.get('event_window_end') and at.astimezone(ZoneInfo('Asia/Seoul')).date().isoformat()>event['event_window_end']:
+                continue
             if products and regions:
                 expectations.append(dict(event_id=event['event_id'],source_url=event['source_url'],
                     available_at=event.get('available_at'),publication_verified=event.get('publication_verified',False),
                     availability_basis=event.get('availability_basis'),
-                    channel='market_expectations',direction=0,watch_bias='positive_policy_sympathy',
+                    channel='market_expectations',direction=0,
+                    watch_bias='pre_event_business_exposure' if event['kind']=='pre_event_policy_watch' else 'positive_policy_sympathy',
+                    stage='pre_event' if event['kind']=='pre_event_policy_watch' else 'announced_expectation',
+                    event_window_start=event.get('event_window_start'),event_window_end=event.get('event_window_end'),
                     matched_regions=sorted(regions),confidence=.1,quantified=False,
                     path='문화교류 논의 → 콘텐츠 업종 기대 변화 → 수급·가격 반응 관찰',
                     uncertainty='공연 허가·계약·매출 증가 확정 아님'))
@@ -199,7 +229,10 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48):
     """Reserve research capacity for event links and liquid names before chart gates."""
     from candidate_selection import (rank_market_candidates,rank_recovery_candidates,
                                       liquidity_rejection_reason,average_turnover)
-    eligible=[row for row in pool if liquidity_rejection_reason(row,market) is None]
+    from advance_policy import eligible_for_advance_research
+    event_set=set(event_symbols)
+    eligible=[row for row in pool if liquidity_rejection_reason(row,market) is None
+        or (row['symbol'] in event_set and eligible_for_advance_research(row,market))]
     indexed={row['symbol']:row for row in eligible}
     event_rows=sorted((indexed[s] for s in set(event_symbols) if s in indexed),
                         key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:max(1,2*limit//3)]

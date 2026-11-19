@@ -176,12 +176,18 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         # This is market expectation, not permission, contract value or a revenue forecast.
         event_terms.append(.1)
         uncertainty = max(uncertainty, .6)
+    advance_expectations=[row for row in expectation_links
+        if row.get('watch_bias')=='pre_event_business_exposure' and row.get('publication_verified') is True]
+    if advance_expectations:
+        event_terms.append(.03)
+        uncertainty=max(uncertainty,.8)
     if event_terms:
         components["events"] = math.tanh(sum(event_terms))
     elif (causal_valid and causal.get("status") == "no_material_events_identified" and feeds_checked):
         components["events"] = 0.
     evidence["events"] = {"event_direction_terms":len(event_terms),"quantified_earnings_events":0,"unquantified_events":unquantified_events,
                           "policy_expectation_present":bool(positive_expectations),
+                          "pre_event_exposure_present":bool(advance_expectations),
                           "feeds_checked":feeds_checked,"uncertainty":uncertainty,
                           "causal_analysis":causal if causal_valid else {"status":"unavailable_or_stale"},
                           "meaning":"rule based event direction; not quantified earnings impact"}

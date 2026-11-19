@@ -591,6 +591,11 @@ def telegram_candidate_line(item):
     conditional = preopen.get('status') == 'conditional_buy'
     entry = preopen.get('entry_limit') if conditional else signal.get("entry_limit")
     score = forecast.get("composite_score")
+    advance=item.get('advance_signal',{})
+    if advance.get('status')=='advance_candidate' and not conditional and score is not None:
+        return (f"• {item.get('name') or item['symbol']} ({item['symbol'].split('.')[0]}) · 사전 매수 후보 · 종합 {score:.1f}/100\n"
+                f"  예정 재료 {advance['event_window_start']}~{advance['event_window_end']}\n"
+                "  정책 결과 발표 전 수혜 가능성 분석 · 매수 확정 대기")
     if (signal.get("confirmed") is not True and not conditional) or score is None or entry is None:
         return ""
     symbol = item["symbol"]
@@ -606,7 +611,7 @@ def telegram_candidate_line(item):
         floor_label=f'${floor:,.2f}' if overseas else f'{floor:,.0f}원'
         upper_label=f'${upside:,.2f}' if overseas else f'{upside:,.0f}원'
         return (f"• {name} ({code}) · 호재형 조건부 매수 · 종합 {score:.1f}/100\n"
-                f"  매수 구간 {floor_label}~{entry_label} · 시초가 구간 충족 시\n"
+                f"  매수 구간 {floor_label}~{entry_label} · 눌림 구간 진입 시\n"
                 f"  기준 종가 {preopen['reference_date']} · 상승 시나리오 목표 {upper_label}\n"
                 "  손절 −2% · 기본 익절 +6% (실제 체결가 기준)")
     basis = f" · {preopen['reference_date']} 종가 기준" if conditional else ''
@@ -722,7 +727,8 @@ def send_telegram_summary(report):
     confirmed = [item for item in report["results"]
                  if (item.get("signal", {}).get("confirmed") is True
                  and item.get("signal", {}).get("entry_limit") is not None
-                 or item.get('preopen_signal',{}).get('status')=='conditional_buy')
+                 or item.get('preopen_signal',{}).get('status')=='conditional_buy'
+                 or item.get('advance_signal',{}).get('status')=='advance_candidate')
                  and item.get("company_forecast", {}).get("composite_score") is not None]
     confirmed.sort(key=lambda item: -item['company_forecast']['composite_score'])
     lines.extend(["", "매수 신호"])

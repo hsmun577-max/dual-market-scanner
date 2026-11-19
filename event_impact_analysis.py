@@ -101,13 +101,26 @@ _ARTICLE_METADATA={}
 
 
 def article_text(url, redirects=0):
+    result=_read_article_text(url,redirects)
+    parsed=urlparse(url or '')
+    if not result[0] and parsed.hostname=='www.korea.kr':
+        alternate=urlunparse((parsed.scheme,'m.korea.kr',parsed.path,'',parsed.query,''))
+        result=_read_article_text(alternate,redirects)
+        if result[0]:
+            canonical=canonical_article_url(url)
+            _ARTICLE_METADATA[canonical]=_ARTICLE_METADATA.get(canonical_article_url(alternate),{})
+            _BODY_CACHE[canonical]=(datetime.now(timezone.utc)+timedelta(minutes=5),result)
+    return result
+
+
+def _read_article_text(url, redirects=0):
     """Read public allowed publishers; no redirect to arbitrary hosts or paywall bypass."""
     url=canonical_article_url(url)
     if not allowed_url(url): return '', 'publisher_not_supported'
     cached=_BODY_CACHE.get(url)
     if cached and cached[0]>datetime.now(timezone.utc):return cached[1]
     try:
-        response=requests.get(url,headers=HEADERS,timeout=5,allow_redirects=False,stream=True)
+        response=requests.get(url,headers=HEADERS,timeout=10 if 'korea.kr/' in url else 5,allow_redirects=False,stream=True)
         try:
             response.raise_for_status()
             if response.status_code in (301,302,303,307,308) and redirects<2:
@@ -421,8 +434,8 @@ def korean_policy_events(now):
         links=[]
         for href,title in parser.rows:
             url=urljoin('https://www.korea.kr/',href)
-            if any(path in url for path in ('policyNewsView.do?','pressReleaseView.do?','presidentView.do?')) and allowed_url(url):
-                if re.search(r'FTA|정상|관세|금리|수출|콘텐츠|제재|협상|에너지|반도체|문화교류|문화 교류|한한령|공연|음악|게임',title,re.I):
+            if any(path in url for path in ('policyNewsView.do?','pressReleaseView.do?','presidentView.do?','policyBriefingView.do?')) and allowed_url(url):
+                if re.search(r'FTA|정상|관세|금리|수출|콘텐츠|제재|협상|에너지|반도체|문화교류|문화 교류|한한령|공연|음악|게임|외교장관|일정|예정|사전',title,re.I):
                     links.append((canonical_article_url(url),title))
         unique={}
         for url,title in links:unique.setdefault(url,title)
@@ -443,5 +456,9 @@ def world_events(now):
     key=int(now.timestamp())//300
     if key not in _WORLD_CACHE:
         _WORLD_CACHE.clear()
-        _WORLD_CACHE[key]=_fetch_world_events(now)
+        from policy_event_index import prime_public_policy_cache
+        prime_public_policy_cache(_BODY_CACHE,_ARTICLE_METADATA,now)
+        events,coverage=_fetch_world_events(now)
+        from policy_event_index import merge_with_history
+        _WORLD_CACHE[key]=(merge_with_history(events,now),coverage)
     return _WORLD_CACHE[key]

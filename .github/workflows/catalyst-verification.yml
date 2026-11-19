@@ -4,6 +4,9 @@ on:
   push:
     paths:
       - '.github/workflows/catalyst-verification.yml'
+concurrency:
+  group: policy-event-index
+  cancel-in-progress: false
 permissions:
   contents: read
   actions: read
@@ -20,6 +23,7 @@ jobs:
       - name: Verify generalized catalyst, pricing, controls and existing rules
         run: |
           PYTHONPATH=. python tests/test_catalyst_policy.py
+          PYTHONPATH=. python tests/test_advance_policy.py
           PYTHONPATH=. python tests/test_preopen_signals.py
           PYTHONPATH=. python tests/test_news_body_pipeline.py
           PYTHONPATH=. python tests/test_entertainment_routing.py
