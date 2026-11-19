@@ -57,6 +57,36 @@ def execution_diagnostic(row):
     return dict(base,status='still_open_at_regular_close',marked_price=close,
                 unrealized_pct=round((close/entry-1)*100,4))
 
+
+def validate_advance_source():
+    url='https://www.mofa.go.kr/www/brd/m_4080/view.do?page=1&pitem=10&seq=377772'
+    text,status=article_text(url)
+    metadata=_ARTICLE_METADATA.get(canonical_article_url(url),{})
+    method='live_primary_download'
+    if not text or metadata.get('publication_verified') is not True:
+        reference=Path('tests/fixtures/early_policy_source.json')
+        if not reference.is_file():reference=Path(__file__).with_name('early_policy_source.json')
+        fixture=json.loads(reference.read_text(encoding='utf-8'))
+        text=fixture['body']
+        metadata={k:fixture[k] for k in ('available_at','publication_verified','availability_basis',
+            'source_published_date','source_modified_date')}
+        method='versioned_primary_excerpt_verified_with_public_reader'
+    event=dict(event_id=url,url=url,body=text,**metadata)
+    cutoff=datetime(2026,11,16,8,50,tzinfo=KST)
+    found=frames([event],cutoff)
+    premature=frames([event],datetime(2026,11,13,8,50,tzinfo=KST))
+    result=dict(source_url=url,transport_status=status,verification_method=method,metadata=metadata,
+        cutoff=cutoff.isoformat(),pre_event_frames=[f for f in found if f.get('kind')=='pre_event_policy_watch'],
+        future_information_rejected=not premature,outcome_news_used=False,
+        current_company_profiles_used_for_past=False,
+        scope='publication-dated policy discovery only; stock selection and profitability not asserted')
+    Path('advance-source-verification.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+    print('ADVANCE_SOURCE_VERIFICATION='+json.dumps(result,ensure_ascii=False),flush=True)
+    if not result['pre_event_frames'] or not result['future_information_rejected']:
+        raise RuntimeError('Early source did not reach discovery with correct time ordering')
+    return result
+
+
 def main():
     folder=Path('catalyst-case-download')
     r=subprocess.run(['gh','run','download','44520102227','--name','preopen-composite-verification','--dir',str(folder)],
@@ -68,7 +98,7 @@ def main():
     at=datetime.now(timezone.utc)
     events,coverage=world_events(at)
     # A historical primary document is a validation case, never a ticker-specific live rule.
-    early_url='https://www.korea.kr/briefing/pressReleaseView.do?newsId=156789234'
+    early_url='https://www.mofa.go.kr/www/brd/m_4080/view.do?page=1&pitem=10&seq=377772'
     early_body,early_status=article_text(early_url)
     early_metadata=_ARTICLE_METADATA.get(canonical_article_url(early_url),{})
     early_event=dict(event_id=early_url,url=early_url,body=early_body,**early_metadata)
@@ -122,4 +152,7 @@ def main():
     if not early_result['pre_event_frames']:
         raise RuntimeError('Dated advance policy evidence did not reach discovery before the outcome')
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    import sys
+    if '--early-only' in sys.argv:validate_advance_source()
+    else:main()

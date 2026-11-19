@@ -73,6 +73,12 @@ class CatalystTests(unittest.TestCase):
         self.assertGreater(healthy['composite_score'],weak['composite_score'])
 
 class PublicationTests(unittest.TestCase):
+    def test_official_revision_is_available_before_validation_cutoff(self):
+        html='<dt>작성일</dt><dd>2026-11-13</dd><dt>수정일</dt><dd>2026-11-14</dd>'
+        metadata=publication_metadata(html,'https://www.mofa.go.kr/www/brd/m_4080/view.do?seq=1',AT)
+        self.assertTrue(metadata['publication_verified'])
+        self.assertEqual(metadata['source_published_date'],'2026-11-13')
+        self.assertEqual(metadata['available_at'],'2026-11-15T00:00:00+09:00')
     def test_date_only_source_is_known_next_local_day_and_does_not_refresh_on_reread(self):
         html='<span class="date">2026.11.18</span>'
         url='https://www.korea.kr/news/policyNewsView.do?newsId=123'

@@ -21,6 +21,17 @@ class PublicationParser(HTMLParser):
         if self.date_depth:self.date_text.append(text)
 
 def publication_metadata(document,url,now):
+    if re.search(r'https://(?:www\.)?mofa\.go\.kr/',url or ''):
+        labelled=re.sub(r'\s+',' ',re.sub('<[^>]+>',' ',document))
+        published=re.search(r'(?:작성일|등록일)\s*:?\s*(20\d{2}-\d{2}-\d{2})',labelled)
+        modified=re.search(r'수정일\s*:?\s*(20\d{2}-\d{2}-\d{2})',labelled)
+        if published:
+            day=max(published.group(1),modified.group(1) if modified else published.group(1))
+            at=datetime.fromisoformat(day).replace(tzinfo=ZoneInfo('Asia/Seoul'))+timedelta(days=1)
+            if at<=now:
+                return dict(available_at=at.isoformat(),publication_verified=True,
+                    source_published_date=published.group(1),source_modified_date=modified.group(1) if modified else None,
+                    availability_basis='source_latest_revision_next_local_day')
     parser=PublicationParser();parser.feed(document)
     raw=parser.values+re.findall(r'"datePublished"\s*:\s*"([^"]+)"',document)
     day_values=[' '.join(parser.date_text)]

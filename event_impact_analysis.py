@@ -11,7 +11,7 @@ from economic_graph import frames as event_frames, connect as connect_business
 ALLOWED = ('federalreserve.gov', 'ecb.europa.eu', 'sec.gov', 'reuters.com',
            'finance.yahoo.com', 'cnbc.com', 'hanaw.com', 'samsungpop.com',
            'yna.co.kr', 'dart.fss.or.kr', 'eia.gov', 'ofac.treasury.gov', 'korea.kr', 'motir.go.kr',
-           'n.news.naver.com')
+           'n.news.naver.com','mofa.go.kr')
 HEADERS = {'User-Agent': 'DualMarketScanner research https://github.com/hsmun577-max/dual-market-scanner'}
 CHANNELS = {
  'demand': ('demand', 'orders', 'backlog', '수요', '수주', '수주잔고'),
@@ -120,7 +120,7 @@ def _read_article_text(url, redirects=0):
     cached=_BODY_CACHE.get(url)
     if cached and cached[0]>datetime.now(timezone.utc):return cached[1]
     try:
-        response=requests.get(url,headers=HEADERS,timeout=10 if 'korea.kr/' in url else 5,allow_redirects=False,stream=True)
+        response=requests.get(url,headers=HEADERS,timeout=10 if any(host in url for host in ('korea.kr/','mofa.go.kr/')) else 5,allow_redirects=False,stream=True)
         try:
             response.raise_for_status()
             if response.status_code in (301,302,303,307,308) and redirects<2:
@@ -426,15 +426,18 @@ def korean_policy_events(now):
         parser=Links(); parser.feed(response.text)
         # The homepage alone drops material news quickly; include the latest policy and briefing lists.
         for listing in ('https://www.korea.kr/news/policyNewsList.do',
-                        'https://www.korea.kr/briefing/briefingHomeList.do'):
+                        'https://www.korea.kr/briefing/briefingHomeList.do',
+                        'https://www.mofa.go.kr/www/brd/m_4080/list.do'):
             try:
                 page=requests.get(listing,headers=HEADERS,timeout=5,allow_redirects=False)
-                if page.status_code==200: parser.feed(page.text)
+                if page.status_code==200:
+                    extra=Links();extra.feed(page.text)
+                    parser.rows.extend((urljoin(listing,href),title) for href,title in extra.rows)
             except requests.RequestException: pass
         links=[]
         for href,title in parser.rows:
             url=urljoin('https://www.korea.kr/',href)
-            if any(path in url for path in ('policyNewsView.do?','pressReleaseView.do?','presidentView.do?','policyBriefingView.do?')) and allowed_url(url):
+            if any(path in url for path in ('policyNewsView.do?','pressReleaseView.do?','presidentView.do?','policyBriefingView.do?','/www/brd/m_4080/view.do')) and allowed_url(url):
                 if re.search(r'FTA|정상|관세|금리|수출|콘텐츠|제재|협상|에너지|반도체|문화교류|문화 교류|한한령|공연|음악|게임|외교장관|일정|예정|사전',title,re.I):
                     links.append((canonical_article_url(url),title))
         unique={}
@@ -443,7 +446,7 @@ def korean_policy_events(now):
             text,body_status=article_text(url)
             metadata=_ARTICLE_METADATA.get(url,dict(available_at=datetime.now(now.tzinfo).isoformat(),
                 publication_verified=False,availability_basis='first_seen_not_original_publication'))
-            rows.append(dict(event_id=url,url=url,headline=title,source='대한민국 정책브리핑',
+            rows.append(dict(event_id=url,url=url,headline=title,source='외교부' if 'mofa.go.kr/' in url else '대한민국 정책브리핑',
                 **metadata,
                 body=text,body_status=body_status,scope='world'))
         status='checked' if links else 'listing_unparsed_or_no_matching_links'

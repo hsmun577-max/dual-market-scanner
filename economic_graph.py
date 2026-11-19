@@ -95,7 +95,7 @@ def frames(events, at):
             else:
                 first=anchor;last=first+timedelta(days=7)
             output.append(dict(event_id=identity,kind='pre_event_policy_watch',
-                products=['screen_content','games','recorded_music','live_entertainment','tourism'],
+                products=['screen_content','games','recorded_music','live_entertainment','tourism','software','transport'],
                 regions=['China','South Korea'],beneficiary_regions=['South Korea'],direction=0,
                 status='preparation_not_outcome',available_at=published.isoformat(),source_url=event.get('url'),
                 publication_verified=True,availability_basis=event.get('availability_basis'),

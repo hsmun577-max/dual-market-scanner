@@ -26,7 +26,7 @@ def advance_context(company,indicators,at):
             continue
         # Subsequent published outcomes supersede preparation-stage expectations.
         resolved=any(other.get('stage')!='pre_event' and other.get('publication_verified') is True
-            and stamp(other.get('available_at')) and known<stamp(other['available_at'])<=at
+            and stamp(other.get('available_at')) and known<=stamp(other['available_at'])<=at
             and set(other.get('matched_regions',[]))&set(event.get('matched_regions',[]))
             for other in links)
         if resolved:continue

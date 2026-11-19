@@ -20,6 +20,13 @@ def company():
         profile_available_at='2026-11-12T00:00:00+09:00')
 
 class AdvanceTests(unittest.TestCase):
+    def test_same_date_coarse_timestamp_outcome_supersedes_preparation(self):
+        c=company();c['event_analysis']={'economic_graph':connect(c,frames([event()],AT),AT)}
+        c['price_history']=[dict(close=100,available_at='2026-11-13T16:00:00+09:00')]
+        c['event_analysis']['economic_graph']['expectation_links'].append(dict(
+            stage='announced_expectation',publication_verified=True,
+            available_at='2026-11-14T00:00:00+09:00',matched_regions=['South Korea']))
+        self.assertFalse(advance_context(c,dict(price=100,atr14_pct=4),AT)['eligible'])
     def test_preparation_identifies_exposure_before_outcome_without_price_or_sector_input(self):
         e=event();f=frames([e],AT)
         self.assertEqual(len([r for r in f if r['kind']=='pre_event_policy_watch']),1)
@@ -44,6 +51,24 @@ class AdvanceTests(unittest.TestCase):
             dict(stage='announced_expectation',publication_verified=True,
                  available_at='2026-11-15T00:00:00+09:00',matched_regions=['South Korea']))
         self.assertFalse(advance_context(c,indicators,AT)['eligible'])
+    def test_advance_notice_is_emitted_before_trend_or_volume_confirmation_without_becoming_a_buy(self):
+        from preopen_signals import evaluate_preopen
+        from scanner import telegram_candidate_line
+        c=company();c['event_analysis']={'economic_graph':connect(c,frames([event()],AT),AT)}
+        c['price_history']=[dict(close=10000,available_at='2026-11-13T16:00:00+09:00')]
+        row=dict(symbol='GENERIC.KS',name='일반기업',market='KR',company_analysis=c,
+            signal=dict(confirmed=False),company_forecast=dict(assessment_status='complete',
+                generated_at=AT.isoformat(),composite_score=58,base_price=10200,bull_price=11000),
+            indicators=dict(price=10000,volume=10000,volume_ratio=.5,average_turnover_20d=1000000000,
+                ma20=11000,ma60=12000,return_5d=-.01,return_20d=-.02,relative_strength=-.01,
+                atr14_pct=4,data_date='2026-11-13'))
+        result=evaluate_preopen(dict(results=[row]),'2026-11-13',AT)
+        self.assertEqual(result['advance_candidates'],['GENERIC.KS'])
+        self.assertEqual(result['recommendations'],[])
+        self.assertNotIn('preopen_signal',row)
+        self.assertIn('사전 매수 후보',telegram_candidate_line(row))
+        self.assertFalse(row['advance_signal']['confirmed'])
+
     def test_policy_index_keeps_first_seen_and_does_not_replace_read_body_with_download_failure(self):
         old={**event(),'first_seen_at':'2026-11-14T01:00:00+09:00'}
         failed={**event(),'body':'','publication_verified':False,'available_at':AT.isoformat()}

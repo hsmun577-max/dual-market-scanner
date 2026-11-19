@@ -35,7 +35,7 @@ def merge_index(old,new,at):
     for record in [*old,*new]:
         published=stamp(record.get('available_at'))
         host=urlparse(record.get('url','')).hostname or ''
-        if not (host=='korea.kr' or host.endswith('.korea.kr')):continue
+        if not any(host==domain or host.endswith('.'+domain) for domain in ('korea.kr','mofa.go.kr')):continue
         if not published or published<at-timedelta(days=30) or published>at+timedelta(days=1):continue
         key=record.get('event_id') or record.get('url')
         if not key:continue
@@ -71,5 +71,6 @@ def merge_with_history(events,at):
     if os.getenv('GH_TOKEN'):
         PATH.parent.mkdir(exist_ok=True,parents=True)
         PATH.write_text(json.dumps(policy,ensure_ascii=False),encoding='utf-8')
-    nonpolicy=[e for e in events if not (urlparse(e.get('url','')).hostname or '').endswith('korea.kr')]
+    nonpolicy=[e for e in events if not any((urlparse(e.get('url','')).hostname or '').endswith(host)
+        for host in ('korea.kr','mofa.go.kr'))]
     return [*nonpolicy,*policy]

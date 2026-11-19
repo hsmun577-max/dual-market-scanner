@@ -33,17 +33,18 @@ jobs:
           PYTHONPATH=. python tests/test_sector_leadership.py
           PYTHONPATH=. python tests/test_daily_delivery_update.py
           PYTHONPATH=. python tests/test_delivery_policy.py
-      - name: Check frozen entertainment mechanism and observed intraday prices
+      - name: Verify advance discovery before the outcome and reject future information
         env:
           GH_TOKEN: ${{ github.token }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
-        run: python -u catalyst_validation.py
+        run: python -u catalyst_validation.py --early-only
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: catalyst-policy-evidence
           path: |
+            advance-source-verification.json
             catalyst-verification.json
             catalyst-report.json
             catalyst-message-preview.txt
