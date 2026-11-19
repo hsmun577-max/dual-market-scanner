@@ -1,0 +1,31 @@
+name: Delivery and point-in-time verification
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/point-in-time-verification.yml'
+permissions:
+  contents: read
+  actions: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5'
+      - name: Audit scheduled delivery, historical evidence and live Telegram transport
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -u verify_point_in_time.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: delivery-and-point-in-time-evidence
+          path: verification-evidence.json
+          if-no-files-found: ignore
