@@ -121,6 +121,6 @@ def rank_leading_sectors(data, limit=2):
 
 def format_report(data):
     selected=rank_leading_sectors(data)
-    return '\\n'.join(['오늘의 주요 섹터']+
+    return '\n'.join(['오늘의 주요 섹터']+
         [f"{rank}위 {row['name']}" for rank,row in enumerate(selected,1)]+
         (['확인 불가'] if not selected else []))

@@ -39,8 +39,6 @@ jobs:
           from zoneinfo import ZoneInfo
           import requests
           from industry_flow import snapshot,format_report
-          from profile_universe import restore_index
-          from candidate_selection import candidate_rejection_reason,liquidity_rejection_reason,rank_recovery_candidates
           from telegram_text import split_telegram_text
           
           data=snapshot()
@@ -48,56 +46,6 @@ jobs:
           if not data["rows"]:
               print("SECTOR_DIAGNOSTIC="+json.dumps({"rows":0,"missing":data["missing"][:10]},ensure_ascii=False),flush=True)
               raise RuntimeError("No verified current-day industry flow; refusing to send yesterday as today")
-          restore_index()
-          report=json.loads(Path("opening-scan/latest.json").read_text(encoding="utf-8-sig"))
-          stock=next((row for row in report["results"] if row["symbol"]=="156100.KQ"),None)
-          assessed=[row for row in report["results"] if "company_forecast" in row]
-          diagnosis={"source_generated_at":report.get("generated_at"),"scanned":len(report["results"]),
-              "assessed":len(assessed),"complete_composites":sum(r["company_forecast"].get("composite_score") is not None for r in assessed),
-              "confirmed_flags":sum(r.get("signal",{}).get("confirmed") is True for r in report["results"]),
-              "daily_buy_evaluation_was_connected":bool(report.get("buy_evaluation",{}).get("completed")),
-              "lnk_biomed":None}
-          if stock:
-              recovery=rank_recovery_candidates([stock],"KR")
-              diagnosis["lnk_biomed"]={"symbol":stock["symbol"],"name":stock.get("name"),
-                  "indicators":stock["indicators"],"signal":stock["signal"],
-                  "liquidity_rejection":liquidity_rejection_reason(stock,"KR"),
-                  "trend_rejection":candidate_rejection_reason(stock,"KR"),
-                  "recovery_eligible":bool(recovery),"company_analysis_performed":"company_analysis" in stock,
-                  "forecast":stock.get("company_forecast")}
-          else:
-              diagnosis["lnk_biomed"]={"symbol":"156100.KQ","in_latest_report":False,
-                                      "errors":[e for e in report.get("errors",[]) if "156100" in str(e)]}
-          from economic_graph import load_profiles,profile,connect,frames,select_analysis_candidates
-          from event_impact_analysis import world_events
-          at=datetime.now(ZoneInfo("UTC"))
-          registry=load_profiles()
-          events,coverage=world_events(at)
-          event_frames=frames(events,at)
-          old_linked=report.get("event_discovery",{}).get("linked_symbols",[])
-          selected=select_analysis_candidates([r for r in report["results"] if r["market"]=="KR"],"KR",old_linked)
-          selected_symbols={r["symbol"] for r in selected}
-          enter=[]
-          for code in ["352820","041510","122870","035900"]:
-              row=next((r for r in report["results"] if r["symbol"].split(".")[0]==code),None)
-              company=next((v for k,v in registry.items() if k.split(".")[0]==code),{})
-              graph=connect(company,event_frames,at)
-              enter.append(dict(symbol=code,name=row.get("name") if row else None,
-                  scanned=row is not None,indicators=row.get("indicators") if row else None,
-                  rejection=candidate_rejection_reason(row,"KR") if row else "missing_from_scan",
-                  selected_now=row["symbol"] in selected_symbols if row else False,
-                  analysed_then="company_analysis" in row if row else False,
-                  forecast=row.get("company_forecast") if row else None,
-                  profile=graph["profile"],event_status=graph["status"],
-                  event_links=graph.get("links"),expectation_links=graph.get("expectation_links")))
-          enter_audit=dict(source_generated_at=report.get("generated_at"),companies=enter,
-              prior_event_discovery=report.get("event_discovery"),current_feed_coverage=coverage,
-              current_event_headlines=[e.get("headline") for e in events],
-              event_frames=event_frames)
-          Path("requested-entertainment-diagnosis.json").write_text(json.dumps(enter_audit,ensure_ascii=False,indent=2),encoding="utf-8")
-          print("ENTERTAINMENT_DIAGNOSIS="+json.dumps(enter_audit,ensure_ascii=False),flush=True)
-          Path("requested-signal-diagnosis.json").write_text(json.dumps(diagnosis,ensure_ascii=False,indent=2),encoding="utf-8")
-          print("SIGNAL_DIAGNOSIS="+json.dumps(diagnosis,ensure_ascii=False),flush=True)
           message=format_report(data)
           Path("requested-sector-message.txt").write_text(message,encoding="utf-8")
           for part in split_telegram_text(message):

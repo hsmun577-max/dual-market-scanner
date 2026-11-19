@@ -101,7 +101,7 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         "Industrials":{"산업재","운송","조선","방산"},"Energy":{"에너지"},
         "Basic Materials":{"소재","철강"},"Utilities":{"유틸리티","AI전력설비"},
         "Consumer Defensive":{"필수소비재"},"Consumer Cyclical":{"경기소비재","자동차"},
-        "Real Estate":{"부동산"},"Communication Services":{"커뮤니케이션"}}
+        "Real Estate":{"부동산"},"Communication Services":{"커뮤니케이션","미디어·엔터","K콘텐츠"}}
     matched = []
     for row in sectors:
         if company.get("market") and row.get("market") != company["market"]:
@@ -164,11 +164,20 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         event_terms.append(max(-1, min(1, causal_score)))
         # Automatic causal rules remain hypotheses: preserve uncertainty in the range.
         uncertainty = max(uncertainty, .4)
+    expectation_links = causal.get('economic_graph', {}).get('expectation_links', []) if causal_valid else []
+    positive_expectations = [row for row in expectation_links
+        if row.get('watch_bias') == 'positive_policy_sympathy' and row.get('source_url')]
+    if positive_expectations:
+        # One bounded sentiment term, regardless of how many copies mention the policy.
+        # This is market expectation, not permission, contract value or a revenue forecast.
+        event_terms.append(.1)
+        uncertainty = max(uncertainty, .6)
     if event_terms:
         components["events"] = math.tanh(sum(event_terms))
     elif (causal_valid and causal.get("status") == "no_material_events_identified" and feeds_checked):
         components["events"] = 0.
     evidence["events"] = {"event_direction_terms":len(event_terms),"quantified_earnings_events":0,"unquantified_events":unquantified_events,
+                          "policy_expectation_present":bool(positive_expectations),
                           "feeds_checked":feeds_checked,"uncertainty":uncertainty,
                           "causal_analysis":causal if causal_valid else {"status":"unavailable_or_stale"},
                           "meaning":"rule based event direction; not quantified earnings impact"}

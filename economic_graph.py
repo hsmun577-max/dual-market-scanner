@@ -187,14 +187,14 @@ def save_profiles(companies, path='reports/company-profiles.json'):
     temporary.replace(file)
 
 
-def select_analysis_candidates(pool, market, event_symbols=(), limit=24):
+def select_analysis_candidates(pool, market, event_symbols=(), limit=48):
     """Reserve research capacity for event links and liquid names before chart gates."""
     from candidate_selection import (rank_market_candidates,rank_recovery_candidates,
                                       liquidity_rejection_reason,average_turnover)
     eligible=[row for row in pool if liquidity_rejection_reason(row,market) is None]
     indexed={row['symbol']:row for row in eligible}
     event_rows=sorted((indexed[s] for s in set(event_symbols) if s in indexed),
-                      key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:min(8,max(1,limit//3))]
+                        key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:max(1,2*limit//3)]
     trend=rank_market_candidates(eligible,market,limit=5)
     recovery=rank_recovery_candidates(eligible,market,limit=5)
     neutral=sorted(eligible,key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:8]

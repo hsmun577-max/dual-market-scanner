@@ -24,6 +24,8 @@ def audit(report,registry,events,at):
             current_rule_rejection=candidate_rejection_reason(row,'KR') if row else 'missing',
             liquidity_rejection=liquidity_rejection_reason(row,'KR') if row else 'missing',
             analysed_then='company_analysis' in row if row else False,
+            valuation_inputs_then={key:(row.get('company_analysis') or {}).get(key) for key in
+                ('trailing_pe','forward_pe','trailing_eps','forward_eps','sector','industry')} if row else None,
             missing_dimensions=(row.get('company_forecast') or {}).get('missing_dimensions') if row else None,
             indicators=row.get('indicators') if row else None,
             profile_usable_now=graph['profile']['usable'],event_status_now=graph['status'],
@@ -31,6 +33,7 @@ def audit(report,registry,events,at):
     assessed=[r for r in report['results'] if 'company_forecast' in r]
     return dict(source_generated_at=report.get('generated_at'),comparison_basis='archived scan plus current evidence; not a historical replay',
         archived_assessed=len(assessed),archived_complete=sum(r['company_forecast'].get('composite_score') is not None for r in assessed),
+        archived_sector_count=len(report.get('sectors',[])),
         archived_missing_dimensions=dict(Counter(k for r in assessed for k in r['company_forecast'].get('missing_dimensions',[]))),
         daily_buy_evaluation_connected=False,companies=companies,
         prior_event_discovery=report.get('event_discovery'),current_linked_count=len(linked))

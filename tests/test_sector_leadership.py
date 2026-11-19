@@ -11,7 +11,7 @@ class SectorLeadershipTests(unittest.TestCase):
               self.row('오락·문화',10,8,20,9,1),
               self.row('전기·전자',20,3,15,8,2)]
         self.assertEqual([r['name'] for r in rank_leading_sectors({'rows':rows})],['오락·문화','전기·전자'])
-        self.assertEqual(format_report({'rows':rows}),'오늘의 주요 섹터\\n1위 오락·문화\\n2위 전기·전자')
+        self.assertEqual(format_report({'rows':rows}).splitlines(),['오늘의 주요 섹터','1위 오락·문화','2위 전기·전자'])
     def test_missing_breadth_and_duplicates_do_not_create_two_fake_leaders(self):
         row=self.row('제약',10,1,4,7,3)
         missing=self.row('미확보',100,9,9,0,0)
