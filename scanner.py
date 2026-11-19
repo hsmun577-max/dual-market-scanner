@@ -566,6 +566,9 @@ def prepare_selected_analysis(report):
             print(f"{market} daily company analysis failed ({type(exc).__name__})")
         for symbol, item in keys.items():
             company = companies.get(symbol, {})
+            observed_prices = company.get('price_indicators', {})
+            if observed_prices.get('price') and observed_prices.get('data_date'):
+                item['indicators'] = observed_prices.copy()
             item["company_analysis"] = company
             item["company_analysis_at"] = company.get("checked_at", checked.isoformat())
             margin = company.get("operating_margin_pct")
@@ -584,9 +587,11 @@ def prepare_selected_analysis(report):
 def telegram_candidate_line(item):
     forecast = item.get("company_forecast", {})
     signal = item.get("signal", {})
-    entry = signal.get("entry_limit")
+    preopen = item.get('preopen_signal', {})
+    conditional = preopen.get('status') == 'conditional_buy'
+    entry = preopen.get('entry_limit') if conditional else signal.get("entry_limit")
     score = forecast.get("composite_score")
-    if signal.get("confirmed") is not True or score is None or entry is None:
+    if (signal.get("confirmed") is not True and not conditional) or score is None or entry is None:
         return ""
     symbol = item["symbol"]
     overseas = item["market"] == "US"
@@ -595,8 +600,10 @@ def telegram_candidate_line(item):
     entry_label = f"$" + f"{entry:,.2f}" if overseas else f"{entry:,.0f}원"
     target, upside = forecast["base_price"], forecast["bull_price"]
     target_label = f"$" + f"{target:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{target:,.0f} / {upside:,.0f}원"
-    return (f"• {name} ({code}) · 종합 {score:.1f}/100\n"
-            f"  진입 상한 {entry_label}\n"
+    label = '조건부 매수' if conditional else '매수 확인'
+    basis = f" · {preopen['reference_date']} 종가 기준" if conditional else ''
+    return (f"• {name} ({code}) · {label} · 종합 {score:.1f}/100\n"
+            f"  매수 상한 {entry_label}{basis}\n"
             f"  5거래일 분석 목표 · 기준/상승 {target_label}\n"
             "  손절 −2% · 기본 익절 +6% (실제 체결가 기준)")
 
@@ -705,9 +712,11 @@ def send_telegram_summary(report):
 
     lines = report.get('sector_header_override') or format_sector_header(report.get("sectors", []))
     confirmed = [item for item in report["results"]
-                 if item.get("signal", {}).get("confirmed") is True
+                 if (item.get("signal", {}).get("confirmed") is True
                  and item.get("signal", {}).get("entry_limit") is not None
+                 or item.get('preopen_signal',{}).get('status')=='conditional_buy')
                  and item.get("company_forecast", {}).get("composite_score") is not None]
+    confirmed.sort(key=lambda item: -item['company_forecast']['composite_score'])
     lines.extend(["", "매수 신호"])
     if not confirmed:
         if report.get('buy_evaluation',{}).get('completed') is True:

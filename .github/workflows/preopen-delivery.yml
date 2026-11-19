@@ -46,5 +46,7 @@ jobs:
         if: always()
         with:
           name: preopen-delivery-${{ env.MARKET }}
-          path: preopen-delivery.json
+          path: |
+            preopen-delivery.json
+            preopen-analysis.json
           if-no-files-found: ignore

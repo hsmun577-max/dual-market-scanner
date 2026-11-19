@@ -579,10 +579,14 @@ def company_quality_metrics(ticker, snapshot, now):
     try:
         info = ticker.get_info() or {}
         for source, target in (("trailingPE","trailing_pe"),("forwardPE","forward_pe"),
-                               ("forwardEps","forward_eps"),("trailingEps","trailing_eps")):
+                               ("forwardEps","forward_eps"),("trailingEps","trailing_eps"),
+                               ("priceToBook","price_to_book")):
             value = info.get(source)
             if isinstance(value,(int,float)) and math.isfinite(value):
                 result[target] = float(value)
+        if any(key in result for key in ('trailing_pe','price_to_book')):
+            result['valuation_source'] = 'Yahoo Finance observed multiples'
+            result['valuation_observed_at'] = datetime.now(now.tzinfo).isoformat()
         for source,target in (("sector","sector"),("industry","industry"),
                               ("quoteType","quote_type"),("financialCurrency","financial_currency"),
                               ("longBusinessSummary","business_description"),("longName","company_name"),
@@ -662,6 +666,8 @@ def company_context(market, symbols, now):
     from concurrent.futures import ThreadPoolExecutor
     from economic_graph import load_profiles
     cached_profiles = load_profiles()
+    from valuation_data import domestic_valuations, apply_peer_valuations
+    domestic_values = {} if market.startswith('US-') else domestic_valuations(symbols)
 
     overseas = market.startswith("US-")
     global_events, global_coverage = world_events(now)
@@ -756,6 +762,7 @@ def company_context(market, symbols, now):
         snapshot["source_symbol"] = mapped_tickers[symbol]
         restore_business_profile(snapshot, cached_profiles.get(mapped_tickers[symbol], {}),
                                  datetime.now(now.tzinfo))
+        snapshot.update(domestic_values.get(symbol, {}))
         official_name = (US_SYMBOL_NAMES.get(symbol[4:]) if overseas else
                          KR_SYMBOL_NAMES.get(mapped_tickers[symbol]))
         if official_name:
@@ -785,6 +792,7 @@ def company_context(market, symbols, now):
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(fetch, symbols))
     snapshots = {symbol: snapshot for symbol, snapshot, _ in results}
+    apply_peer_valuations(snapshots, datetime.now(now.tzinfo))
     from economic_graph import save_profiles
     save_profiles(snapshots)
     for symbol, snapshot, risks in results:

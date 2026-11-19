@@ -83,6 +83,14 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         components["valuation_outlook"] = math.tanh(math.log(trailing/forward))
         evidence["valuation_outlook"] = {"trailing_pe":trailing,"forward_pe":forward,
                                         "meaning":"earnings outlook at current pricing, not peer fair value"}
+    elif company.get('peer_valuation'):
+        peer = company['peer_valuation']
+        peer_at = datetime.fromisoformat(peer['observed_at'])
+        value = _number(peer, 'score')
+        if (peer_at.utcoffset() is not None and at-timedelta(hours=24)<=peer_at<=at
+                and peer.get('peer_count',0)>=3 and value is not None):
+            components['valuation_outlook'] = max(-1,min(1,value))
+            evidence['valuation_outlook'] = peer
     momentum = _number(indicators, "return_5d")
     strength = _number(indicators, "relative_strength")
     volume = _number(indicators, "volume_ratio")

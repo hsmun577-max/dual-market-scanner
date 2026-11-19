@@ -34,6 +34,14 @@ def main():
     local=datetime.now(ZoneInfo('America/New_York' if market=='US' else 'Asia/Seoul'))
     report['sectors']=scanner.sector_flow_snapshot(market,local)
     scanner.prepare_selected_analysis(report)
+    import exchange_calendars
+    from preopen_signals import evaluate_preopen
+    cal=exchange_calendars.get_calendar('XNYS' if market=='US' else 'XKRX')
+    previous_session=cal.previous_session(window['session_date']).strftime('%Y-%m-%d')
+    report['preopen_session']=window['session_date']
+    evaluate_preopen(report,previous_session,datetime.now(timezone.utc))
+    Path('preopen-analysis.json').write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8')
+    print('PREOPEN_BUY_EVALUATION='+json.dumps(report['buy_evaluation'],ensure_ascii=False),flush=True)
     if market=='KR':
         try:
             import exchange_calendars
