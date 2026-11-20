@@ -148,20 +148,22 @@ class ArticleMetadata(HTMLParser):
     def handle_endtag(self,tag):
         if tag=='script' and self.capture:
             try:self.documents.append(json.loads(''.join(self.parts)))
-            except (ValueError,TypeError):pass
+            except (ValueError,TypeError,RecursionError):pass
             self.capture=False
 
 
 def public_structured_body(document,url):
     """Use publisher-provided public article text; explicitly reject premium metadata."""
     parser=ArticleMetadata();parser.feed(document);articles=[]
-    def visit(node):
+    def visit(node,depth=0):
+        if depth>12 or len(articles)>50:return
         if isinstance(node,list):
-            for item in node:visit(item)
+            for item in node:visit(item,depth+1)
         elif isinstance(node,dict):
-            types=node.get('@type',[]);types=[types] if isinstance(types,str) else types
-            if any(t in {'NewsArticle','Article','ReportageNewsArticle'} for t in types):articles.append(node)
-            if '@graph' in node:visit(node['@graph'])
+            types=node.get('@type') or [];types=[types] if isinstance(types,str) else types
+            if not isinstance(types,list):types=[]
+            if any(isinstance(t,str) and t in {'NewsArticle','Article','ReportageNewsArticle'} for t in types):articles.append(node)
+            if '@graph' in node:visit(node['@graph'],depth+1)
     for data in parser.documents:visit(data)
     matches=[]
     for article in articles:

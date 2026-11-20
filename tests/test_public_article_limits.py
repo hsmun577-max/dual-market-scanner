@@ -29,4 +29,9 @@ class PublicArticleLimitTests(unittest.TestCase):
         html='<script type="application/ld+json">'+json.dumps(article)+'</script>'
         self.assertEqual(public_structured_body(html,'https://finance.yahoo.com/news/example'),('','access_restricted'))
 
+    def test_malformed_metadata_types_do_not_crash_all_issuer_analysis(self):
+        for kind in [None,True,{'@id':'Article'},[{'@id':'Article'}]]:
+            html='<script type="application/ld+json">'+json.dumps({'@type':kind})+'</script>'
+            self.assertEqual(public_structured_body(html,'https://finance.yahoo.com/news/example'),(None,None))
+
 if __name__=='__main__':unittest.main()
