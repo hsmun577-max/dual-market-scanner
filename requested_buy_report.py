@@ -19,12 +19,14 @@ KST=ZoneInfo('Asia/Seoul')
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--session',required=True)
+    parser.add_argument('--reuse-analysis',help='Refresh a verified same-session analysis at most 30 minutes old')
     args=parser.parse_args();at=datetime.now(KST)
     if at.date().isoformat()!=args.session:raise RuntimeError('Requested report session expired')
     cal=exchange_calendars.get_calendar('XKRX')
     if not cal.is_session(args.session):raise RuntimeError('Not a Korean trading session')
     previous=cal.previous_session(args.session).strftime('%Y-%m-%d')
-    restore_index();source=Path('opening-scan/latest.json')
+    if not args.reuse_analysis:restore_index()
+    source=Path(args.reuse_analysis or 'opening-scan/latest.json')
     if not source.is_file():restore_prices()
     if not source.is_file():raise RuntimeError('No full-universe scan available')
     report=json.loads(source.read_text(encoding='utf-8-sig'))
@@ -38,7 +40,11 @@ def main():
         try:industry=industry_future.result()
         except Exception as exc:industry=dict(rows=[],error=type(exc).__name__)
         report['industry_snapshot']=industry
-        scanner.prepare_selected_analysis(report)
+        if args.reuse_analysis:
+            from evidence_refresh import refresh_report
+            refresh_report(report,datetime.now(KST),industry)
+        else:
+            scanner.prepare_selected_analysis(report)
     decided=datetime.now(timezone.utc)
     report['preopen_session']=args.session
     evaluation=evaluate_preopen(report,previous,decided)
