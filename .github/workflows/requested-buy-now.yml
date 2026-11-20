@@ -32,7 +32,9 @@ jobs:
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -u requested_buy_report.py --session 2026-11-20
+        run: |
+          session=$(TZ=Asia/Seoul date +%F)
+          python -u requested_buy_report.py --session "$session"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
