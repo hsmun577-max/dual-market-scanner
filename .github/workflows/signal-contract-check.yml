@@ -4,6 +4,15 @@ on:
     paths:
       - 'tradable_signal.py'
       - 'execution_quotes.py'
+      - 'kis_intraday.py'
+      - 'valuation_data.py'
+      - 'company_forecast.py'
+      - 'industry_flow.py'
+      - 'scanner.py'
+      - 'event_impact_analysis.py'
+      - 'research_asset.py'
+      - 'tests/test_evidence_repair.py'
+      - 'tests/test_peer_expansion.py'
       - 'tests/test_tradable_signal.py'
       - '.github/workflows/signal-contract-check.yml'
   workflow_dispatch:

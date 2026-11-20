@@ -61,6 +61,14 @@ class EvidenceRepairTests(unittest.TestCase):
         self.assertEqual(value['operating_cash_flow_margin_pct'],4)
         self.assertEqual(value['liabilities_to_equity'],.5)
         self.assertNotIn('operating_cash_conversion',value)
+        # Equity also appears in the statement of changes in equity. A later,
+        # blank SCE row must not overwrite the balance-sheet account.
+        data.extend([row('ifrs-full_Equity','자본총계','BS',1000),
+                     row('ifrs-full_Equity','자본변동','SCE','')])
+        with patch('kis_intraday.requests.get') as get:
+            get.return_value.json.return_value=dict(status='000',list=data)
+            checked=dart_quarterly_financials('fake','00000000',[dict(form='분기보고서 (2026.09)',url='https://dart.fss.or.kr/?rcpNo='+receipt)])
+        self.assertEqual(checked['liabilities_to_equity'],.5)
 
     def test_fund_is_not_an_operating_company_but_ordinary_stock_is_preserved(self):
         self.assertTrue(is_fund(dict(name='KODEX 200',asset_type='stock_or_etf')))

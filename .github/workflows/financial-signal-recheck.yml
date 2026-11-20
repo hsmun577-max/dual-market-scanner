@@ -1,0 +1,41 @@
+name: Verify refreshed financial signal evidence
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/financial-signal-recheck.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5'
+      - name: Verify statement identity and execution safeguards
+        env:
+          PYTHONPATH: tests
+        run: python -m unittest test_evidence_repair test_tradable_signal test_execution_quotes -q
+      - name: Wait for the source evidence and refresh failed financial fields
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          gh run watch 44660857044 --exit-status
+          gh run download 44660857044 --name repaired-tradable-signal-evidence --dir repair-parent
+          python -u recheck_financial_evidence.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: refreshed-financial-signal-evidence
+          path: financial-recheck*.json
+          if-no-files-found: ignore

@@ -559,11 +559,11 @@ def dart_quarterly_financials(api_key, corp_code, filings):
         prior_operating = amount(income, "frmtrm_q_amount")
         if prior_operating is not None:
             snapshot["operating_margin_yoy_pp"] = 100 * (operating / sales - prior_operating / prior_sales)
-    all_accounts = {row.get("account_id"):row for row in body.get("list",[])
-                    if row.get("rcept_no")==receipt and row.get("account_id")}
     def financial_account(ids,names,kind):
         for code in ids:
-            if all_accounts.get(code):return all_accounts[code]
+            matched=next((row for row in body.get('list',[]) if row.get('rcept_no')==receipt
+                and row.get('sj_div')==kind and row.get('account_id')==code),None)
+            if matched:return matched
         return next((row for row in body.get('list',[]) if row.get('rcept_no')==receipt
             and row.get('sj_div')==kind and re.sub(r'\s+','',row.get('account_nm','')) in names),None)
     cfo = financial_account(('ifrs-full_CashFlowsFromUsedInOperatingActivities','ifrs_CashFlowsFromUsedInOperatingActivities'),
