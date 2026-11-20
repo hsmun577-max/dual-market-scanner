@@ -1,68 +1,36 @@
-name: Diagnose evidence providers against reference architecture
+name: Verify native news evidence repair
 on:
-  workflow_dispatch:
   push:
-    paths:
-      - '.github/workflows/evidence-provider-repair.yml'
+    paths: ['.github/workflows/evidence-provider-repair.yml']
+  workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 jobs:
-  diagnose:
+  native-evidence:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5'
-      - name: Probe actual provider schemas and unresolved evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+      - run: pip install -r requirements.txt
+      - name: Verify actual native issuer timestamps and publisher article bodies
         run: |
-          gh run download 44663042935 --name repaired-tradable-signal-evidence --dir prior-evidence
           python -u - <<'PY'
-          import json,re,requests
-          from pathlib import Path
-          from datetime import datetime,timedelta
+          from datetime import datetime
           from zoneinfo import ZoneInfo
-          from kis_intraday import dart_company_codes,dart_financial_reports
-          from event_impact_analysis import HEADERS
-          import os
-          report=json.loads(Path('prior-evidence/requested-buy-analysis.json').read_text())
-          result={}
-          for url in ['https://m.stock.naver.com/api/news/stock/352820?page=1&pageSize=30','https://m.stock.naver.com/front-api/news/list/integration?itemCode=352820&page=1&pageSize=30']:
-              try:
-                  r=requests.get(url,headers=HEADERS,timeout=8,allow_redirects=False)
-                  try: data=r.json(); sample=str(data)[:2200]
-                  except ValueError: sample=r.text[:300]
-                  print('NAVER_SCHEMA='+json.dumps(dict(url=url,status=r.status_code,sample=sample),ensure_ascii=False),flush=True)
-              except Exception as e:print('NAVER_SCHEMA_FAILED='+type(e).__name__,flush=True)
-          wrappers=[n['url'] for row in report['results'] for n in row.get('company_analysis',{}).get('news',[]) if 'news.google.com/rss/articles/' in n.get('url','')][:2]
-          for url in wrappers:
-              try:
-                  r=requests.get(url,headers=HEADERS,timeout=8,allow_redirects=False)
-                  urls=list(dict.fromkeys(re.findall(r'https?://[^\\s<>"\\\\]+',r.text)))
-                  candidates=[u for u in urls if any(h in u for h in ['newspim.com','news1.kr','mk.co.kr','etoday.co.kr','yna.co.kr'])]
-                  print('RSS_RESOLUTION='+json.dumps(dict(status=r.status_code,location=r.headers.get('Location'),bytes=len(r.content),candidates=candidates[:12]),ensure_ascii=False),flush=True)
-              except Exception as e:print('RSS_RESOLUTION_FAILED='+type(e).__name__,flush=True)
-          codes=dart_company_codes(os.environ['DART_API_KEY'])
-          for symbol in ['105560','316140']:
-              corp=codes[symbol]
-              filings=dart_financial_reports(os.environ['DART_API_KEY'],corp,datetime.now(ZoneInfo('Asia/Seoul')))
-              filing=next((f for f in filings if '(2026.09)' in f['form']),None)
-              if not filing:continue
-              d=requests.get('https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json',params=dict(crtfc_key=os.environ['DART_API_KEY'],corp_code=corp,bsns_year='2026',reprt_code='11014',fs_div='CFS'),timeout=8).json()
-              rows=[{k:r.get(k) for k in ['account_id','account_nm','sj_div','thstrm_amount','thstrm_add_amount','frmtrm_q_amount','frmtrm_add_amount','currency','rcept_no']} for r in d.get('list',[]) if r.get('sj_div') in ['IS','CIS','BS'] and any(w in r.get('account_nm','') for w in ['수익','이익','자산총','자본총','부채총'])]
-              print('BANK_ACCOUNTS='+json.dumps(dict(symbol=symbol,filing=filing,rows=rows),ensure_ascii=False),flush=True)
-              result[symbol]=dict(filing=filing,rows=rows)
-          Path('provider-schema-evidence.json').write_text(json.dumps(result,ensure_ascii=False))
+          import json
+          from issuer_news import issuer_news_result
+          from event_impact_analysis import company_news_events
+          for symbol,name in [('352820','하이브'),('041510','에스엠'),('005930','삼성전자')]:
+              now=datetime.now(ZoneInfo('Asia/Seoul'))
+              result=issuer_news_result(symbol,name,now)
+              company=dict(news=result['articles'][:5],news_status='ok' if result['articles'] else 'no_recent_articles')
+              events=company_news_events(company)
+              print('NATIVE_NEWS_REPAIR='+json.dumps(dict(symbol=symbol,name=name,status=result['status'],
+                  native_articles=len(result['articles']),attempts=result['attempts'],
+                  bodies=[dict(url=e['url'],headline=e['headline'],status=e['body_status'],characters=len(e['body']),
+                      available_at=e['available_at'],availability_basis=e['availability_basis']) for e in events]),ensure_ascii=False),flush=True)
+              if result['status']!='checked':raise RuntimeError('Native provider did not verify issuer feed')
           PY
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: provider-schema-evidence
-          path: provider-schema-evidence.json
-          if-no-files-found: ignore
