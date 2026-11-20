@@ -36,7 +36,7 @@
 ```bash
 python scanner.py
 python -m compileall -q .
-python replay_intraday_window.py --start 2026-11-06 --end 2026-11-20
+START_DATE=2026-11-06 END_DATE=2026-11-20 python replay_intraday_window.py
 ```
 
 실행에 필요한 시세/API 자격증명은 GitHub Actions Secrets로 관리합니다. 시크릿은 로그나 리포트에 출력하지 마세요.
