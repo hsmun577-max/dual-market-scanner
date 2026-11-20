@@ -1,0 +1,41 @@
+name: Requested revised buy signals now
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/requested-buy-now.yml'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: requested-buy-now
+  cancel-in-progress: false
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5'
+      - name: Verify revised news and buy decision rules
+        env:
+          PYTHONPATH: tests
+        run: python -m unittest test_optional_news test_event_impact_analysis test_preopen_signals test_catalyst_policy -q
+      - name: Reanalyse today's Korean market and send the requested report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -u requested_buy_report.py --session 2026-11-20
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: requested-revised-buy-report
+          path: requested-buy-*
+          if-no-files-found: ignore
