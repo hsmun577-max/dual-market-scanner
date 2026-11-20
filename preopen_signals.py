@@ -4,6 +4,7 @@ from collections import Counter
 import math
 from candidate_selection import liquidity_rejection_reason,candidate_rejection_reason
 from advance_policy import advance_context,eligible_for_advance_research
+from exit_policy import DEFAULT_EXIT_POLICY,policy_snapshot
 
 def evaluate_preopen(report, previous_session, at=None):
     at=at or datetime.now(timezone.utc)
@@ -80,7 +81,9 @@ def evaluate_preopen(report, previous_session, at=None):
                 entry_basis='source_dated_catalyst_pullback_band' if catalyst else 'previous_session_close_limit_not_current_market_quote',
                 fresh_execution_quote_required=True,
                 target_basis='upside_scenario_not_expected_return' if catalyst else 'base_scenario',
-                expires_session=report.get('preopen_session'),stop_pct=.02,take_profit_pct=.06)
+                expires_session=report.get('preopen_session'),stop_pct=DEFAULT_EXIT_POLICY.stop_pct,
+                take_profit_pct=DEFAULT_EXIT_POLICY.take_profit_pct,
+                take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot())
             recommendations.append(row['symbol'])
         counts[status]+=1; row['preopen_decision']=status
     incomplete={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch',
@@ -93,6 +96,7 @@ def evaluate_preopen(report, previous_session, at=None):
         previous_session=previous_session,generated_at=at.isoformat(),evaluated=evaluated,
         counts=dict(counts),missing_dimensions=dict(missing),recommendations=recommendations,
         advance_candidates=advance,
-        policy=dict(min_composite=60,min_base_reward_pct=3.3,stop_pct=2,take_profit_pct=6),
+        policy=dict(min_composite=60,min_base_reward_pct=3.3,stop_pct=2,take_profit_pct=6,
+                    take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot()),
         live_execution_confirmed=False)
     return report['buy_evaluation']

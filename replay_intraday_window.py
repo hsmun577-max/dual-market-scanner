@@ -87,7 +87,9 @@ def aggregate(start: date, end: date):
         })
     return {
         "period": [start.isoformat(), end.isoformat()],
-        "method": "Archived five-minute bars and timestamped bid/ask quotes; 30-minute exit logic; strategy-specific stop/target; estimated fees from each source replay.",
+        "method": ("Archived five-minute bars and timestamped bid/ask quotes; baseline entries are closed by the "
+                   "legacy +2% target/30-minute rule, policy entries by the −2% stop, +6% take profit and surge "
+                   "trailing exit of exit_policy.py; estimated fees from each source replay."),
         "scope": "Only successful intraday runs with a retained intraday-replay artifact; daily/preopen candidate alerts are not represented unless they produced a quote replay sample.",
         "workflow_runs_found": len(runs_seen), "artifacts_with_replays": artifacts_seen,
         "runs": runs_seen, "results": results, "collection_issues": issues,
@@ -97,6 +99,10 @@ def aggregate(start: date, end: date):
             "Overlapping candidate samples are individual hypothetical trades, not portfolio-level returns.",
             "A two-week date range does not imply a two-week sample; report the actual run and closed-trade counts.",
             "No out-of-sample win-rate claim is made from a small sample.",
+            "Policy-mode positions still open when the 30-minute quote horizon ends are counted as "
+            "held_past_horizon and marked to market, not closed as trades.",
+            "The surge trailing exit needs five-minute volume after the signal (post_bars); samples without it "
+            "fall back to the +6% take profit and cannot show a trailing exit.",
         ],
     }
 

@@ -25,6 +25,7 @@ from event_impact_analysis import article_text, world_events, analyze_events, co
 from candidate_selection import instrument_rejection_reason, rank_market_candidates, rank_recovery_candidates
 from sector_flow import format_sector_header
 from telegram_text import split_telegram_text
+from exit_policy import DEFAULT_EXIT_POLICY
 from scanner import BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, sector_flow_snapshot, calculate_indicators, classify_signal, clean_prices, rank_korean_candidates
 
 
@@ -1169,6 +1170,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
     bars = {symbol: {} for symbol in symbols}
     quotes = {}
     followup = {symbol: [] for symbol in symbols}
+    after_bars = {symbol: {} for symbol in symbols}
     evaluated = False
     refresh_task = None
     next_refresh = opens + timedelta(minutes=5)
@@ -1267,6 +1269,9 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 if evaluated:
                     if item["kind"] == "quote" and event_time >= closes and received <= deadline:
                         followup[symbol].append({"at": received.isoformat(), "bid": item["bid"], "ask": item["ask"]})
+                    elif item["kind"] == "trade" and event_time >= closes and received <= deadline:
+                        slot = int((event_time - closes).total_seconds()) // BAR_SECONDS
+                        update_bar(after_bars[symbol], slot, event_time, item["price"], item["size"])
                 elif received < closes and event_time < closes and item["kind"] == "trade":
                     slot = int((event_time - opens).total_seconds()) // BAR_SECONDS
                     update_bar(bars[symbol], slot, event_time, item["price"], item["size"])
@@ -1293,6 +1298,11 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                     for slot, bar in sorted(bars[symbol].items())
                 ],
                 "quotes": before + followup[symbol],
+                "post_bars": [
+                    {"start": (closes + timedelta(minutes=5 * slot)).isoformat(),
+                     **{key: bar[key] for key in ("high", "low", "close", "volume")}}
+                    for slot, bar in sorted(after_bars[symbol].items())
+                ],
             }
             output.write(json.dumps(row, allow_nan=False) + "\n")
     await notification
@@ -1375,7 +1385,9 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
         lines.extend(["", f"• {name} ({ticker}) · 종합 {forecast['composite_score']:.1f}/100",
                       f"진입 상한 {entry_label} · {(closes+timedelta(seconds=30)):%H:%M:%S}까지",
                       f"5거래일 분석 목표 · 기준/상승 {target_label}",
-                      "손절 −2% · 기본 익절 +6% (실제 체결가 기준)"])
+                      f"손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
+                      f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
+                      "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"])
     return "\n".join(lines)
 
 def notify(market, candidates, closes, token, chat_id, companies=None, sectors=None):
