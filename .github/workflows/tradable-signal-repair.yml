@@ -1,0 +1,52 @@
+name: Diagnose missing tradable signal evidence
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/tradable-signal-repair.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5'
+      - name: Inspect actual failed decisions and official market responses
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+        run: |
+          gh run download 44657193301 --name requested-revised-buy-report --dir previous-request
+          python - <<'PY'
+          import json,requests
+          from pathlib import Path
+          from datetime import datetime,timedelta
+          from zoneinfo import ZoneInfo
+          from industry_flow import Client,snapshot,rank_leading_sectors
+          d=json.loads(Path('previous-request/requested-buy-analysis.json').read_text())
+          print('SECTOR_ROWS='+json.dumps(d.get('sectors',[]),ensure_ascii=False),flush=True)
+          print('COMPANY_FAILURES='+json.dumps([dict(symbol=r['symbol'],name=r['name'],asset_type=r.get('asset_type'),sector=r.get('company_analysis',{}).get('sector'),industry=r.get('company_analysis',{}).get('industry'),missing=r.get('company_forecast',{}).get('missing_dimensions'),score=r.get('company_forecast',{}).get('composite_score'),decision=r.get('preopen_decision'),financial_errors={k:v for k,v in r.get('company_analysis',{}).items() if 'error' in k}) for r in d['results'] if 'company_forecast' in r],ensure_ascii=False),flush=True)
+          c=Client();now=datetime.now(ZoneInfo('Asia/Seoul'))
+          probes=[('sector-history','/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice','FHKST03010100',dict(FID_COND_MRKT_DIV_CODE='J',FID_INPUT_ISCD='091160',FID_INPUT_DATE_1=(now-timedelta(days=70)).strftime('%Y%m%d'),FID_INPUT_DATE_2=(now-timedelta(days=1)).strftime('%Y%m%d'),FID_PERIOD_DIV_CODE='D',FID_ORG_ADJ_PRC='0')),('orderbook','/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn','FHKST01010200',dict(FID_COND_MRKT_DIV_CODE='J',FID_INPUT_ISCD='005930')),('minute','/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice','FHKST03010200',dict(FID_COND_MRKT_DIV_CODE='J',FID_INPUT_ISCD='005930',FID_INPUT_HOUR_1=now.strftime('%H%M%S'),FID_PW_DATA_INCU_YN='Y',FID_ETC_CLS_CODE=''))]
+          for name,path,tr,params in probes:
+              try:
+                  body=requests.get('https://openapi.koreainvestment.com:9443'+path,headers=dict(c.headers,tr_id=tr),params=params,timeout=8).json()
+                  print('KIS_PROBE='+json.dumps(dict(name=name,rt_cd=body.get('rt_cd'),msg_cd=body.get('msg_cd'),output1=body.get('output1'),output2=(body.get('output2')[:2] if isinstance(body.get('output2'),list) else body.get('output2'))),ensure_ascii=False),flush=True)
+              except Exception as e:print('KIS_PROBE_FAILED='+name+':'+type(e).__name__,flush=True)
+          flow=snapshot()
+          print('INDUSTRY_AUDIT='+json.dumps(dict(rows=len(flow['rows']),missing=len(flow['missing']),sample=flow['rows'][:3],leaders=rank_leading_sectors(flow)),ensure_ascii=False),flush=True)
+          Path('repair-diagnostic.json').write_text(json.dumps(dict(sectors=d.get('sectors'),industry=flow),ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tradable-signal-diagnostic
+          path: repair-diagnostic.json
+          if-no-files-found: ignore
