@@ -1,5 +1,5 @@
 """Advance research candidates from announced preparations, before outcome or sector price confirmation."""
-from datetime import datetime,timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from catalyst_policy import stamp
 import math

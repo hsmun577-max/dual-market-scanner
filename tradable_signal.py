@@ -2,7 +2,7 @@
 from datetime import datetime,timedelta
 import math
 from decimal import Decimal,ROUND_CEILING
-from company_forecast import MIN_BASE_REWARD_PCT
+from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
 from exit_policy import DEFAULT_EXIT_POLICY
 
 def krx_tick(price):
@@ -39,7 +39,7 @@ def validate_entry(row,quote,at,session_open):
     if forecast.get('assessment_status')!='complete' or forecast.get('missing_dimensions'):
         return reject('analysis_incomplete')
     score=number(forecast.get('composite_score'));created=stamp(forecast.get('generated_at'))
-    if score is None or score<60:return reject('score_below_policy')
+    if score is None or score<MIN_COMPOSITE_SCORE:return reject('score_below_policy')
     if created is None or not at-timedelta(minutes=30)<=created<=at:return reject('stale_analysis')
     seen=stamp((quote or {}).get('observed_at'));trade=stamp((quote or {}).get('trade_at'))
     if seen is None or not at-timedelta(seconds=10)<=seen<=at:return reject('quote_unverified_or_stale')

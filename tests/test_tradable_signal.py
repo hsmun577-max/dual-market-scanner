@@ -1,4 +1,3 @@
-from copy import deepcopy
 from datetime import datetime,timedelta,timezone
 import unittest
 from tradable_signal import validate_entry,format_requested_report

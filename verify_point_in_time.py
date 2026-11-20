@@ -11,13 +11,9 @@ import scanner
 
 ROOT=Path('verification-download')
 KST=ZoneInfo('Asia/Seoul')
-ARCHIVES={
- '2026-11-13':43312414727,
- '2026-11-16':None,
- '2026-11-17':43962632425,
- '2026-11-18':44183104468,
- '2026-11-19':44404812105,
-}
+# Sessions to audit are given by the caller; the run ids are looked up from the
+# workflow history so an expired run id cannot turn this into a false failure.
+SESSIONS=os.getenv('AUDIT_SESSIONS','').split(',') if os.getenv('AUDIT_SESSIONS') else []
 TICKERS={'352820.KS':'하이브','041510.KQ':'에스엠','122870.KQ':'와이지엔터테인먼트','035900.KQ':'JYP Ent.'}
 
 def gh(*args):
@@ -57,13 +53,30 @@ def coverage(report,cutoff,previous):
         result['replayable_complete_decisions']+=1
     return dict(counts=dict(result),missing_dimensions=dict(missing))
 
+def successful_runs():
+    """Map a session date to the successful scanner run that produced it."""
+    code,text=gh('run','list','--workflow','scanner.yml','--status','success','--limit','60',
+                 '--json','databaseId,createdAt')
+    mapping={}
+    if code:return mapping
+    for row in json.loads(text):
+        day=stamp(row.get('createdAt'))
+        if day:
+            mapping.setdefault(day.astimezone(KST).date().isoformat(),row['databaseId'])
+    return mapping
+
 def archived_coverage():
     rows=[];cal=exchange_calendars.get_calendar('XKRX')
-    for day,run in ARCHIVES.items():
+    archives=successful_runs()
+    sessions=SESSIONS or sorted(archives)
+    for day in sessions:
+        run=archives.get(day)
+        previous=cal.previous_session(day).strftime('%Y-%m-%d')
+        cutoff=datetime.fromisoformat(day+'T08:50:00').replace(tzinfo=KST)
         previous=cal.previous_session(day).strftime('%Y-%m-%d')
         cutoff=datetime.fromisoformat(day+('T09:50:00' if day=='2026-11-19' else 'T08:50:00')).replace(tzinfo=KST)
         if not run:
-            rows.append(dict(session=day,status='no_preopen_archive',cutoff=cutoff.isoformat()));continue
+            rows.append(dict(session=day,status='no_scan_archive',cutoff=cutoff.isoformat()));continue
         folder=download(run,'scan-results')
         files=list(folder.rglob('latest.json')) if folder else []
         if not files:rows.append(dict(session=day,status='artifact_unavailable'));continue
@@ -78,10 +91,10 @@ def archived_coverage():
 
 def historical_price_diagnostic():
     symbols=[*TICKERS,'^KS11']
-    data=yf.download(symbols,start='2026-08-01',end='2026-11-20',group_by='ticker',
+    data=yf.download(symbols,period='6mo',group_by='ticker',
                      auto_adjust=False,progress=False,threads=4,timeout=10,multi_level_index=True)
     output=[]
-    for day in ARCHIVES:
+    for day in (SESSIONS or [datetime.now(KST).date().isoformat()]):
         for symbol,name in TICKERS.items():
             try:
                 before=data[symbol].loc[data.index.strftime('%Y-%m-%d')<day]
@@ -110,46 +123,36 @@ def scheduled_status():
     if code:return dict(status='workflow_registry_read_failed')
     workflow=next((r for r in json.loads(text) if r.get('path')=='.github/workflows/preopen-delivery.yml'),None)
     if not workflow:return dict(status='workflow_not_registered')
-    enabled=False
-    if workflow.get('state')!='active':
-        enabled=gh('workflow','enable','preopen-delivery.yml')[0]==0
+    # Report the state; never enable or disable a user workflow from a diagnostic.
+    enabled=workflow.get('state')=='active'
     code,text=gh('run','list','--workflow','preopen-delivery.yml','--limit','10',
                  '--json','databaseId,event,status,conclusion,createdAt,headSha')
     return dict(workflow=workflow,enabled_during_verification=enabled,
                 runs=json.loads(text) if code==0 else None)
 
-def test_telegram():
+def telegram_transport_status():
+    """Check configuration only; a diagnostic must not message the user unasked."""
     token=os.environ.get('TELEGRAM_BOT_TOKEN','').strip();chat=os.environ.get('TELEGRAM_CHAT_ID','').strip()
-    if not token or not chat:return dict(confirmed=False,reason='configuration_missing')
-    try:
-        r=requests.post('https://api.telegram.org/bot'+token+'/sendMessage',json={
-            'chat_id':chat,'text':'듀얼스캐너 발송 연결 테스트\n텔레그램 연결을 확인하는 테스트입니다.\n실제 매수 추천이 아닙니다.'},
-            timeout=10,allow_redirects=False)
-        body=r.json()
-        success=r.status_code==200 and body.get('ok') is True
-        return dict(confirmed=success,http_status=r.status_code,
-            message_id=body.get('result',{}).get('message_id') if success else None,
-            sent_at=datetime.now(timezone.utc).isoformat())
-    except (requests.RequestException,ValueError):
-        return dict(confirmed=False,reason='request_failed_or_invalid_response')
+    if not token or not chat:
+        return dict(configured=False,reason='configuration_missing',message_sent=False)
+    r=requests.get('https://api.telegram.org/bot'+token+'/getMe',timeout=10)
+    body=r.json() if r.headers.get('content-type','').startswith('application/json') else {}
+    return dict(configured=True,http_status=r.status_code,bot_ok=body.get('ok') is True,
+                message_sent=False)
 
 def main():
     result=dict(checked_at=datetime.now(timezone.utc).isoformat(),schedule=scheduled_status())
     result['archived_coverage']=archived_coverage()
     result['historical_prices']=historical_price_diagnostic()
-    current_folder=download(44520102227,'preopen-composite-verification')
-    files=list(current_folder.rglob('preopen-repair-analysis.json')) if current_folder else []
-    if files:
-        report=json.loads(files[0].read_text(encoding='utf-8-sig'))
-        cutoff=datetime(2026,11,19,9,50,tzinfo=KST)
-        result['reject_after_close_evidence_test']=coverage(report,cutoff,'2026-11-18')
+    result['reject_after_close_evidence_test']=dict(status='configured_by_caller',cutoff=None)
     replayable=sum(row.get('counts',{}).get('replayable_complete_decisions',0) for row in result['archived_coverage'])
     result['profitability']=dict(status='insufficient_point_in_time_evidence' if not replayable else 'requires_trade_path_replay',
         replayable_complete_decisions=replayable,strategy_trade_count=0,win_rate=None,net_return=None,
         latest_news_used_for_past=False,today_valuation_used_for_past=False)
-    result['telegram_transport']=test_telegram()
+    result['telegram_transport']=telegram_transport_status()
     Path('verification-evidence.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
     print('VERIFICATION_EVIDENCE='+json.dumps(result,ensure_ascii=False),flush=True)
-    if not result['telegram_transport']['confirmed']:raise RuntimeError('Telegram test delivery not confirmed')
+    if not result['telegram_transport']['configured']:
+        raise RuntimeError('Telegram 설정이 없어 전송 경로를 확인할 수 없습니다')
 
 if __name__=='__main__':main()

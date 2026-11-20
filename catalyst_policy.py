@@ -2,6 +2,7 @@
 from datetime import datetime,timedelta,time
 from zoneinfo import ZoneInfo
 import math
+from event_publication import MIN_VERIFIED_BODY_CHARS
 
 SECTOR_PROXIES={
  'Technology':{'기술','반도체','AI반도체','IT·전자부품'},
@@ -37,8 +38,11 @@ def catalyst_context(company,indicators,price,at,sectors):
     candidates=[]
     for link in links:
         published=stamp(link.get('available_at'))
-        if (link.get('source_url') and link.get('publication_verified') is True and published
-                and at-timedelta(hours=48)<=published<=at):
+        body=link.get('body') or ''
+        if (link.get('source_url') and link.get('publication_verified') is True
+                and len(body)>=MIN_VERIFIED_BODY_CHARS
+                and link.get('body_status','public_body')=='public_body'
+                and published and at-timedelta(hours=48)<=published<=at):
             candidates.append((published,link))
     if not candidates:return result
     # Correlated policy documents do not increase strength by headline count.

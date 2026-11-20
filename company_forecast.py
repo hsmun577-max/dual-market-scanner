@@ -13,6 +13,11 @@ import re
 # is worth the 2% stop. Both entry paths (live intraday and preopen) read it from here so
 # the floor and the scenario formula below cannot drift apart again.
 MIN_BASE_REWARD_PCT = 3.3
+# One composite threshold for every entry path (live intraday, preopen plan and the
+# execution check), so a 55-point candidate cannot alert and then be refused.
+MIN_COMPOSITE_SCORE = 60.0
+# A revenue growth rate beyond this is a period-basis or unit mix-up, not growth.
+MAX_VERIFIED_REVENUE_GROWTH_PCT = 300.0
 # Scenario shape. One five-session sigma at the composite threshold (60 points), growing
 # with the square root of the evidence bias and capped at two sigmas. The earlier
 # 0.6 x (daily volatility x sqrt(5)) x bias coefficient left a 60-point candidate at about
@@ -63,6 +68,11 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     margin = _number(company, "operating_margin_pct")
     growth = _number(company, "revenue_yoy_pct")
     margin_change = _number(company, "operating_margin_yoy_pp")
+    growth_unverified = False
+    if growth is not None and abs(growth) > MAX_VERIFIED_REVENUE_GROWTH_PCT:
+        # Beyond this the figure is a period/scale mix-up, not a growth rate.
+        growth_unverified = True
+        growth = None
     if growth is not None or margin_change is not None:
         terms = []
         if growth is not None:
@@ -261,6 +271,10 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         missing.append("world_event_coverage")
     if financial_period_missing(company):
         missing.append("latest_report_not_in_financials")
+    if growth_unverified or company.get("revenue_scale_check") == "mismatch_with_yfinance":
+        missing.append("growth_scale_unverified")
+    if (debt is None and company.get("leverage_status") == "rejected_out_of_range"):
+        missing.append("leverage_unverified")
     if free_cash_margin is None and conversion is None and operating_cash_margin is None:
         missing.append("cash_flow_quality")
     quarter = company.get("quarter", "")[:7]

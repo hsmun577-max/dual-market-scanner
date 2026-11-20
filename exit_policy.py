@@ -110,8 +110,9 @@ class ExitTracker:
     * ``take_profit`` — slow rise to +6%; a resting +6% limit fills at +6%.
     * ``surge_trailing_exit`` — collapse signal after a surge; filled at the
       price observed at the signal, which is the price before the plunge.
-    * ``trailing_floor`` — a surged position fell back to the +6% floor; filled
-      at +6%, so the surge hold can never do worse than the default rule.
+    * ``trailing_floor_breached`` — a surged position fell back below the +6%
+      floor; filled at the observed price (``min(floor, price)``) because a floor
+      is a resting sell that a gap can jump over, not a guaranteed price.
 
     Holds carry ``reason`` ``surge_hold`` (the crossing observation that turned
     the position into a trailing hold) or ``trailing_hold``. ``mode`` and
@@ -213,7 +214,10 @@ class ExitTracker:
         if _finite(volume) and volume > 0:
             self.surge_reference_volume = max(self.surge_reference_volume, float(volume))
         if price <= self.floor_price:
-            return self._close(at, self.floor_price, "trailing_floor")
+            # A gapped-through floor fills at the observed price, never at a better
+            # price than the market showed. The floor itself is reported alongside.
+            return self._close(at, min(self.floor_price, price), "trailing_floor_breached",
+                               floor_price=self.floor_price)
         if not _finite(volume):
             return self._decision("hold", "trailing_hold", at, price, volume_observed=False)
         collapsed = volume <= self.policy.volume_collapse_ratio * self.surge_reference_volume

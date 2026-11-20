@@ -147,8 +147,18 @@ class SurgeTrailing(unittest.TestCase):
         tracker.observe(minutes(5), 10700, volume=3000)
         tracker.observe(minutes(10), 10900, volume=5000)
         decision = tracker.observe(minutes(15), 10500, volume=200)
-        self.assertEqual(decision["reason"], "trailing_floor")
-        self.assertEqual(decision["exit_price"], 10600)
+        self.assertEqual(decision["reason"], "trailing_floor_breached")
+        # The floor is a resting sell, not a guaranteed price: a gap fills lower.
+        self.assertEqual(decision["exit_price"], 10500)
+        self.assertEqual(decision["floor_price"], 10600)
+
+    def test_gap_through_the_floor_is_not_booked_at_the_six_percent_floor(self):
+        tracker = ExitTracker(10000, entry_at=T0, baseline_volume=1000)
+        tracker.observe(minutes(5), 10700, volume=2000)
+        decision = tracker.observe(minutes(10), 9900, volume=300)
+        self.assertEqual(decision["reason"], "trailing_floor_breached")
+        self.assertEqual(decision["exit_price"], 9900)
+        self.assertLess(decision["exit_price"], 10600)
 
     def test_missing_volume_never_invents_a_collapse(self):
         tracker = ExitTracker(10000, entry_at=T0, baseline_volume=1000)

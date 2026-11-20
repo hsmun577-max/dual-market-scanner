@@ -15,7 +15,9 @@ def audit(report,registry,events,at):
     pool=[r for r in report['results'] if r['market']=='KR']
     selected={r['symbol'] for r in select_analysis_candidates(pool,'KR',linked)}
     companies=[]
-    for code in ('352820','041510','122870','035900'):
+    import os
+    # Audited issuers come from the caller; the previous fixed four were one-off.
+    for code in os.environ.get('AUDIT_SYMBOLS','352820,041510,122870,035900').replace(' ','').split(','):
         row=next((r for r in pool if r['symbol'].split('.')[0]==code),None)
         company=next((v for k,v in registry.items() if k.removeprefix('DNAS').split('.')[0]==code),{})
         graph=connect(company,event_frames,at)

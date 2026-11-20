@@ -1,6 +1,5 @@
 import unittest
 from datetime import datetime,timedelta,timezone
-from copy import deepcopy
 from economic_graph import frames,connect,discover
 from advance_policy import advance_context
 from policy_event_index import merge_index

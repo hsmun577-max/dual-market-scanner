@@ -1,6 +1,5 @@
 import unittest
 from datetime import datetime,timedelta,timezone
-from copy import deepcopy
 from catalyst_policy import catalyst_context
 from company_forecast import build_company_forecast
 from preopen_signals import evaluate_preopen
@@ -22,6 +21,8 @@ def fixture():
             economic_graph=dict(links=[],expectation_links=[
                 dict(event_id='policy',source_url='https://www.korea.kr/news/policyNewsView.do?newsId=123',
                     available_at='2026-11-19T00:00:00+09:00',publication_verified=True,
+                    body='정부가 다음 주 한중 문화교류 확대 방안을 발표할 예정이라고 밝혔다. ' * 12,
+                    body_status='public_body',
                     availability_basis='date_only_next_local_day',watch_bias='positive_policy_sympathy')])))
     i=dict(price=166600,ma20=157540,ma60=165923,return_5d=.1272,return_20d=-.0891,
         relative_strength=.0274,volume=661721,volume_ratio=2.3603,average_turnover_20d=43588543690,

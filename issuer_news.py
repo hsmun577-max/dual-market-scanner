@@ -64,5 +64,3 @@ def issuer_news_result(symbol,name,now):
     return dict(status='checked' if checked else 'unavailable',articles=[],attempts=attempts)
 
 
-def issuer_news(symbol,name,now):
-    return issuer_news_result(symbol,name,now)['articles']

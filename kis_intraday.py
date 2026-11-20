@@ -18,15 +18,17 @@ import yfinance as yf
 from websockets.exceptions import WebSocketException
 
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
+from json_utils import dump, dumps
 from signal_context import context_status
-from company_forecast import MIN_BASE_REWARD_PCT, build_company_forecast
+from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE, build_company_forecast
 from delivery_policy import delivery_status
 from event_impact_analysis import article_text, world_events, analyze_events, company_news_events
-from candidate_selection import instrument_rejection_reason, rank_market_candidates, rank_recovery_candidates
+from candidate_selection import instrument_rejection_reason, rank_market_candidates
 from sector_flow import format_sector_header
 from telegram_text import split_telegram_text
 from exit_policy import DEFAULT_EXIT_POLICY
-from scanner import BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, sector_flow_snapshot, calculate_indicators, classify_signal, clean_prices, rank_korean_candidates
+from scanner import (BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, calculate_indicators,
+                     classify_signal, clean_prices, sector_flow_snapshot, yf_download)
 
 
 # Common shares from the current watchlist. NXT subscription acceptance is checked per session.
@@ -50,6 +52,44 @@ MAX_BREAKOUT_EXTENSION = 0.005
 # A local index bar up to this many calendar days behind the previous session is still
 # the latest completed observation (weekends and a late ^KS11/^KQ11 publication).
 MARKET_INDEX_MAX_LAG_DAYS = 5
+# How old an intraday decision may be when its alert is sent, and the signals already
+# delivered by this process.
+INTRADAY_DECISION_GRACE = timedelta(minutes=10)
+# A debt-to-equity ratio outside this band comes from a unit or statement-scope error.
+MAX_PLAUSIBLE_DEBT_TO_EQUITY = 10.0
+# The last day the checked BLS/Fed release list covers; past it, say the context is missing.
+CHECKED_RELEASE_CALENDAR_THROUGH = "2026-12-30"
+SENT_INTRADAY = set()
+
+
+def intraday_delivery_status(market, now, decision_at, key=None):
+    """Gate a decision-time alert: real session, fresh decision, no repeat.
+
+    The preopen window in delivery_policy (ten minutes before an opening ±2 minutes)
+    describes when a plan may go out. An intraday decision is made 15 minutes after the
+    opening, so applying that window suppressed every intraday alert. This gate checks
+    what actually matters for a decision: the exchange trades that day, the decision was
+    not made in the future or long ago, and the same signal is not sent twice.
+    """
+    if now.utcoffset() is None or decision_at.utcoffset() is None:
+        return False, "time_without_zone"
+    overseas = str(market).startswith("US")
+    zone = ZoneInfo("America/New_York") if overseas else KST
+    local_decision, local_now = decision_at.astimezone(zone), now.astimezone(zone)
+    if local_decision.date() != local_now.date():
+        return False, "decision_from_another_session"
+    import exchange_calendars
+    calendar = exchange_calendars.get_calendar("XNYS" if overseas else "XKRX")
+    if not calendar.is_session(local_decision.date().isoformat()):
+        return False, "closed_session"
+    age = now - decision_at
+    if age < timedelta(0):
+        return False, "before_decision"
+    if age > INTRADAY_DECISION_GRACE:
+        return False, "decision_expired"
+    if key is not None and key in SENT_INTRADAY:
+        return False, "duplicate_signal"
+    return True, "within_intraday_decision_window"
 
 
 def collection_open(scheduled, ready_at):
@@ -132,10 +172,12 @@ def prior_resistance(symbols, previous_session, overseas):
         symbol + (".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS") for symbol in symbols
     ]
     try:
-        prices = yf.download(tickers, period="3mo", auto_adjust=False, group_by="ticker",
+        prices = yf_download(tickers, period="3mo", auto_adjust=False, group_by="ticker",
                              multi_level_index=True, progress=False, threads=4, timeout=8)
+        if prices is None:
+            return {}
         levels = {}
-        for symbol, ticker in zip(symbols, tickers):
+        for symbol, ticker in zip(symbols, tickers, strict=False):
             if ticker in prices.columns.get_level_values(0):
                 highs = prices[ticker]["High"].dropna()
                 highs = highs.loc[highs.index.date <= previous_session].tail(20)
@@ -155,7 +197,7 @@ def volume_history(symbols, overseas):
         symbol + (".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS") for symbol in symbols
     ]
     try:
-        return yf.download(tickers, period="1mo", interval="5m", prepost=overseas,
+        return yf_download(tickers, period="1mo", interval="5m", prepost=overseas,
                            auto_adjust=False, group_by="ticker", multi_level_index=True,
                            progress=False, threads=4, timeout=8)
     except (KeyError, ValueError, OSError) as exc:
@@ -178,7 +220,7 @@ def volume_baselines(prices, symbols, overseas, opens, sessions=VOLUME_BASELINE_
     ]
     slot = opens + timedelta(minutes=2 * 5)
     baselines = {}
-    for symbol, ticker in zip(symbols, tickers):
+    for symbol, ticker in zip(symbols, tickers, strict=False):
         try:
             if ticker not in prices.columns.get_level_values(0):
                 continue
@@ -214,8 +256,11 @@ def market_evidence(market, previous_session, available_at):
     local = MARKET_INDICES["US" if market.startswith("US-") else "KR"]
     tickers = (*MARKET_INDICES["KR"], *MARKET_INDICES["US"], *GLOBAL_MARKET_TICKERS)
     try:
-        data = yf.download(list(tickers), period="3mo", auto_adjust=False,
+        data = yf_download(list(tickers), period="3mo", auto_adjust=False,
                            group_by="ticker", threads=4, progress=False, timeout=8)
+        if data is None:
+            print(f"{market} market context unavailable (provider)")
+            return []
         supportive = []
         snapshot = {}
         lagged = {}
@@ -270,13 +315,6 @@ def recent_company_news(articles, now):
         records.setdefault(title.casefold(), {"headline": title, "available_at": published.isoformat(),
                                               "source": provider, "url": link})
     return sorted(records.values(), key=lambda item: datetime.fromisoformat(item["available_at"]), reverse=True)
-
-
-def headline_risks(market, symbol, articles, now):
-    return [
-        {**item, "kind": "event", "market": market, "symbol": symbol, "assessment": "risk"}
-        for item in recent_company_news(articles, now) if RISK_HEADLINE.search(item["headline"])
-    ]
 
 
 def korean_company_news(symbol, now):
@@ -365,7 +403,8 @@ SEC_EVENT_ITEMS = {
 def sec_submission_context(recent, cik, now):
     filings, risks = [], []
     for form, accepted, accession, document, items in zip(
-        *(recent[key] for key in ("form", "acceptanceDateTime", "accessionNumber", "primaryDocument", "items"))
+        *(recent[key] for key in ("form", "acceptanceDateTime", "accessionNumber", "primaryDocument", "items")),
+        strict=False,
     ):
         try:
             stamp = datetime.fromisoformat(accepted.replace("Z", "+00:00"))
@@ -481,7 +520,7 @@ class DartTableParser:
 def supply_contract_metrics(document):
     metrics = {}
     for cells in DartTableParser().rows(document):
-        for label, value in zip(cells, cells[1:]):
+        for label, value in zip(cells, cells[1:], strict=False):
             label = re.sub(r"\s+", "", label)
             value = value.replace(",", "").strip()
             if label.endswith("계약금액(원)") and re.fullmatch(r"[0-9]+", value):
@@ -590,8 +629,15 @@ def dart_disclosures(api_key, corp_code, now):
     return shown, risks
 
 
-def dart_quarterly_financials(api_key, corp_code, filings):
-    """Use three-month income statement fields from the matching DART filing."""
+def dart_quarterly_financials(api_key, corp_code, filings, yfinance_revenue=None):
+    """Read the income statement with an explicit period basis and scale guards.
+
+    DART returns both the single quarter (``thstrm_amount``/``frmtrm_q_amount``) and the
+    cumulative year-to-date figure (``thstrm_add_amount``/``frmtrm_add_amount``), and
+    issuers do not always fill them consistently. Mixing the two produced a +126.9%
+    revenue YoY for a company whose revenue grew ~10%, which saturated the growth
+    component. The basis is therefore detected, recorded and cross-checked here.
+    """
     codes = {"03": "11013", "06": "11012", "09": "11014"}
     report = next((item for item in filings
                    if re.search(r"(분기보고서|반기보고서).*\((\d{4})\.(03|06|09)\)", item["form"])), None)
@@ -635,15 +681,58 @@ def dart_quarterly_financials(api_key, corp_code, filings):
     operating = amount(income, "thstrm_amount")
     if sales is None or sales <= 0 or operating is None:
         return {}
-    snapshot = {"quarter": f"{year}-{month}", "operating_margin_pct": 100 * operating / sales,
-                "financial_source": f"DART {financial_scope}", "financial_filing_url": report["url"],
-                "revenue_amount": sales, "operating_income_amount": operating}
+    cumulative_sales = amount(revenue, "thstrm_add_amount")
+    cumulative_prior_sales = amount(revenue, "frmtrm_add_amount")
+    cumulative_prior_operating = amount(income, "frmtrm_add_amount")
     prior_sales = amount(revenue, "frmtrm_q_amount")
-    if prior_sales is not None and prior_sales > 0:
-        snapshot["revenue_yoy_pct"] = 100 * (sales / prior_sales - 1)
-        prior_operating = amount(income, "frmtrm_q_amount")
-        if prior_operating is not None:
-            snapshot["operating_margin_yoy_pp"] = 100 * (operating / sales - prior_operating / prior_sales)
+    prior_operating = amount(income, "frmtrm_q_amount")
+    # A quarter figure must be roughly the cumulative figure divided by the number of
+    # reported quarters. When it is not, thstrm_amount is really the cumulative amount
+    # and the quarter basis cannot be trusted.
+    expected_quarters = {"03": 1, "06": 2, "09": 3}[month]
+    quarter_basis = True
+    if (cumulative_sales is not None and cumulative_sales > 0 and sales > 0
+            and cumulative_sales / sales < expected_quarters * 0.6):
+        quarter_basis = False
+    snapshot = {"quarter": f"{year}-{month}",
+                "financial_source": f"DART {financial_scope}", "financial_filing_url": report["url"],
+                "financial_basis": {"revenue": "cumulative" if not quarter_basis else "three_month",
+                                    "cash_flow": "year_to_date",
+                                    "scope": financial_scope,
+                                    "expected_quarters": expected_quarters},
+                "revenue_amount": sales,
+                "revenue_three_month_amount": sales if quarter_basis else None,
+                "revenue_cumulative_amount": cumulative_sales,
+                "operating_income_amount": operating}
+    if quarter_basis:
+        snapshot["operating_margin_pct"] = 100 * operating / sales
+        if prior_sales is not None and prior_sales > 0:
+            snapshot["revenue_yoy_pct"] = 100 * (sales / prior_sales - 1)
+            if prior_operating is not None:
+                snapshot["operating_margin_yoy_pp"] = 100 * (operating / sales - prior_operating / prior_sales)
+    elif cumulative_prior_sales is not None and cumulative_prior_sales > 0:
+        # Quarter figures cannot be separated here; score the year-to-date margin and
+        # its growth, which are internally consistent, and say so.
+        snapshot["operating_margin_pct"] = 100 * operating / sales
+        snapshot["revenue_yoy_pct"] = 100 * (sales / cumulative_prior_sales - 1)
+        if cumulative_prior_operating is not None:
+            snapshot["operating_margin_yoy_pp"] = 100 * (
+                operating / sales - cumulative_prior_operating / cumulative_prior_sales)
+    revenue_three_month = snapshot["revenue_three_month_amount"]
+    if revenue_three_month is not None and yfinance_revenue:
+        try:
+            ratio = float(revenue_three_month) / float(yfinance_revenue)
+        except (TypeError, ValueError, ZeroDivisionError):
+            ratio = None
+        if ratio is not None and not 1 / 1.5 <= ratio <= 1.5:
+            # Two independent providers disagree by more than half: keep the amounts for
+            # the log but do not score growth from them.
+            snapshot["revenue_scale_check"] = "mismatch_with_yfinance"
+            snapshot["revenue_scale_ratio"] = round(ratio, 4)
+            snapshot.pop("revenue_yoy_pct", None)
+            snapshot.pop("operating_margin_yoy_pp", None)
+        elif ratio is not None:
+            snapshot["revenue_scale_check"] = "consistent_with_yfinance"
     def financial_account(ids,names,kind):
         for code in ids:
             matched=next((row for row in body.get('list',[]) if row.get('rcept_no')==receipt
@@ -667,8 +756,17 @@ def dart_quarterly_financials(api_key, corp_code, filings):
     equity = financial_account(('ifrs-full_Equity','ifrs_Equity'),{'자본총계'},'BS')
     if liabilities and equity:
         total_liabilities, total_equity = amount(liabilities,"thstrm_amount"), amount(equity,"thstrm_amount")
+        snapshot["total_liabilities_amount"] = total_liabilities
+        snapshot["total_equity_amount"] = total_equity
         if total_liabilities is not None and total_equity is not None and total_equity>0:
-            snapshot["liabilities_to_equity"] = total_liabilities/total_equity
+            ratio = total_liabilities/total_equity
+            snapshot["leverage_raw_ratio"] = round(ratio,4)
+            # A listed issuer outside 0.02..10 is a unit or scope error, not leverage.
+            if 0.02 <= ratio <= MAX_PLAUSIBLE_DEBT_TO_EQUITY:
+                snapshot["liabilities_to_equity"] = ratio
+                snapshot["leverage_status"] = "within_range"
+            else:
+                snapshot["leverage_status"] = "rejected_out_of_range"
     return snapshot
 
 
@@ -762,7 +860,6 @@ def restore_business_profile(snapshot, cached, now):
 
 
 def company_context(market, symbols, now):
-    from concurrent.futures import ThreadPoolExecutor
     from economic_graph import load_profiles
     cached_profiles = load_profiles()
     from valuation_data import domestic_valuations, apply_peer_valuations
@@ -785,7 +882,7 @@ def company_context(market, symbols, now):
     mapped_tickers = {symbol: (symbol[4:] if overseas else symbol + (
         ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS")) for symbol in symbols}
     try:
-        history_prices = yf.download([*mapped_tickers.values(), benchmark_symbol], period="6mo",
+        history_prices = yf_download([*mapped_tickers.values(), benchmark_symbol], period="6mo",
                                      auto_adjust=False, group_by="ticker", progress=False,
                                      threads=4, timeout=8, multi_level_index=True)
     except Exception as exc:
@@ -835,7 +932,9 @@ def company_context(market, symbols, now):
                 print(f"{market} {symbol} DART unavailable ({type(exc).__name__})")
             try:
                 reports = dart_financial_reports(dart_key, corp_codes[symbol], now)
-                dart_financials = dart_quarterly_financials(dart_key, corp_codes[symbol], reports)
+                dart_financials = dart_quarterly_financials(
+                    dart_key, corp_codes[symbol], reports,
+                    yfinance_revenue=snapshot.get("revenue_amount"))
                 if dart_financials:
                     snapshot.pop("revenue_yoy_pct", None)
                     snapshot.pop("operating_margin_yoy_pp", None)
@@ -863,7 +962,6 @@ def company_context(market, symbols, now):
                 data = clean_prices(data.loc[data.index.date < local_day])
                 benchmark = clean_prices(benchmark.loc[benchmark.index.date < local_day])
                 snapshot["price_indicators"] = calculate_indicators(data, benchmark)
-                zone=ZoneInfo('America/New_York') if overseas else KST
                 from catalyst_policy import completed_bar_available_at
                 snapshot['price_history']=[dict(date=day.date().isoformat(),close=float(bar['Close']),
                     available_at=completed_bar_available_at(day.date(),'US' if overseas else 'KR'))
@@ -894,7 +992,8 @@ def company_context(market, symbols, now):
 
 def domestic_research(market, symbols, now):
     url = "https://securities.miraeasset.com/bbs/board/message/list.do?categoryId=1800"
-    verified = {("2026-11-12", "035420", "매수")}
+    # Only what the listing actually showed: a hard-coded record would inject evidence.
+    verified = set()
     try:
         response = requests.get(url, timeout=8)
         response.raise_for_status()
@@ -973,8 +1072,13 @@ def scheduled_event_evidence(market, now, decision_at):
             raise ValueError("BLS calendar does not cover decision")
     except (requests.RequestException, ValueError) as exc:
         day = decision_at.astimezone(eastern).date().isoformat()
-        if not "2026-11-14" <= day < "2026-12-31":
-            print(f"{market} scheduled-event context unavailable ({type(exc).__name__})")
+        if not "2026-11-14" <= day <= CHECKED_RELEASE_CALENDAR_THROUGH:
+            # Past the checked list the release calendar cannot be asserted; say so
+            # instead of implying a quiet day.
+            print(f"{market} scheduled-event context unavailable ({type(exc).__name__}): "
+                  f"{day} is outside the checked release calendar "
+                  f"(through {CHECKED_RELEASE_CALENDAR_THROUGH}); event evidence missing",
+                  flush=True)
             return []
         print(f"{market} using checked BLS/Fed calendar through 2026-12-30")
         starts = [datetime.fromisoformat(day).replace(tzinfo=eastern) for day in fallback]
@@ -1096,7 +1200,8 @@ def korean_intraday_leaders(market, app_key, app_secret):
     return {symbol: ranked[symbol] for symbol in selected}
 
 
-def select_intraday_leaders(rows, limit=len(SYMBOLS)):
+def select_intraday_leaders(rows, limit=None):
+    limit = len(SYMBOLS) if limit is None else limit
     leaders = {}
     for row in rows:
         symbol = str(row.get("mksc_shrn_iscd") or "")
@@ -1142,10 +1247,13 @@ def daily_candidates(previous_session, overseas=False):
     tickers = list(US_SYMBOLS) if overseas else [f"{symbol}.KS" for symbol in SYMBOLS]
     market = "US" if overseas else "KR"
     benchmark_symbol = BENCHMARKS[market]
-    prices = yf.download(
+    prices = yf_download(
         list(dict.fromkeys([*tickers, benchmark_symbol])), period="1y", interval="1d", auto_adjust=True,
         group_by="ticker", progress=False, threads=6, timeout=15,
     )
+    if prices is None:
+        print("시장 비교 자료 미확보: 일봉 후보 선정 보류")
+        return []
     try:
         benchmark = clean_prices(prices[benchmark_symbol].loc[prices[benchmark_symbol].index.date <= previous_session])
     except (KeyError, ValueError):
@@ -1241,7 +1349,7 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     company["forecast"] = forecast
     if forecast["composite_score"] is None:
         return "composite_assessment_incomplete", None
-    if forecast["composite_score"] <= 50 or forecast["base_price"] <= limit:
+    if forecast["composite_score"] < MIN_COMPOSITE_SCORE or forecast["base_price"] <= limit:
         return "composite_outlook_not_positive", None
     # Require the base scenario to cover 2% risk at 1.5:1, plus 0.3% friction.
     # This is a risk policy, not a historically optimized profitability claim.
@@ -1280,7 +1388,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                         if companies is not None:
                             companies.update(refreshed)
                         evidence.extend(events)
-                        Path("signal-context.json").write_text(json.dumps(evidence), encoding="utf-8")
+                        dump(Path("signal-context.json"), evidence)
                         print(f"{samples_path.stem} 기업·뉴스 갱신 완료 {received.isoformat()}", flush=True)
                     else:
                         print(f"{samples_path.stem} 판정 후 도착한 기업·뉴스 자료 제외", flush=True)
@@ -1319,10 +1427,9 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 print(f"{samples_path.stem} 판정 집계 {json.dumps(counts)}", flush=True)
                 for symbol, status in decisions.items():
                     print(f"{samples_path.stem} {symbol} 판정 {status}", flush=True)
-                samples_path.with_name(f"{samples_path.stem}-decisions-replay.json").write_text(
-                    json.dumps({"signal_at": closes.isoformat(), "counts": counts, "symbols": decisions, "composite_scores": composite_scores},
-                               indent=2), encoding="utf-8",
-                )
+                dump(samples_path.with_name(f"{samples_path.stem}-decisions-replay.json"),
+                     {"signal_at": closes.isoformat(), "counts": counts, "symbols": decisions,
+                      "composite_scores": composite_scores}, indent=2)
                 if len(rejected) == len(symbols):
                     raise RuntimeError("개장 전 구독 승인에 성공한 종목이 없습니다")
                 notification = asyncio.create_task(asyncio.to_thread(
@@ -1385,6 +1492,9 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 "symbol": symbol,
                 "signal_at": closes.isoformat(),
                 "daily_eligible": True,
+                # The same clock-slot volume the live decision used, so a replay applies
+                # the operating rule instead of its opening-share fallback.
+                "volume_baseline": (volume_baseline or {}).get(symbol),
                 "prior_highs": resistance.get(symbol, []),
                 "bars": [
                     {"start": (opens + timedelta(minutes=5 * slot)).isoformat(),
@@ -1398,25 +1508,13 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                     for slot, bar in sorted(after_bars[symbol].items())
                 ],
             }
-            output.write(json.dumps(row, allow_nan=False) + "\n")
+            output.write(dumps(row) + "\n")
     await notification
     if refresh_task is not None:
         try:
             await refresh_task
         except Exception as exc:
             print(f"{samples_path.stem} 기업·뉴스 갱신 종료 ({type(exc).__name__})", flush=True)
-
-
-def event_impact(evidence, market, symbol, decision_at):
-    """Score recent company-specific evidence without counting duplicate headlines."""
-    grades = set()
-    for row in evidence or ():
-        if row["kind"] != "event" or row["symbol"] != symbol or row["market"] not in (market, "*"):
-            continue
-        stamp = datetime.fromisoformat(row["available_at"])
-        if decision_at - timedelta(hours=24) <= stamp < decision_at:
-            grades.add(row["assessment"])
-    return (1 if "positive" in grades else 0) - (2 if "risk" in grades else 0)
 
 
 def confirmed_contract_events(companies, market, observed_at):
@@ -1466,16 +1564,16 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
             if incomplete:lines.append(f"자료 부족 {incomplete}종목은 매수 판정에서 제외")
         else:
             lines.append("매수 판정 보류 · 분석자료 미확인" if incomplete else "매수 조건 충족 종목 없음")
-    for symbol, ratio, spread, price, entry_limit, stop, projection in confirmed[:5]:
+    for symbol, _ratio, _spread, _price, entry_limit, _stop, _projection in confirmed[:5]:
         ticker = symbol[4:] if overseas else symbol
         name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (
             KR_SYMBOL_NAMES.get(symbol+".KS") or KR_SYMBOL_NAMES.get(symbol+".KQ") or symbol)
         forecast = companies[symbol]["forecast"]
         step = Decimal("0.01" if overseas else "1")
         limit = Decimal(str(entry_limit)).quantize(step, rounding=ROUND_DOWN)
-        entry_label = f"$" + f"{limit:,.2f}" if overseas else f"{limit:,.0f}원"
+        entry_label = "$" + f"{limit:,.2f}" if overseas else f"{limit:,.0f}원"
         base, upside = forecast["base_price"], forecast["bull_price"]
-        target_label = f"$" + f"{base:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{base:,.0f} / {upside:,.0f}원"
+        target_label = "$" + f"{base:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{base:,.0f} / {upside:,.0f}원"
         lines.extend(["", f"• {name} ({ticker}) · 종합 {forecast['composite_score']:.1f}/100",
                       f"진입 상한 {entry_label} · {(closes+timedelta(seconds=30)):%H:%M:%S}까지",
                       f"5거래일 분석 목표 · 기준/상승 {target_label}",
@@ -1484,21 +1582,42 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
                       "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"])
     return "\n".join(lines)
 
-def notify(market, candidates, closes, token, chat_id, companies=None, sectors=None):
-    allowed,reason=delivery_status(market,datetime.now(KST))
+def notify(market, candidates, closes, token, chat_id, companies=None, sectors=None,
+           mode="intraday"):
+    """Send a decision alert under the gate that belongs to its own stage.
+
+    ``mode='preopen'`` keeps the plan window (ten minutes before an opening ±2 minutes).
+    The intraday decision lands 15 minutes after the opening, so it uses
+    ``intraday_delivery_status``: a real session, a decision that is minutes old rather
+    than hours, and no repeat of the same signal. A gate refusal is reported as
+    ``suppressed_by_gate`` in the return value and in the log, so a silent skip can no
+    longer look like "no candidate".
+    """
+    now = datetime.now(KST)
+    key = (market, closes.isoformat(), tuple(sorted(row[0] for row in candidates)))
+    gate = delivery_status if mode == "preopen" else intraday_delivery_status
+    allowed, reason = (gate(market, now) if mode == "preopen"
+                       else gate(market, now, closes, key))
+    result = {"market": market, "mode": mode, "decision_at": closes.isoformat(),
+              "checked_at": now.isoformat(), "candidates": len(candidates),
+              "confirmed_buys": sum(1 for row in candidates if row[4] is not None),
+              "parts_sent": 0, "sent": False, "suppressed_by_gate": not allowed,
+              "reason": reason}
     if not allowed:
-        print('Telegram skipped: '+reason)
-        return
+        print(f"Telegram suppressed_by_gate {market}: {reason}", flush=True)
+        return result
     message = format_notification(market, candidates, closes, companies, sectors)
-    for message in split_telegram_text(message):
-        allowed,reason=delivery_status(market,datetime.now(KST))
+    for part in split_telegram_text(message):
+        allowed, reason = (delivery_status(market, datetime.now(KST)) if mode == "preopen"
+                           else intraday_delivery_status(market, datetime.now(KST), closes))
         if not allowed:
-            print('Telegram skipped before send: '+reason)
-            return
+            result.update(suppressed_by_gate=True, reason=reason)
+            print(f"Telegram suppressed_by_gate {market} before send: {reason}", flush=True)
+            return result
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": message},
+                json={"chat_id": chat_id, "text": part},
                 timeout=10, allow_redirects=False,
             )
             if response.status_code != 200:
@@ -1507,7 +1626,11 @@ def notify(market, candidates, closes, token, chat_id, companies=None, sectors=N
                 raise RuntimeError("Telegram이 발송을 확인하지 않았습니다")
         except (requests.RequestException, ValueError, AttributeError):
             raise RuntimeError("Telegram 발송 응답 오류") from None
-        print(f"Telegram sent: {market} intraday candidates")
+        result["parts_sent"] += 1
+        print(f"Telegram sent: {market} intraday candidates (part {result['parts_sent']})")
+    SENT_INTRADAY.add(key)
+    result["sent"] = True
+    return result
 
 
 def filter_us_updates(candidates, today, path):
@@ -1609,14 +1732,14 @@ def main():
             evidence.extend(scheduled_event_evidence(
                 market, datetime.now(local_zone), opens + timedelta(minutes=15)))
             if args.context or evidence:
-                Path("signal-context.json").write_text(json.dumps(evidence), encoding="utf-8")
+                dump(Path("signal-context.json"), evidence)
         available_kinds = {row["kind"] for row in evidence if row["market"] in (market, "*")}
         missing_kinds = {"market", "event"} - available_kinds
         if missing_kinds:
             print(f"{market} missing context: {', '.join(sorted(missing_kinds))}; observation alerts only")
         def publish(candidates):
             if market == "US-early":
-                snapshot.write_text(json.dumps({"date": today, "candidates": candidates[:5]}), encoding="utf-8")
+                dump(snapshot, {"date": today, "candidates": [list(row) for row in candidates[:5]]})
             elif market == "US-late":
                 candidates = filter_us_updates(candidates, today, snapshot)
             if candidates:
@@ -1624,7 +1747,9 @@ def main():
                 for symbol, *_ in candidates:
                     company = companies.setdefault(symbol, {})
                     company["research_label"] = research_label(evidence, market, symbol, decision_at)
-                notify(market, candidates, decision_at, token, chat_id, companies, sectors=sector_snapshot["rows"])
+                delivery = notify(market, candidates, decision_at, token, chat_id, companies,
+                                  sectors=sector_snapshot["rows"])
+                dump(Path(f"{market}-delivery.json"), delivery)
             else:
                 print(f"{market} 장중 알림 조건 충족 없음")
 

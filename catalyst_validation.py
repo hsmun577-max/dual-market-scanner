@@ -1,6 +1,6 @@
 """Frozen-case mechanism test and observed 5m execution diagnostic; not a point-in-time profitability claim."""
 from copy import deepcopy
-from datetime import datetime,timedelta,time,timezone
+from datetime import datetime,timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import json,subprocess
@@ -33,10 +33,10 @@ def execution_diagnostic(row):
     if df.index[0]!=expected:return dict(status='opening_bar_missing',first_bar=str(df.index[0]))
     opening=float(df.iloc[0]['Open']);entry=None;entry_at=None
     for at,bar in df.iterrows():
-        op=float(bar['Open']);lo=float(bar['Low']);hi=float(bar['High'])
+        op=float(bar['Open']);low=float(bar['Low'])
         if plan['entry_floor']<=op<=plan['entry_limit']:
             entry=op;entry_at=at;break
-        if op>plan['entry_limit'] and lo<=plan['entry_limit']:
+        if op>plan['entry_limit'] and low<=plan['entry_limit']:
             entry=plan['entry_limit'];entry_at=at;break
     if entry is None:return dict(status='no_observed_entry',opening_price=opening)
     stop=entry*.98;target=entry*1.06
@@ -108,7 +108,6 @@ def main():
         cutoff=first_cutoff.isoformat(),pre_event_frames=sum(f.get('kind')=='pre_event_policy_watch' for f in early_frames),
         outcome_news_used=False,current_company_profiles_used_for_past=False,
         scope='dated policy-to-business-category discovery only, not a historical stock trade or win rate')
-    now=datetime.now(timezone.utc)
     codes=[r['symbol'].split('.')[0] for r in report['results']]
     quotes=domestic_valuations(codes)
     history=yf.download([r['symbol'] for r in report['results']],start='2026-09-01',end='2026-11-19',

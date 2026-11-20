@@ -37,7 +37,9 @@ def industries(content):
 class Client:
     _sessions = {}
     def __init__(self):
-        key=os.environ['KIS_APP_KEY'].strip(); secret=os.environ['KIS_APP_SECRET'].strip()
+        key=os.getenv('KIS_APP_KEY','').strip(); secret=os.getenv('KIS_APP_SECRET','').strip()
+        if not key or not secret:
+            raise RuntimeError('KIS 자격증명 없음: KIS_APP_KEY와 KIS_APP_SECRET이 필요합니다')
         cached=self._sessions.get((key,secret))
         if cached and cached[0]>time.monotonic():
             self.headers=dict(cached[1]); return
