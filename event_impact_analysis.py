@@ -33,6 +33,41 @@ FEEDS = (
  ('EIA', 'https://www.eia.gov/rss/todayinenergy.xml'),
 )
 
+MATERIAL_NEWS = re.compile(
+    r'실적|매출|영업이익|순이익|수주|계약|해지|취소|공시|배당|자사주|증자|전환사채|합병|인수|분할|'
+    r'승인|허가|규제|관세|제재|소송|횡령|배임|부도|회생|상장폐지|거래정지|'
+    r'환율|금리|유가|원가|증설|양산|신제품|특허|임상|리콜|파업|전쟁|수출|생산중단|'
+    r'급락|폭락|상한가|하한가|콘서트|공연|컴백|정상회담|정책|'
+    r'earnings|revenue|profit|guidance|contract|orders|acquisition|merger|'
+    r'bankrupt|fraud|lawsuit|approval|tariff|sanction|recall|dividend|buyback', re.I)
+ROUTINE_NEWS = re.compile(
+    r'실시간\s*시세|오늘의\s*주가|주가\s*정보|시세\s*정보|'
+    r'\bstock\s+quote\b|\bstock\s+price\s+today\b|\bhistorical\s+share\s+price\b', re.I)
+
+
+def company_news_requires_analysis(news):
+    """Skip explicit quote-only headlines; unknown or material titles stay in analysis."""
+    headline=str(news.get('headline') or '').strip()
+    return bool(MATERIAL_NEWS.search(headline)) or not bool(ROUTINE_NEWS.search(headline))
+
+
+def company_news_events(company, read_body=None):
+    """Screen the retrieved headlines before doing expensive article-body analysis."""
+    read_body=read_body or article_text
+    news=company.get('news',[])
+    material=[row for row in news if company_news_requires_analysis(row)]
+    company['news_screening']=dict(checked=company.get('news_status') in {'ok','no_recent_articles'},
+        retrieved_count=len(news),material_count=len(material),skipped_routine_count=len(news)-len(material))
+    result=[]
+    for row in material:
+        try:
+            body,status=read_body(row.get('url'))
+        except (requests.RequestException,ValueError):
+            body,status='','unavailable'
+        result.append({**row,'body':body,'body_status':status,'publication_verified':True,
+            'availability_basis':'source_news_timestamp','event_id':row.get('url'),'scope':'company'})
+    return result
+
 
 def timestamp(value):
     try:
@@ -262,6 +297,10 @@ def _route(channel, event, company, direct):
 
 
 def analyze_events(company, events, at, feed_coverage=()):
+    events=list(events)
+    skipped_news=[event for event in events if event.get('scope')=='company'
+                  and not company_news_requires_analysis(event)]
+    events=[event for event in events if event not in skipped_news]
     assessed=[]; unsupported=[]; seen=set(); positive=[]; negative=[]; uncertain=[]
     graph = connect_business(company, event_frames(events, at), at)
     uncertain.extend(graph.get('expectation_links', []))
@@ -314,12 +353,18 @@ def analyze_events(company, events, at, feed_coverage=()):
     means=[sum(values)/len(values) for values in channel_scores.values()]
     score=sum(means)/len(means) if means else None
     coverage_checked=any(row.get('status')=='checked' for row in feed_coverage)
+    news_screen=company.get('news_screening',{})
+    news_checked_quiet=(company.get('news_status')=='no_recent_articles'
+        or (company.get('news_status')=='ok' and news_screen.get('checked') is True
+            and news_screen.get('material_count')==0))
     quiet=(not claims and not uncertain and not unsupported and coverage_checked
-           and bool(assessed) and bool(company.get('business_description'))
-           and company.get('news_status')=='no_recent_articles')
+           and (not events or bool(company.get('business_description')))
+           and company.get('filing_status')=='checked' and news_checked_quiet)
     return dict(model='causal_rules_v1_not_calibrated',generated_at=at.isoformat(),
         score=round(score,4) if score is not None else None,
         status='directional_hypotheses' if claims else 'no_material_events_identified' if quiet else 'insufficient_causal_evidence',
+        analysis_mode='skipped_no_material_news' if quiet else 'material_event_analysis',
+        skipped_routine_news=len(skipped_news),
         business_profile_available=bool(company.get('business_description')),exposures=sorted(exposure(company)),
         economic_graph=graph,
         positive_drivers=positive,negative_drivers=negative,uncertainties=uncertain,

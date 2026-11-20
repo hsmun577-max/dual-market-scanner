@@ -21,7 +21,7 @@ from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request
 from signal_context import context_status
 from company_forecast import build_company_forecast
 from delivery_policy import delivery_status
-from event_impact_analysis import article_text, world_events, analyze_events
+from event_impact_analysis import article_text, world_events, analyze_events, company_news_events
 from candidate_selection import instrument_rejection_reason, rank_market_candidates, rank_recovery_candidates
 from sector_flow import format_sector_header
 from telegram_text import split_telegram_text
@@ -703,7 +703,7 @@ def company_context(market, symbols, now):
             "missing_dart_key" if not dart_key else "issuer_mapping_unavailable")}, []
         try:
             articles = ticker.get_news(count=12)
-            snapshot["news"] = recent_company_news(articles, now)[:3]
+            snapshot["news"] = recent_company_news(articles, now)
             snapshot["news_status"] = "ok" if snapshot["news"] else "no_recent_articles"
             risks.extend(headline_risks(market, symbol, articles, now))
         except Exception as exc:
@@ -711,7 +711,7 @@ def company_context(market, symbols, now):
         if not overseas and not snapshot.get("news"):
             try:
                 articles = korean_company_news(symbol, now)
-                snapshot["news"] = articles[:3]
+                snapshot["news"] = articles
                 risks.extend({**item, "kind": "event", "market": market, "symbol": symbol,
                               "assessment": "risk"} for item in articles
                              if RISK_HEADLINE.search(item["headline"]))
@@ -771,12 +771,7 @@ def company_context(market, symbols, now):
                          KR_SYMBOL_NAMES.get(mapped_tickers[symbol]))
         if official_name:
             snapshot["entity_aliases"] = list(dict.fromkeys([*snapshot.get("entity_aliases", []), official_name]))
-        company_events = []
-        for news in snapshot.get("news", [])[:3]:
-            body, body_status = article_text(news.get("url"))
-            company_events.append({**news, "body": body, "body_status": body_status,
-                                   "publication_verified":True,"availability_basis":"source_news_timestamp",
-                                   "event_id": news.get("url"), "scope": "company"})
+        company_events = company_news_events(snapshot,article_text)
         snapshot["event_analysis"] = analyze_events(snapshot, [*global_events, *company_events],
                                                      datetime.now(now.tzinfo), global_coverage)
         if history_prices is not None:

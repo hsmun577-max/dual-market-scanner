@@ -1,0 +1,22 @@
+name: Optional news policy verification
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/optional-news-verification.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5'
+      - name: Verify quiet news, material news and buy-decision boundaries
+        env:
+          PYTHONPATH: tests
+        run: python -m unittest test_optional_news test_event_impact_analysis test_preopen_signals test_catalyst_policy -v
