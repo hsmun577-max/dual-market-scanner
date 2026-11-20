@@ -790,8 +790,8 @@ def company_context(market, symbols, now):
         snapshot["financial_status"] = "ok" if "operating_margin_pct" in snapshot else "unavailable"
         return symbol, snapshot, risks
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(fetch, symbols))
+    from analysis_batch import collect_company_results
+    results = collect_company_results(fetch, symbols)
     snapshots = {symbol: snapshot for symbol, snapshot, _ in results}
     if overseas:
         apply_peer_valuations(snapshots, datetime.now(now.tzinfo))

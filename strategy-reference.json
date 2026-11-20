@@ -1,0 +1,23 @@
+{
+  "checked_at": "2026-11-20T03:31:32Z",
+  "project": "ZhuLinsen/daily_stock_analysis",
+  "stars": 73498,
+  "verified_code_commit": "e55d8ff15f3dafd3aef8007645dcce353147b064",
+  "code_commit_at": "2026-11-19T14:36:12Z",
+  "reference_commit": "92f0209ec5325c152a7532d714a69e09d102399a",
+  "reference_files": [
+    "data_provider/__init__.py",
+    "data_provider/fundamental_adapter.py",
+    "src/services/empty_news.py",
+    "src/services/analysis_timeout_partial.py",
+    "src/services/decision_signal_data_quality.py"
+  ],
+  "implemented_patterns": [
+    "native-first provider fallback with normalized timestamps",
+    "distinguish checked empty from unavailable",
+    "preserve independent completed issuer results",
+    "separate data exclusions from completed decision rejections"
+  ],
+  "performance_claim": "none; popularity does not establish profitability",
+  "source_copy": "architecture reference; independently implemented"
+}

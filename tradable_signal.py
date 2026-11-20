@@ -82,6 +82,11 @@ def format_requested_report(sector_lines,signals,evaluation,at):
                 '손절 −2%·익절 +6%는 실제 체결가로 재계산'])
     elif any(row.get('reason')=='waiting_for_entry_price' for row in signals):
         lines.extend([f'매수 대기 · {at:%m/%d %H:%M} KST','분석 조건은 충족했으나 현재 호가가 매수 상한 초과'])
+    elif evaluation.get('decision_completed',0)>0 and not signals:
+        lines.extend([f'분석 결과 · {at:%m/%d %H:%M} KST',
+            f"판정 완료 {evaluation['decision_completed']}종목 · 현재 매수 조건 충족 없음"])
+        if evaluation.get('data_excluded'):
+            lines.append(f"자료 부족 {evaluation['data_excluded']}종목은 매수 판정에서 제외")
     elif evaluation.get('completed') is False:
         lines.extend([f'분석 상태 · {at:%m/%d %H:%M} KST','매수 판정 보류 · 분석자료 미확인'])
     elif signals:

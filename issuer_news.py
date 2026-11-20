@@ -52,7 +52,9 @@ def issuer_news_result(symbol,name,now):
             if response.status_code!=200:
                 attempts.append(dict(status='unavailable',http_status=response.status_code));continue
             document=response.json()
-            known=(isinstance(document,list) or (isinstance(document,dict) and document.get('isSuccess') is True))
+            known=(isinstance(document,list) or (isinstance(document,dict)
+                and document.get('isSuccess') is True and isinstance(document.get('result'),dict)
+                and isinstance(document['result'].get('stockNewsList'),list)))
             if not known:
                 attempts.append(dict(status='unknown_schema'));continue
             checked=True;rows=parse_issuer_news(document,name,now)

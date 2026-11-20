@@ -86,7 +86,9 @@ def evaluate_preopen(report, previous_session, at=None):
     incomplete={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch',
                 'missing_indicators','invalid_average_price','entry_tick_missing'}
     evaluated=sum(counts.values())
-    report['buy_evaluation']=dict(completed=bool(evaluated) and not any(counts[s] for s in incomplete),
+    excluded=sum(counts[s] for s in incomplete)
+    report['buy_evaluation']=dict(completed=bool(evaluated) and not excluded,
+        decision_completed=evaluated-excluded, data_excluded=excluded,
         connected=True,mode='conditional_preopen',scope='analysed_candidates',
         previous_session=previous_session,generated_at=at.isoformat(),evaluated=evaluated,
         counts=dict(counts),missing_dimensions=dict(missing),recommendations=recommendations,

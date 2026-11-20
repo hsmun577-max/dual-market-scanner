@@ -50,6 +50,13 @@ class TradableSignalTests(unittest.TestCase):
     def test_complete_no_candidates_has_no_false_buy_heading(self):
         self.assertNotIn('매수 신호',format_requested_report([],[],dict(completed=True),AT))
 
+    def test_partial_coverage_does_not_mislabel_completed_rejections_as_unknown(self):
+        message=format_requested_report([],[],dict(completed=False,decision_completed=18,data_excluded=26),AT)
+        self.assertIn('판정 완료 18종목',message)
+        self.assertIn('자료 부족 26종목',message)
+        self.assertNotIn('매수 판정 보류',message)
+        self.assertNotIn('매수 신호',message)
+
     def test_only_verified_entry_can_produce_buy_heading(self):
         r,q=fixture();s=validate_entry(r,q,AT,True)
         text=format_requested_report([], [s],dict(completed=True),AT)
