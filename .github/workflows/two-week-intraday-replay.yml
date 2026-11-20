@@ -1,0 +1,41 @@
+name: Two-week intraday signal replay
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: First run date (UTC)
+        required: true
+        type: string
+        default: '2026-11-06'
+      end_date:
+        description: Last run date (UTC)
+        required: true
+        type: string
+        default: '2026-11-20'
+  push:
+    paths:
+      - '.github/workflows/two-week-intraday-replay.yml'
+      - 'replay_intraday_window.py'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Aggregate retained quote replays
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          START_DATE: ${{ inputs.start_date || '2026-11-06' }}
+          END_DATE: ${{ inputs.end_date || '2026-11-20' }}
+        run: python replay_intraday_window.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: two-week-intraday-replay
+          path: intraday-two-week-replay.json
+          if-no-files-found: warn
+          retention-days: 30
