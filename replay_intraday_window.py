@@ -3,7 +3,7 @@ import json
 import os
 import subprocess
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 
@@ -108,8 +108,10 @@ def aggregate(start: date, end: date):
 
 
 def main():
-    start = date.fromisoformat(os.environ.get("START_DATE", "2026-11-06"))
-    end = date.fromisoformat(os.environ.get("END_DATE", "2026-11-20"))
+    # Default to the last ten sessions instead of a fixed week that goes stale.
+    today = date.today()
+    start = date.fromisoformat(os.environ.get("START_DATE", (today - timedelta(days=13)).isoformat()))
+    end = date.fromisoformat(os.environ.get("END_DATE", today.isoformat()))
     if start > end:
         raise SystemExit("START_DATE must be on or before END_DATE")
     result = aggregate(start, end)

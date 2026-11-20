@@ -1,4 +1,5 @@
 """Auditable causal event analysis. Rule inferences are not verified earnings forecasts."""
+from event_publication import MIN_VERIFIED_BODY_CHARS
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from urllib.parse import urlparse,parse_qs,urlencode,urlunparse,urljoin
@@ -66,7 +67,9 @@ def company_news_events(company, read_body=None):
             body,status=read_body(row.get('url'))
         except (requests.RequestException,ValueError):
             body,status='','unavailable'
-        result.append({**row,'body':body,'body_status':status,'publication_verified':True,
+        # A headline is not a verified publication: only a body we actually read proves it.
+        verified=status=='public_body' and len(str(body or ''))>=MIN_VERIFIED_BODY_CHARS
+        result.append({**row,'body':body,'body_status':status,'publication_verified':verified,
             'availability_basis':row.get('availability_basis','source_news_timestamp'),'event_id':row.get('url'),'scope':'company'})
     return result
 

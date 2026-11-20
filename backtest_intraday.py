@@ -26,7 +26,7 @@ from pathlib import Path
 
 from exit_policy import DEFAULT_EXIT_POLICY, ExitTracker
 from kis_intraday import (BAR_SECONDS, breakout_v2, candidate_metrics, protective_stop,
-                          price_projection)
+                          price_projection, volume_reference)
 from signal_context import context_status
 
 # (strategy name, replay arguments, needs the context check)
@@ -120,15 +120,20 @@ def replay(row, fee_bps, *, strict=False, use_support_stop=False, exit_mode="fix
         if not (math.isfinite(bid) and math.isfinite(ask) and 0 < bid <= ask):
             raise ValueError("Invalid quote")
 
-    before = [(at, quote) for at, quote in zip(times, quotes) if at < signal_at]
+    before = [(at, quote) for at, quote in zip(times, quotes, strict=False) if at < signal_at]
     if not before:
         return {"status": "missing_signal_quote"}
     at, quote = before[-1]
     spread_pct = 200 * (quote["ask"] - quote["bid"]) / (quote["ask"] + quote["bid"])
     signal_quote = {"event_time": at.isoformat(), "spread_pct": spread_pct, "ask": quote["ask"]}
-    if not candidate_metrics(dict(enumerate(bars)), signal_quote, signal_at):
-        return {"status": "no_signal"}
-    limit = breakout_v2(dict(enumerate(bars)), signal_quote, signal_at) if strict else None
+    # Use the volume reference the live decision used. Rows recorded before the
+    # baseline existed fall back to the opening-share rule, and the report says which.
+    volume_baseline = row.get("volume_baseline")
+    basis = volume_reference(dict(enumerate(bars)), volume_baseline)[1]
+    if not candidate_metrics(dict(enumerate(bars)), signal_quote, signal_at, volume_baseline):
+        return {"status": "no_signal", "volume_basis": basis}
+    limit = (breakout_v2(dict(enumerate(bars)), signal_quote, signal_at, volume_baseline)
+             if strict else None)
     if strict and limit is None:
         return {"status": "filtered_by_breakout_v2"}
 
@@ -145,7 +150,7 @@ def replay(row, fee_bps, *, strict=False, use_support_stop=False, exit_mode="fix
 
     entry_deadline = signal_at + timedelta(seconds=30)
     exit_at = signal_at + timedelta(minutes=30)
-    after = [(at, quote) for at, quote in zip(times, quotes) if at > signal_at]
+    after = [(at, quote) for at, quote in zip(times, quotes, strict=False) if at > signal_at]
     entry_index = next(
         (i for i, (at, quote) in enumerate(after)
          if at <= entry_deadline and (limit is None or quote["ask"] <= limit)
@@ -158,7 +163,9 @@ def replay(row, fee_bps, *, strict=False, use_support_stop=False, exit_mode="fix
     entry = entry_quote["ask"]
 
     if exit_mode == "policy":
-        return _policy_exit(row, entry, entry_at, after[entry_index + 1:], exit_at, fee_bps, policy)
+        result = _policy_exit(row, entry, entry_at, after[entry_index + 1:], exit_at, fee_bps, policy)
+        result["volume_basis"] = basis
+        return result
 
     target = entry * 1.02
     if stop is not None:
@@ -176,7 +183,8 @@ def replay(row, fee_bps, *, strict=False, use_support_stop=False, exit_mode="fix
         if at >= exit_at or bid <= stop or bid >= target:
             fee = fee_bps / 10_000
             return {"status": "evaluated", "exit_mode": "fixed",
-                    "net_return": bid * (1 - fee) / (entry * (1 + fee)) - 1}
+                    "net_return": bid * (1 - fee) / (entry * (1 + fee)) - 1,
+                    "volume_basis": basis}
     return {"status": "missing_exit_quote", "exit_mode": "fixed"}
 
 
@@ -206,7 +214,8 @@ def main():
             market = groups.setdefault(row["market"], {})
             for strategy, options, with_context in strategies:
                 group = market.setdefault(strategy, {"counts": {}, "returns": [],
-                                                     "unrealized": [], "exit_reasons": {}})
+                                                     "unrealized": [], "exit_reasons": {},
+                                                     "volume_basis": {}})
                 result = None
                 if with_context and row["daily_eligible"]:
                     status = context_status(evidence, row["market"], row["symbol"],
@@ -217,6 +226,9 @@ def main():
                     result = replay(row, args.fee_bps, **options)
                 status = result["status"]
                 group["counts"][status] = group["counts"].get(status, 0) + 1
+                if result.get("volume_basis"):
+                    basis = result["volume_basis"]
+                    group["volume_basis"][basis] = group["volume_basis"].get(basis, 0) + 1
                 if status == "evaluated":
                     group["returns"].append(result["net_return"])
                     if result.get("exit_reason"):

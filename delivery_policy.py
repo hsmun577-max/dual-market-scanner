@@ -1,5 +1,5 @@
 """Fail-closed pre-opening delivery windows in exchange local time."""
-from datetime import datetime,time,timedelta,timezone
+from datetime import datetime,time,timedelta
 from zoneinfo import ZoneInfo
 
 ALIASES={'US-early':'US_PRE','US-late':'US','NXT':'NXT','KRX':'KRX','US':'US','US_PRE':'US_PRE'}

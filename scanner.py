@@ -2,7 +2,6 @@ import json
 import math
 import os
 import time
-import re
 from zoneinfo import ZoneInfo
 import argparse
 from io import BytesIO
@@ -13,7 +12,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import requests
-from candidate_selection import candidate_rejection_reason, rank_market_candidates, rank_recovery_candidates
+from candidate_selection import candidate_rejection_reason, rank_market_candidates
 from sector_flow import fetch_intraday_sectors, format_sector_header
 from telegram_text import split_telegram_text
 from company_forecast import build_company_forecast
@@ -180,12 +179,50 @@ def safe_float(value):
     except (TypeError, ValueError):
         return None
 
+YF_ATTEMPTS = 3
+YF_BACKOFF_SECONDS = (2, 5)
+_RATELIMIT_HINTS = ("ratelimit", "rate limit", "too many requests", "429")
+
+
+def rate_limited(exc):
+    """Tell a provider throttle apart from a bad ticker or a data fault."""
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return "ratelimit" in name or "ratelimited" in name or any(
+        hint in text for hint in _RATELIMIT_HINTS)
+
+
+def yf_download(tickers, **options):
+    """One yfinance entry point with bounded retries, so every caller behaves alike.
+
+    Returns None when the provider stays unavailable; the caller then records a data
+    reason instead of silently scoring a company without prices.
+    """
+    last = None
+    for attempt in range(YF_ATTEMPTS):
+        try:
+            data = yf.download(tickers, **options)
+            if data is not None and not data.empty:
+                return data
+            last = ValueError("empty download")
+        except Exception as exc:  # provider errors surface as many types
+            last = exc
+            if rate_limited(exc) and attempt < YF_ATTEMPTS - 1:
+                time.sleep(YF_BACKOFF_SECONDS[min(attempt, len(YF_BACKOFF_SECONDS) - 1)])
+                continue
+        if attempt < YF_ATTEMPTS - 1:
+            print(f"yfinance download retry {attempt + 1}/{YF_ATTEMPTS - 1}: {type(last).__name__}")
+            time.sleep(YF_BACKOFF_SECONDS[min(attempt, len(YF_BACKOFF_SECONDS) - 1)])
+    print(f"yfinance download unavailable after {YF_ATTEMPTS} attempts: {type(last).__name__}")
+    return None
+
+
 def download_prices(symbol, period="1y", retries=3):
     last_error = None
 
     for attempt in range(retries):
         try:
-            data = yf.download(
+            data = yf_download(
                 symbol,
                 period=period,
                 interval="1d",
@@ -195,7 +232,7 @@ def download_prices(symbol, period="1y", retries=3):
                 timeout=20
             )
 
-            if data.empty:
+            if data is None or data.empty:
                 raise ValueError("가격 데이터 없음")
 
             if isinstance(data.columns, pd.MultiIndex):
@@ -233,7 +270,7 @@ def scan_batches(market, names, benchmark):
         last_error = None
         for attempt in range(3):
             try:
-                prices = yf.download(
+                prices = yf_download(
                     batch, period="1y", interval="1d", auto_adjust=True,
                     progress=False, threads=8, timeout=20, group_by="ticker",
                     multi_level_index=True,
@@ -671,9 +708,9 @@ def telegram_candidate_line(item):
     overseas = item["market"] == "US"
     name = item.get("name") or symbol
     code = symbol if overseas else symbol.split(".")[0]
-    entry_label = f"$" + f"{entry:,.2f}" if overseas else f"{entry:,.0f}원"
+    entry_label = "$" + f"{entry:,.2f}" if overseas else f"{entry:,.0f}원"
     target, upside = forecast["base_price"], forecast["bull_price"]
-    target_label = f"$" + f"{target:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{target:,.0f} / {upside:,.0f}원"
+    target_label = "$" + f"{target:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{target:,.0f} / {upside:,.0f}원"
     label = '조건부 매수' if conditional else '매수 확인'
     if conditional and preopen.get('strategy')=='event_catalyst':
         floor=preopen['entry_floor']
@@ -707,6 +744,7 @@ def benchmark_daily_closes(benchmark):
         raise ValueError("시장 기준 지표에 종가 열 없음")
     columns = [name for name in ("Close", "Adj Close") if name in benchmark.columns]
     closes = benchmark[columns].replace([np.inf, -np.inf], np.nan).dropna(subset=["Close"])
+    closes = closes.loc[closes["Close"] > 0]
     closes = closes.loc[~closes.index.duplicated(keep="last")].sort_index()
     if len(closes) < 2:
         raise ValueError("시장 기준 지표 종가 2개 미만")
@@ -761,14 +799,13 @@ def scan_sectors(benchmarks):
     results, errors = [], []
     selection_now = datetime.now(timezone.utc)
     for market, sectors in SECTOR_ETFS.items():
-        try:
-            prices = yf.download(
-                list(sectors), period="3mo", interval="1d", auto_adjust=False,
-                progress=False, group_by="ticker", threads=6, timeout=15,
-                multi_level_index=True,
-            )
-        except Exception as exc:
-            errors.append({"market": market, "error": str(exc)})
+        prices = yf_download(
+            list(sectors), period="3mo", interval="1d", auto_adjust=False,
+            progress=False, group_by="ticker", threads=6, timeout=15,
+            multi_level_index=True,
+        )
+        if prices is None:
+            errors.append({"market": market, "error": "sector daily download unavailable"})
             continue
         for symbol, name in sectors.items():
             try:
@@ -777,7 +814,7 @@ def scan_sectors(benchmarks):
                     benchmark = completed_daily_prices(benchmark, market, selection_now)
                 metrics = sector_metrics(completed_daily_prices(prices[symbol], market, selection_now), benchmark)
                 results.append({"market": market, "symbol": symbol, "name": name, **metrics})
-            except (KeyError, ValueError) as exc:
+            except (KeyError, ValueError, ArithmeticError) as exc:
                 errors.append({"market": market, "symbol": symbol, "error": str(exc)})
     print(f"Sector ETFs: {len(results)} analyzed, {len(errors)} errors")
     return results, errors
@@ -794,9 +831,11 @@ def sector_flow_snapshot(market, now):
         print(f"{market} sector minute data unavailable ({type(exc).__name__})")
     rows = []
     try:
-        prices = yf.download([*sectors, BENCHMARKS[market]], period="3mo", interval="1d",
+        prices = yf_download([*sectors, BENCHMARKS[market]], period="3mo", interval="1d",
                              auto_adjust=False, group_by="ticker", progress=False,
                              threads=4, timeout=8, multi_level_index=True)
+        if prices is None:
+            return rows
         benchmark = prices[BENCHMARKS[market]]
         benchmark = benchmark.loc[benchmark.index.date < now.date()]
         for symbol, name in sectors.items():
@@ -805,7 +844,7 @@ def sector_flow_snapshot(market, now):
                 data = data.loc[data.index.date < now.date()]
                 metrics = sector_metrics(data, benchmark)
                 rows.append({"market": market, "symbol": symbol, "name": name, **metrics})
-            except (KeyError, ValueError):
+            except (KeyError, ValueError, ArithmeticError):
                 continue
     except Exception as exc:
         print(f"{market} sector daily data unavailable ({type(exc).__name__})")
@@ -813,17 +852,27 @@ def sector_flow_snapshot(market, now):
 
 
 def send_telegram_summary(report):
+    """Send the daily/preopen summary and report what actually happened.
+
+    Returns a dict so a caller can tell "sent" from "skipped by the delivery window"
+    instead of finding an empty list and guessing.
+    """
+    result = dict(market=os.getenv('DELIVERY_MARKET') or None, parts_sent=0, sent=False,
+                  suppressed_by_gate=False, reason=None)
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if not token and not chat_id:
         print("Telegram skipped: configuration not set")
-        return
+        result.update(suppressed_by_gate=True, reason="configuration_not_set")
+        return result
     if not token or not chat_id:
         raise RuntimeError("Telegram requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
     allowed,reason=delivery_status(os.getenv('DELIVERY_MARKET'),datetime.now(timezone.utc))
+    result["reason"]=reason
     if not allowed:
-        print('Telegram skipped: '+reason)
-        return
+        print('Telegram suppressed_by_gate: '+reason)
+        result["suppressed_by_gate"]=True
+        return result
 
     lines = list(report.get('sector_header_override') or format_sector_header(report.get("sectors", [])))
     confirmed = [item for item in report["results"]
@@ -848,7 +897,6 @@ def send_telegram_summary(report):
         elif evaluation.get('completed') is True:
             lines.append("매수 조건 충족 종목 없음")
         else:
-            assessed=[row for row in report['results'] if row.get('company_forecast',{}).get('composite_score') is not None]
             lines.append("매수 판정 보류 · 분석 미완료")
     for item in confirmed[:5]:
         lines.append(telegram_candidate_line(item))
@@ -857,8 +905,9 @@ def send_telegram_summary(report):
     for message in messages:
         allowed,reason=delivery_status(os.getenv('DELIVERY_MARKET'),datetime.now(timezone.utc))
         if not allowed:
-            print('Telegram skipped before send: '+reason)
-            return
+            print('Telegram suppressed_by_gate before send: '+reason)
+            result.update(suppressed_by_gate=True, reason=reason)
+            return result
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
@@ -874,7 +923,9 @@ def send_telegram_summary(report):
         except (requests.RequestException, ValueError):
             raise RuntimeError("Telegram request failed or returned invalid JSON") from None
     
+    result.update(sent=bool(messages), parts_sent=len(messages))
     print(f"Telegram confirmed: {len(messages)} daily report parts")
+    return result
     return True
 
 

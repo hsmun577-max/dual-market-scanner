@@ -8,6 +8,7 @@ from collections import Counter
 import requests
 import exchange_calendars
 import scanner
+from json_utils import dump as dump_json
 from profile_universe import restore_index,restore_prices
 from preopen_signals import evaluate_preopen
 from industry_flow import snapshot,format_report,Client
@@ -80,8 +81,8 @@ def main():
             score=r['company_forecast']['composite_score'],plan=r['preopen_signal'],quote=quotes.get(r['symbol'])) for r in recommendations],
         missing_dimensions=dict(Counter(key for r in report['results'] for key in r.get('company_forecast',{}).get('missing_dimensions',[]))),
         confirmed_fills=0,message=message,telegram_sent=False)
-    Path('requested-buy-analysis.json').write_text(json.dumps(report,ensure_ascii=False,default=str),encoding='utf-8')
-    Path('requested-buy-audit.json').write_text(json.dumps(audit,ensure_ascii=False,default=str),encoding='utf-8')
+    dump_json('requested-buy-analysis.json',report)
+    dump_json('requested-buy-audit.json',audit)
     Path('requested-buy-message.txt').write_text(message,encoding='utf-8')
     receipts=[]
     valid_until=min([datetime.fromisoformat(e['valid_until']) for e in entries if e['trade_ready']],default=None)
@@ -96,7 +97,7 @@ def main():
         if body.get('ok') is not True:raise RuntimeError('Telegram did not confirm delivery')
         receipts.append(dict(message_id=body['result']['message_id'],date=body['result']['date']))
     audit.update(telegram_sent=True,telegram_receipts=receipts)
-    Path('requested-buy-audit.json').write_text(json.dumps(audit,ensure_ascii=False,default=str),encoding='utf-8')
+    dump_json('requested-buy-audit.json',audit)
     print('REQUESTED_BUY_DELIVERY='+json.dumps(audit,ensure_ascii=False,default=str),flush=True)
 
 if __name__=='__main__':main()

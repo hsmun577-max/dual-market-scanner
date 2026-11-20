@@ -1,5 +1,5 @@
 """Persist public government policy evidence between runs, preserving publication and first observation."""
-from datetime import datetime,timedelta,timezone
+from datetime import datetime,timedelta
 from pathlib import Path
 import json,os,subprocess,re
 from urllib.parse import urlparse

@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import re
 
+from event_publication import MIN_VERIFIED_BODY_CHARS
+
 PRODUCTS = {
  'screen_content': ('film','movie','drama','animation','broadcasting','영화','드라마','애니메이션','방송'),
  'games': ('video game','online game','온라인게임','게임'),
@@ -76,7 +78,7 @@ def frames(events, at):
             continue
         seen.add(identity)
         body=event.get('body','')
-        if len(body)<400: continue
+        if len(body)<MIN_VERIFIED_BODY_CHARS: continue
         # Public diplomatic preparations can identify exposed businesses before an outcome or price surge.
         if (event.get('publication_verified') is True
                 and contains(body,COUNTRIES['China']) and contains(body,COUNTRIES['South Korea'])

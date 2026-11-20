@@ -1,6 +1,5 @@
 import unittest
 from datetime import datetime,timedelta,timezone
-from copy import deepcopy
 from unittest.mock import Mock,patch
 from valuation_data import domestic_valuations,apply_peer_valuations
 from preopen_signals import evaluate_preopen

@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 from zoneinfo import ZoneInfo
 from delivery_policy import plan,delivery_status
+from json_utils import dump
 
 
 def main():
@@ -40,7 +41,7 @@ def main():
     previous_session=cal.previous_session(window['session_date']).strftime('%Y-%m-%d')
     report['preopen_session']=window['session_date']
     evaluate_preopen(report,previous_session,datetime.now(timezone.utc))
-    Path('preopen-analysis.json').write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8')
+    dump('preopen-analysis.json',report)
     print('PREOPEN_BUY_EVALUATION='+json.dumps(report['buy_evaluation'],ensure_ascii=False),flush=True)
     if market=='KR':
         try:
@@ -57,14 +58,17 @@ def main():
         time.sleep(min(20,max(0,(target-datetime.now(timezone.utc)).total_seconds())))
     allowed,reason=delivery_status(args.market,datetime.now(timezone.utc))
     os.environ['DELIVERY_MARKET']=args.market
-    sent=False
+    delivery=dict(sent=False,parts_sent=0,suppressed_by_gate=False,reason=reason)
     if allowed:
         evaluate_preopen(report,previous_session,datetime.now(timezone.utc))
-        Path('preopen-analysis.json').write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8')
-        sent=bool(scanner.send_telegram_summary(report))
-    result=dict(**window,checked_at=datetime.now(timezone.utc).isoformat(),sent=sent,reason=reason)
-    Path('preopen-delivery.json').write_text(json.dumps(result),encoding='utf-8')
-    print('PREOPEN_DELIVERY='+json.dumps(result),flush=True)
+        dump('preopen-analysis.json',report,indent=None)
+        delivery=scanner.send_telegram_summary(report)
+    result=dict(**window,checked_at=datetime.now(timezone.utc).isoformat(),
+                sent=bool(delivery.get('sent')),parts_sent=delivery.get('parts_sent',0),
+                suppressed_by_gate=bool(delivery.get('suppressed_by_gate')),
+                reason=delivery.get('reason') or reason)
+    dump('preopen-delivery.json',result)
+    print('PREOPEN_DELIVERY='+json.dumps(result,ensure_ascii=False),flush=True)
 
 
 if __name__=='__main__': main()

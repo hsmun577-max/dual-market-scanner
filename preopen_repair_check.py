@@ -2,6 +2,7 @@
 from datetime import datetime,timezone
 from pathlib import Path
 import json
+import os
 from zoneinfo import ZoneInfo
 import exchange_calendars
 from profile_universe import restore_index
@@ -12,7 +13,8 @@ from sector_flow import format_sector_header
 def main():
     restore_index()
     source=json.loads(Path('opening-scan/latest.json').read_text(encoding='utf-8-sig'))
-    wanted={'352820','041510','122870','035900'}
+    # Symbols to inspect are supplied by the caller; the old fixed four expired.
+    wanted=set(os.environ.get('REPAIR_SYMBOLS','').replace(' ','').split(',')) - {''}
     rows=[row for row in source['results'] if row['symbol'].split('.')[0] in wanted]
     now=datetime.now(timezone.utc)
     local=now.astimezone(ZoneInfo('Asia/Seoul'))
@@ -44,9 +46,11 @@ def main():
             price_date=r['indicators'].get('data_date')) for r in rows])
     Path('preopen-repair-audit.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2),encoding='utf-8')
     print('PREOPEN_REPAIR_AUDIT='+json.dumps(audit,ensure_ascii=False),flush=True)
-    if not report['buy_evaluation']['connected'] or report['buy_evaluation']['evaluated']!=4:
-        raise RuntimeError('All four requested issuers must reach the production decision function')
-    if len(rows)!=4: raise RuntimeError('Requested issuer missing from the full scan')
+    if not wanted:
+        raise RuntimeError('REPAIR_SYMBOLS is required: give the issuer codes to inspect')
+    if not report['buy_evaluation']['connected'] or report['buy_evaluation']['evaluated']!=len(wanted):
+        raise RuntimeError(f'All {len(wanted)} requested issuers must reach the production decision function')
+    if len(rows)!=len(wanted): raise RuntimeError('Requested issuer missing from the full scan')
     if any(r.get('company_forecast',{}).get('assessment_status')!='complete' for r in rows):
         raise RuntimeError('Live issuer assessments still incomplete; inspect missing evidence in the audit artifact')
 

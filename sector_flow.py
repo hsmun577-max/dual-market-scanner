@@ -1,9 +1,8 @@
 """Compare sector ETF price and turnover with time-matched observations."""
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 import math
 import pandas as pd
-import yfinance as yf
 
 
 def intraday_sector_metrics(prices, benchmark, now):
@@ -11,10 +10,10 @@ def intraday_sector_metrics(prices, benchmark, now):
     if data.empty or data.index.tz is None:
         raise ValueError("Sector minute data unavailable")
     data.index = data.index.tz_convert(now.tzinfo)
-    data = data.loc[data.index + pd.Timedelta(minutes=5) <= now]
+    data = data.loc[data.index + pd.Timedelta(5, unit="min") <= now]
     if data.empty:
         raise ValueError("No completed sector bars")
-    end = data.index[-1] + pd.Timedelta(minutes=5)
+    end = data.index[-1] + pd.Timedelta(5, unit="min")
     if end.date() != now.date() or now - end > timedelta(minutes=20):
         raise ValueError("Current sector bars unavailable")
 
@@ -63,10 +62,13 @@ def intraday_sector_metrics(prices, benchmark, now):
 
 
 def fetch_intraday_sectors(sectors, benchmark, market, now):
-    prices = yf.download([*sectors, benchmark], period="10d", interval="5m", prepost=market=="US",
+    from scanner import yf_download
+    prices = yf_download([*sectors, benchmark], period="10d", interval="5m", prepost=market=="US",
                          auto_adjust=False, group_by="ticker", progress=False, threads=4,
                          timeout=8, multi_level_index=True)
     results = []
+    if prices is None:
+        return results
     for symbol, name in sectors.items():
         try:
             metrics = intraday_sector_metrics(prices[symbol], prices[benchmark], now)

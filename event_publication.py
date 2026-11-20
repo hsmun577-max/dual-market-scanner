@@ -1,8 +1,11 @@
 """Publication metadata, never first-seen time presented as publication."""
-from datetime import datetime,timedelta,timezone
+from datetime import datetime,timedelta
 from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
-import json,re
+import re
+
+# A body shorter than this cannot support a verified-publication claim.
+MIN_VERIFIED_BODY_CHARS=400
 
 class PublicationParser(HTMLParser):
     def __init__(self):

@@ -4,7 +4,7 @@ from collections import Counter
 import math
 from candidate_selection import liquidity_rejection_reason,candidate_rejection_reason
 from advance_policy import advance_context,eligible_for_advance_research
-from company_forecast import MIN_BASE_REWARD_PCT
+from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
 from exit_policy import DEFAULT_EXIT_POLICY,policy_snapshot
 
 def evaluate_preopen(report, previous_session, at=None):
@@ -53,7 +53,7 @@ def evaluate_preopen(report, previous_session, at=None):
         elif not catalyst and (values.get('overheated') or values.get('return_5d',0)>.12 or price/values['ma20']>1.08):
             status='extended_price'
         elif trend_reason and not event_support: status=trend_reason
-        elif forecast['composite_score']<60: status='composite_score_below_policy'
+        elif forecast['composite_score']<MIN_COMPOSITE_SCORE: status='composite_score_below_policy'
         elif catalyst:
             tick=company.get('price_tick',.01 if row['market']=='US' else None)
             upper=forecast.get('bull_price')
@@ -97,7 +97,7 @@ def evaluate_preopen(report, previous_session, at=None):
         previous_session=previous_session,generated_at=at.isoformat(),evaluated=evaluated,
         counts=dict(counts),missing_dimensions=dict(missing),recommendations=recommendations,
         advance_candidates=advance,
-        policy=dict(min_composite=60,min_base_reward_pct=MIN_BASE_REWARD_PCT,stop_pct=2,take_profit_pct=6,
+        policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,stop_pct=2,take_profit_pct=6,
                     take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot()),
         live_execution_confirmed=False)
     return report['buy_evaluation']
