@@ -4,6 +4,7 @@ from collections import Counter
 import math
 from candidate_selection import liquidity_rejection_reason,candidate_rejection_reason
 from advance_policy import advance_context,eligible_for_advance_research
+from company_forecast import MIN_BASE_REWARD_PCT
 from exit_policy import DEFAULT_EXIT_POLICY,policy_snapshot
 
 def evaluate_preopen(report, previous_session, at=None):
@@ -70,7 +71,7 @@ def evaluate_preopen(report, previous_session, at=None):
                     status='conditional_buy'
                     entry_floor=max(tick,round(math.floor(price*(1-.5*values['atr14_pct']/100)/tick)*tick,2))
                     strategy='event_catalyst'
-        elif not math.isfinite(forecast.get('base_price',float('nan'))) or forecast['base_price']/price-1<.033:
+        elif not math.isfinite(forecast.get('base_price',float('nan'))) or forecast['base_price']/price-1<MIN_BASE_REWARD_PCT/100:
             status='insufficient_expected_reward'
         else:
             status='conditional_buy'
@@ -96,7 +97,7 @@ def evaluate_preopen(report, previous_session, at=None):
         previous_session=previous_session,generated_at=at.isoformat(),evaluated=evaluated,
         counts=dict(counts),missing_dimensions=dict(missing),recommendations=recommendations,
         advance_candidates=advance,
-        policy=dict(min_composite=60,min_base_reward_pct=3.3,stop_pct=2,take_profit_pct=6,
+        policy=dict(min_composite=60,min_base_reward_pct=MIN_BASE_REWARD_PCT,stop_pct=2,take_profit_pct=6,
                     take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot()),
         live_execution_confirmed=False)
     return report['buy_evaluation']

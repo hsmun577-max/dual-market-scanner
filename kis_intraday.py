@@ -19,7 +19,7 @@ from websockets.exceptions import WebSocketException
 
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
 from signal_context import context_status
-from company_forecast import build_company_forecast
+from company_forecast import MIN_BASE_REWARD_PCT, build_company_forecast
 from delivery_policy import delivery_status
 from event_impact_analysis import article_text, world_events, analyze_events, company_news_events
 from candidate_selection import instrument_rejection_reason, rank_market_candidates, rank_recovery_candidates
@@ -37,7 +37,19 @@ BAR_SECONDS = 300
 MAX_QUOTE_AGE = 10
 MAX_SPREAD_PCT = 0.5
 MIN_VOLUME_RATIO = 1.5
+# Korean and US openings front-load volume. Measured on eight KRX large caps
+# (2026-10~11, five-minute bars) the third opening bar traded at a median 0.50 of the
+# first two bars' average, so a rule that asks the third bar to beat that average by
+# 1.5x was satisfied on 0.8% of sessions. The signal bar is therefore judged against
+# what the symbol usually trades in that same slot; when that history is too thin the
+# measured opening share below is the reference instead.
+OPENING_VOLUME_REFERENCE_SHARE = 0.5
+VOLUME_BASELINE_SESSIONS = 5
+MIN_VOLUME_BASELINE_SESSIONS = 3
 MAX_BREAKOUT_EXTENSION = 0.005
+# A local index bar up to this many calendar days behind the previous session is still
+# the latest completed observation (weekends and a late ^KS11/^KQ11 publication).
+MARKET_INDEX_MAX_LAG_DAYS = 5
 
 
 def collection_open(scheduled, ready_at):
@@ -59,9 +71,9 @@ def wait_for_connection_window(opens):
         raise RuntimeError("시세 수집 시작 시각을 지나 첫 봉을 확보할 수 없습니다")
 
 
-def breakout_v2(bars, quote, close_time):
+def breakout_v2(bars, quote, close_time, volume_baseline=None):
     """Volume confirmation and a capped entry above the broken resistance."""
-    metrics = candidate_metrics(bars, quote, close_time)
+    metrics = candidate_metrics(bars, quote, close_time, volume_baseline)
     if metrics is None or metrics[0] < 2.0:
         return None
     resistance = max(bars[0]["high"], bars[1]["high"])
@@ -135,8 +147,70 @@ def prior_resistance(symbols, previous_session, overseas):
         return {}
 
 
+def volume_history(symbols, overseas):
+    """Five-minute bars of the watched symbols, fetched before the collection window."""
+    if not symbols:
+        return None
+    tickers = [symbol[4:] for symbol in symbols] if overseas else [
+        symbol + (".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS") for symbol in symbols
+    ]
+    try:
+        return yf.download(tickers, period="1mo", interval="5m", prepost=overseas,
+                           auto_adjust=False, group_by="ticker", multi_level_index=True,
+                           progress=False, threads=4, timeout=8)
+    except (KeyError, ValueError, OSError) as exc:
+        print(f"Same-slot volume history unavailable ({type(exc).__name__})")
+        return None
+
+
+def volume_baselines(prices, symbols, overseas, opens, sessions=VOLUME_BASELINE_SESSIONS):
+    """Average volume the symbol traded in the signal's clock slot on prior sessions.
+
+    Opening bars cannot be compared with each other at a Korean open, so the third bar
+    is compared with its own history at the same time of day. A symbol (or a session
+    timing, such as the NXT premarket) without enough history is left out, and the
+    caller then uses the measured opening-share reference instead.
+    """
+    if prices is None or not symbols or opens.tzinfo is None:
+        return {}
+    tickers = [symbol[4:] for symbol in symbols] if overseas else [
+        symbol + (".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS") for symbol in symbols
+    ]
+    slot = opens + timedelta(minutes=2 * 5)
+    baselines = {}
+    for symbol, ticker in zip(symbols, tickers):
+        try:
+            if ticker not in prices.columns.get_level_values(0):
+                continue
+            volumes = prices[ticker]["Volume"].dropna()
+            if volumes.index.tz is None:
+                continue
+            volumes.index = volumes.index.tz_convert(opens.tzinfo)
+        except (KeyError, TypeError, ValueError):
+            continue
+        samples = []
+        for day, group in volumes.groupby(volumes.index.date):
+            if day >= opens.date():
+                continue
+            match = group[(group.index.hour == slot.hour) & (group.index.minute == slot.minute)]
+            if len(match) and float(match.iloc[0]) > 0:
+                samples.append(float(match.iloc[0]))
+        samples = samples[-sessions:]
+        if len(samples) >= MIN_VOLUME_BASELINE_SESSIONS:
+            baselines[symbol] = sum(samples) / len(samples)
+    print(f"Same-slot volume baseline: {len(baselines)}/{len(symbols)} symbols")
+    return baselines
+
+
 def market_evidence(market, previous_session, available_at):
-    """Require broad local confirmation and record global market conditions."""
+    """Require broad local confirmation and record global market conditions.
+
+    A local index bar is often one session behind the previous close at the hour of
+    the run (^KS11/^KQ11 publish late). Judging only an exact previous-session match
+    abandoned the whole market verdict and demoted every intraday run to
+    observation-only, so the most recent completed bar is used when it is no older
+    than MARKET_INDEX_MAX_LAG_DAYS.
+    """
     local = MARKET_INDICES["US" if market.startswith("US-") else "KR"]
     tickers = (*MARKET_INDICES["KR"], *MARKET_INDICES["US"], *GLOBAL_MARKET_TICKERS)
     try:
@@ -144,6 +218,7 @@ def market_evidence(market, previous_session, available_at):
                            group_by="ticker", threads=4, progress=False, timeout=8)
         supportive = []
         snapshot = {}
+        lagged = {}
         for ticker in tickers:
             if ticker not in data.columns.get_level_values(0):
                 continue
@@ -154,12 +229,21 @@ def market_evidence(market, previous_session, available_at):
             day = closes.index[-1].date()
             snapshot[ticker] = {"date": day.isoformat(), "close": float(closes.iloc[-1]),
                                 "change_pct": float((closes.iloc[-1] / closes.iloc[-2] - 1) * 100)}
-            if ticker in local and day == previous_session and len(closes) >= 20:
-                supportive.append(bool(closes.iloc[-1] > closes.iloc[-20:].mean()))
+            if ticker not in local or len(closes) < 20:
+                continue
+            lag = (previous_session - day).days
+            if not 0 <= lag <= MARKET_INDEX_MAX_LAG_DAYS:
+                continue
+            if lag:
+                lagged[ticker] = lag
+            supportive.append(bool(closes.iloc[-1] > closes.iloc[-20:].mean()))
     except Exception as exc:
         print(f"{market} market context unavailable ({type(exc).__name__})")
         return []
     print(f"{market} market snapshot {json.dumps(snapshot)}")
+    if lagged:
+        detail = ", ".join(f"{key} {value}일" for key, value in lagged.items())
+        print(f"{market} market context used the last completed local index bar ({detail})")
     if len(supportive) != len(local):
         print(f"{market} market context unavailable: incomplete local index coverage")
         return []
@@ -1097,7 +1181,16 @@ def update_bar(bars, slot, event_time, price, size):
         bar["close"], bar["last"] = price, event_time
 
 
-def evaluate_breakout(bars, quote, close_time):
+def volume_reference(bars, volume_baseline=None):
+    """Reference volume for the third bar and the basis it came from."""
+    average = (bars[0]["volume"] + bars[1]["volume"]) / 2
+    if isinstance(volume_baseline, (int, float)) and not isinstance(volume_baseline, bool) \
+            and math.isfinite(volume_baseline) and volume_baseline > 0:
+        return float(volume_baseline), "same_slot_prior_sessions"
+    return average * OPENING_VOLUME_REFERENCE_SHARE, "opening_share_fallback"
+
+
+def evaluate_breakout(bars, quote, close_time, volume_baseline=None):
     if set(bars) != {0, 1, 2}:
         return "missing_bars", None
     if quote is None:
@@ -1107,19 +1200,19 @@ def evaluate_breakout(bars, quote, close_time):
         return "stale_quote", None
     if quote["spread_pct"] > MAX_SPREAD_PCT:
         return "wide_spread", None
-    volume = (bars[0]["volume"] + bars[1]["volume"]) / 2
-    if volume <= 0 or bars[2]["volume"] / volume < MIN_VOLUME_RATIO:
+    reference, _basis = volume_reference(bars, volume_baseline)
+    if reference <= 0 or bars[2]["volume"] / reference < MIN_VOLUME_RATIO:
         return "low_volume", None
     if bars[2]["close"] <= max(bars[0]["high"], bars[1]["high"]):
         return "no_price_breakout", None
-    return "base_breakout", (bars[2]["volume"] / volume, quote["spread_pct"], bars[2]["close"])
+    return "base_breakout", (bars[2]["volume"] / reference, quote["spread_pct"], bars[2]["close"])
 
 
-def candidate_metrics(bars, quote, close_time):
-    return evaluate_breakout(bars, quote, close_time)[1]
+def candidate_metrics(bars, quote, close_time, volume_baseline=None):
+    return evaluate_breakout(bars, quote, close_time, volume_baseline)[1]
 
 
-def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False, prior_highs=(), company=None, sectors=()):
+def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False, prior_highs=(), company=None, sectors=(), volume_baseline=None):
     ticker = symbol[4:] if overseas else symbol
     name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (
         KR_SYMBOL_NAMES.get(symbol + ".KS") or KR_SYMBOL_NAMES.get(symbol + ".KQ") or symbol)
@@ -1128,13 +1221,13 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
         return reason, None
     if overseas and quote is not None and quote.get("ask", 0) < 5:
         return "low_price", None
-    status, metrics = evaluate_breakout(bars, quote, closes)
+    status, metrics = evaluate_breakout(bars, quote, closes, volume_baseline)
     if metrics is None:
         return status, None
     if observation_only or evidence is None:
         status = context_status(evidence or [], window, symbol, closes)
         return status if status != "supported" else "observation_only", (symbol, *metrics, None, None, None)
-    limit = breakout_v2(bars, quote, closes)
+    limit = breakout_v2(bars, quote, closes, volume_baseline)
     if limit is None:
         return "strict_breakout_failed", None
     status = context_status(evidence, window, symbol, closes)
@@ -1152,7 +1245,7 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
         return "composite_outlook_not_positive", None
     # Require the base scenario to cover 2% risk at 1.5:1, plus 0.3% friction.
     # This is a risk policy, not a historically optimized profitability claim.
-    if forecast["base_price"] / limit - 1 < 0.033:
+    if forecast["base_price"] / limit - 1 < MIN_BASE_REWARD_PCT / 100:
         return "insufficient_expected_reward", None
     stop = limit * 0.98
     if quote["bid"] <= stop:
@@ -1161,7 +1254,7 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     return "buy_signal", (symbol, *metrics, limit, stop, projection)
 
 
-async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False, resistance=None, refresh_context=None, companies=None, sector_snapshot=None, followup_minutes=30):
+async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False, resistance=None, refresh_context=None, companies=None, sector_snapshot=None, followup_minutes=30, volume_baseline=None):
     resistance = resistance or {}
     closes = opens + timedelta(minutes=15)
     feeds = FEEDS[market]
@@ -1215,6 +1308,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                         evidence, market == "US", observation_only, resistance.get(symbol, ()),
                         company=(companies or {}).get(symbol),
                         sectors=(sector_snapshot or {}).get("rows", []),
+                        volume_baseline=(volume_baseline or {}).get(symbol),
                     )
                     decisions[symbol] = status
                     composite_scores[symbol] = (companies or {}).get(symbol, {}).get("forecast", {}).get("composite_score")
@@ -1536,6 +1630,7 @@ def main():
 
         if symbols:
             resistance = prior_resistance(symbols, previous_session, overseas)
+            history = volume_history(symbols, overseas)
             def refresh_companies():
                 checked_at = datetime.now(local_zone)
                 sector_snapshot["rows"] = sector_flow_snapshot("US" if overseas else "KR", checked_at)
@@ -1548,7 +1643,7 @@ def main():
             opens = collection_open(scheduled_open, datetime.now(local_zone))
             if opens != scheduled_open:
                 print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=15):%H:%M}")
-            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds), resistance=resistance, refresh_context=refresh_companies, companies=companies, sector_snapshot=sector_snapshot))
+            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds), resistance=resistance, refresh_context=refresh_companies, companies=companies, sector_snapshot=sector_snapshot, volume_baseline=volume_baselines(history, symbols, overseas, opens)))
         else:
             print(f"{market} 감시 후보 없음")
             publish([])

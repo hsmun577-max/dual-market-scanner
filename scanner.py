@@ -693,19 +693,47 @@ def telegram_candidate_line(item):
             f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
             "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)")
 
+def benchmark_daily_closes(benchmark):
+    """Benchmark close series without an unfinished bar or a duplicated session.
+
+    The index is downloaded separately from the sector ETFs, so its last row is
+    sometimes the current day with no close yet (NaN). Left in place, that row
+    makes the excess return NaN, which drops the sector_pressure component and
+    therefore the whole composite score.
+    """
+    if benchmark is None:
+        raise ValueError("시장 기준 지표 없음")
+    if "Close" not in benchmark.columns:
+        raise ValueError("시장 기준 지표에 종가 열 없음")
+    columns = [name for name in ("Close", "Adj Close") if name in benchmark.columns]
+    closes = benchmark[columns].replace([np.inf, -np.inf], np.nan).dropna(subset=["Close"])
+    closes = closes.loc[~closes.index.duplicated(keep="last")].sort_index()
+    if len(closes) < 2:
+        raise ValueError("시장 기준 지표 종가 2개 미만")
+    return closes
+
+
 def sector_metrics(prices, benchmark):
     data = prices[["Close", "Adj Close", "Volume"]].replace([np.inf, -np.inf], np.nan).dropna()
-    data = data.sort_index()
+    data = data.loc[~data.index.duplicated(keep="last")].sort_index()
     if len(data) < 21:
         raise ValueError("섹터 일봉 21개 미만")
+    # Compare only sessions both series hold. When the index still lags the sector
+    # ETF by a session (premarket runs), the excess return is computed on the last
+    # shared session instead of being dropped altogether.
+    benchmark = benchmark_daily_closes(benchmark)
+    common = data.index.intersection(benchmark.index)
+    if len(common) < 21:
+        raise ValueError("섹터와 시장 기준 지표의 공통 거래일 21개 미만")
+    lag = int(len(data.index) - len(common))
+    data = data.loc[common]
+    benchmark = benchmark.loc[common]
 
     turnover = data["Close"] * data["Volume"]
     average_turnover = float(turnover.iloc[-21:-1].mean())
     if average_turnover <= 0:
         raise ValueError("유효한 거래대금 기준 없음")
-    dates = data.index[-2:]
-    if benchmark is None or len(benchmark) < 2 or not dates.equals(benchmark.index[-2:]):
-        raise ValueError("섹터와 시장 기준 지표의 최근 거래일 불일치")
+    dates = common[-2:]
 
     change = float(data["Adj Close"].iloc[-1] / data["Adj Close"].iloc[-2] - 1)
     market_change = float(benchmark["Close"].iloc[-1] / benchmark["Close"].iloc[-2] - 1)
@@ -716,6 +744,7 @@ def sector_metrics(prices, benchmark):
     early = change > 0 and relative > 0 and ratio >= 1.3
     return {
         "data_date": dates[-1].date().isoformat(),
+        "benchmark_lag_sessions": lag,
         "return_pct": safe_float(change * 100),
         "market_excess_pct": safe_float(relative * 100),
         "estimated_turnover": safe_float(turnover.iloc[-1]),

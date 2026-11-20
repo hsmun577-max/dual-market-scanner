@@ -2,6 +2,7 @@
 from datetime import datetime,timedelta
 import math
 from decimal import Decimal,ROUND_CEILING
+from company_forecast import MIN_BASE_REWARD_PCT
 from exit_policy import DEFAULT_EXIT_POLICY
 
 def krx_tick(price):
@@ -60,7 +61,7 @@ def validate_entry(row,quote,at,session_open):
         if forecast.get('catalyst_context',{}).get('eligible') is not True:return reject('catalyst_not_verified')
         if floor is None:return reject('entry_band_missing')
         if bull/ask-1<.06:return reject('insufficient_catalyst_upside_room')
-    elif base/ask-1<.033:return reject('insufficient_expected_reward')
+    elif base/ask-1<MIN_BASE_REWARD_PCT/100:return reject('insufficient_expected_reward')
     return dict(result,trade_ready=True,reason='entry_conditions_met',score=score,
         reference_price=plan.get('reference_price'),reference_date=plan.get('reference_date'),
         indicative_entry=ask,entry_limit=limit,entry_floor=floor,bid=bid,
