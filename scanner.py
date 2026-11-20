@@ -910,7 +910,7 @@ def main():
         "attempted": attempted,
         "successful": len(all_results),
         "failed": len(all_errors),
-        "status": "partial" if all_errors or benchmark_errors else "complete",
+        "status": "partial" if all_errors or benchmark_errors or sector_errors else "complete",
         "error_summary": summarize_scan_errors(all_errors),
         "benchmark_errors": benchmark_errors,
         "sectors": sectors,
