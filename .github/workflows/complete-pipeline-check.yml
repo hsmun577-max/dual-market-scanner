@@ -2,8 +2,12 @@ name: Complete pipeline verification
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
-      - '.github/workflows/complete-pipeline-check.yml'
+      - '**/*.py'
+      - 'tests/**'
+      - 'requirements.txt'
+      - '.github/workflows/**'
   workflow_run:
     workflows: ['Full market issuer profile index']
     types: [completed]
@@ -20,18 +24,15 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - name: Verify every changed analysis and discovery path
+      - name: Compile repository Python
+        run: python -m compileall -q .
+      - name: Run every offline regression test
         run: |
-          python -m compileall -q scanner.py kis_intraday.py economic_graph.py event_impact_analysis.py profile_universe.py
-          PYTHONPATH=. python tests/test_economic_graph.py
-          PYTHONPATH=. python tests/test_event_impact_analysis.py
-          PYTHONPATH=. python tests/test_composite_signal.py
-          PYTHONPATH=. python tests/test_daily_delivery_update.py
-          PYTHONPATH=. python tests/test_sector_update.py
-          PYTHONPATH=. python tests/test_selection_update.py
-          PYTHONPATH=. python tests/test_profile_universe.py
-          PYTHONPATH=. python tests/test_event_watch.py
+          for test_file in tests/test_*.py; do
+            PYTHONPATH=. python "$test_file"
+          done
       - name: Verify live provider coverage without sending
+        if: github.event_name != 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
