@@ -8,6 +8,9 @@ on:
       - 'valuation_data.py'
       - 'company_forecast.py'
       - 'industry_flow.py'
+      - 'issuer_news.py'
+      - 'tests/test_public_article_limits.py'
+      - 'tests/test_kis_session_cache.py'
       - 'scanner.py'
       - 'event_impact_analysis.py'
       - 'research_asset.py'
@@ -31,4 +34,4 @@ jobs:
       - name: Preserve trade contracts and approved catalyst policy
         env:
           PYTHONPATH: tests
-        run: python -m unittest test_tradable_signal test_execution_quotes test_peer_expansion test_evidence_repair test_optional_news test_event_impact_analysis test_composite_signal test_daily_delivery_update test_sector_leadership test_sector_update test_catalyst_policy test_preopen_signals -q
+        run: python -m unittest test_tradable_signal test_execution_quotes test_peer_expansion test_evidence_repair test_optional_news test_event_impact_analysis test_composite_signal test_daily_delivery_update test_sector_leadership test_sector_update test_catalyst_policy test_preopen_signals test_kis_session_cache test_public_article_limits test_news_body_pipeline -q

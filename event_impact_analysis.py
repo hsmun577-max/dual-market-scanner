@@ -6,6 +6,8 @@ from xml.etree import ElementTree
 import math
 import re
 import requests
+import json
+import time
 from economic_graph import frames as event_frames, connect as connect_business
 
 ALLOWED = ('federalreserve.gov', 'ecb.europa.eu', 'sec.gov', 'reuters.com',
@@ -117,7 +119,7 @@ class ArticleBody(HTMLParser):
     def handle_starttag(self,tag,attrs):
         attrs=dict(attrs);label=attrs.get('id','')+' '+attrs.get('class','')
         capture=(self.stack[-1][1] if self.stack else False) or tag=='article' or bool(re.search(
-            r'(?i)(?:^|[\s_-])(?:view_cont|view_con|view-content|article_body|articleBody|dic_area|newsct_article|article-view-content-div)(?:$|\s)',label))
+            r'(?i)(?:^|[\s_-])(?:view_cont|view_con|view-content|article_body|articleBody|caas-body|dic_area|newsct_article|article-view-content-div)(?:$|\s)',label))
         skip=(self.stack[-1][2] if self.stack else False) or tag in ('script','style','nav','header','footer')
         if tag=='br' and capture and not skip:self.parts.append('\n')
         if tag not in ('br','img','hr','meta','link','input','source','wbr','area','base','embed','param','track'):
@@ -133,6 +135,47 @@ class ArticleBody(HTMLParser):
 
 _BODY_CACHE={}
 _ARTICLE_METADATA={}
+
+
+class ArticleMetadata(HTMLParser):
+    def __init__(self):
+        super().__init__();self.capture=False;self.parts=[];self.documents=[]
+    def handle_starttag(self,tag,attrs):
+        if tag=='script' and dict(attrs).get('type','').lower()=='application/ld+json':
+            self.capture=True;self.parts=[]
+    def handle_data(self,data):
+        if self.capture:self.parts.append(data)
+    def handle_endtag(self,tag):
+        if tag=='script' and self.capture:
+            try:self.documents.append(json.loads(''.join(self.parts)))
+            except (ValueError,TypeError):pass
+            self.capture=False
+
+
+def public_structured_body(document,url):
+    """Use publisher-provided public article text; explicitly reject premium metadata."""
+    parser=ArticleMetadata();parser.feed(document);articles=[]
+    def visit(node):
+        if isinstance(node,list):
+            for item in node:visit(item)
+        elif isinstance(node,dict):
+            types=node.get('@type',[]);types=[types] if isinstance(types,str) else types
+            if any(t in {'NewsArticle','Article','ReportageNewsArticle'} for t in types):articles.append(node)
+            if '@graph' in node:visit(node['@graph'])
+    for data in parser.documents:visit(data)
+    matches=[]
+    for article in articles:
+        target=article.get('url') or article.get('mainEntityOfPage') or ''
+        if isinstance(target,dict):target=target.get('@id','')
+        if target and urlparse(str(target)).path.rstrip('/')==urlparse(url).path.rstrip('/'):matches.append(article)
+    chosen=matches[0] if len(matches)==1 else articles[0] if len(articles)==1 else None
+    if chosen is None:return None,None
+    parts=chosen.get('hasPart') or [];parts=[parts] if isinstance(parts,dict) else parts
+    if str(chosen.get('isAccessibleForFree','')).lower()=='false' or any(
+            isinstance(part,dict) and str(part.get('isAccessibleForFree','')).lower()=='false' for part in parts):
+        return '', 'access_restricted'
+    body=chosen.get('articleBody')
+    return (body,'public_body') if isinstance(body,str) and len(body)>=400 else (None,None)
 
 
 def article_text(url, redirects=0):
@@ -163,19 +206,26 @@ def _read_article_text(url, redirects=0):
                 if destination!=url and allowed_url(destination):return article_text(destination,redirects+1)
             if response.status_code != 200: return '', 'redirect_or_unavailable'
             if 'html' not in response.headers.get('Content-Type','').lower(): return '', 'not_html'
-            body=bytearray()
+            body=bytearray();started=time.monotonic()
+            host=urlparse(url).hostname or ''
+            maximum=8_000_000 if host=='finance.yahoo.com' or host.endswith('.finance.yahoo.com') else 600000
             for chunk in response.iter_content(16384):
                 body.extend(chunk)
-                if len(body)>600000: return '', 'body_too_large'
+                if len(body)>maximum: return '', 'body_too_large'
+                if time.monotonic()-started>8:return '', 'download_time_exceeded'
             encoding=response.encoding
             if not encoding or encoding.lower()=='iso-8859-1':encoding='utf-8'
             document=bytes(body).decode(encoding,errors='replace')
             from event_publication import publication_metadata
             _ARTICLE_METADATA[url]=publication_metadata(document,url,datetime.now(timezone.utc))
-            parser=ArticleBody();parser.feed(document)
-            if len(''.join(parser.parts))<400:
-                parser=Paragraphs();parser.feed(document)
-            text=re.sub(r'[ \t]+',' ',''.join(parser.parts)).strip()
+            structured,status=public_structured_body(document,url)
+            if status=='access_restricted':return '',status
+            if structured is None:
+                parser=ArticleBody();parser.feed(document)
+                if len(''.join(parser.parts))<400:
+                    parser=Paragraphs();parser.feed(document)
+                structured=''.join(parser.parts)
+            text=re.sub(r'[ \t]+',' ',structured).strip()
             if len(text)<400: return '', 'body_insufficient'
             if any(marker in text[:1200].lower() for marker in ('verify you are human','access denied','subscribe to continue')):
                 return '', 'access_restricted'
@@ -258,9 +308,18 @@ def issuer_name_in_text(text, alias):
     return bool(re.search(r'(?<![a-z0-9])'+re.escape(alias)+r'(?![a-z0-9])',text,re.I))
 
 
+def issuer_title_subject(title):
+    """A hosting-platform attribution is not a mention of that platform's issuer."""
+    text=str(title or '')
+    for _ in range(2):
+        text=re.sub(r'\s*[-:|]\s*(?:네이버\s*블로그|naver\s*blog|네이버\s*프리미엄콘텐츠|네이버\s*포스트)\s*$',
+            '',text,flags=re.I)
+    return text
+
+
 def direct_company_event(event, company):
     # The ticker's news feed can contain market-wide and unrelated articles.
-    text=(event.get('headline','')+' '+event.get('body','')).lower()
+    text=(issuer_title_subject(event.get('headline',''))+' '+event.get('body','')).lower()
     aliases=company.get('entity_aliases',[])
     name=company.get('company_name','')
     simplified=re.sub(r',?\s+(?:Holdings|Corporation|Corp\.?|Inc\.?|Limited|Ltd\.?).*$', '',name,flags=re.I).strip()

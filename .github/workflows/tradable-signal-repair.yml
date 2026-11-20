@@ -23,25 +23,8 @@ jobs:
       - name: Verify tradability, evidence, risk and message contracts
         env:
           PYTHONPATH: tests
-        run: python -m unittest test_tradable_signal test_execution_quotes test_peer_expansion test_evidence_repair test_optional_news test_event_impact_analysis test_composite_signal test_daily_delivery_update test_sector_leadership test_sector_update test_catalyst_policy test_preopen_signals -v
-      - name: Verify the actual read-only execution provider
-        env:
-          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
-          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
-        run: |
-          python - <<'PY'
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-          import json
-          from execution_quotes import execution_quote
-          now=datetime.now(ZoneInfo('Asia/Seoul'))
-          try:
-              quote=execution_quote('005930.KS',now)
-              print('EXECUTION_PROVIDER_HEALTH='+json.dumps(dict(status='verified',quote=quote,trade_order_sent=False),ensure_ascii=False),flush=True)
-          except Exception as exc:
-              print('EXECUTION_PROVIDER_HEALTH='+json.dumps(dict(status='unavailable',error=type(exc).__name__,trade_order_sent=False)),flush=True)
-          PY
-      - name: Reanalyse current equities and send only truthfully labelled results
+        run: python -m unittest test_tradable_signal test_execution_quotes test_peer_expansion test_evidence_repair test_optional_news test_event_impact_analysis test_composite_signal test_daily_delivery_update test_sector_leadership test_sector_update test_catalyst_policy test_preopen_signals test_kis_session_cache test_public_article_limits test_news_body_pipeline -v
+      - name: Reuse authentication, verify quotes and reanalyse today's equities
         env:
           GH_TOKEN: ${{ github.token }}
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
@@ -49,7 +32,22 @@ jobs:
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -u requested_buy_report.py --session 2026-11-20
+        run: |
+          python -u - <<'PY'
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import json,sys
+          from execution_quotes import execution_quote
+          try:
+              quote=execution_quote('005930.KS',datetime.now(ZoneInfo('Asia/Seoul')))
+              print('EXECUTION_PROVIDER_HEALTH='+json.dumps(dict(status='verified',quote=quote,trade_order_sent=False),ensure_ascii=False),flush=True)
+          except Exception as exc:
+              print('EXECUTION_PROVIDER_HEALTH='+json.dumps(dict(status='unavailable',error=type(exc).__name__,trade_order_sent=False)),flush=True)
+          # Same process and private job cache reuse the authenticated KIS session.
+          import requested_buy_report
+          sys.argv=['requested_buy_report.py','--session','2026-11-20']
+          requested_buy_report.main()
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:

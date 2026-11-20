@@ -203,7 +203,7 @@ def korean_company_news(symbol, now):
     if not name or name == symbol:
         return []
     from issuer_news import issuer_news
-    from event_impact_analysis import issuer_name_in_text
+    from event_impact_analysis import issuer_name_in_text,issuer_title_subject
     direct = issuer_news(symbol,name,now)
     if direct: return direct
     response = requests.get("https://news.google.com/rss/search", params={
@@ -218,7 +218,7 @@ def korean_company_news(symbol, now):
             published = parsedate_to_datetime(item.findtext("pubDate", ""))
         except (ValueError, TypeError):
             continue
-        if not issuer_name_in_text(title,name) or published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
+        if not issuer_name_in_text(issuer_title_subject(title),name) or published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
             continue
         if not re.search(r"실적|수주|공시|매출|영업|공급|계약|배당|증자|자사주|인수|합병|파산|회생|거래정지|상장폐지|규제|제재|관세|수출|가이던스|공연|문화교류|한한령|contract|earnings", title, re.IGNORECASE):
             continue

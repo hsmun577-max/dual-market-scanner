@@ -3,7 +3,7 @@ from datetime import datetime,timedelta
 from zoneinfo import ZoneInfo
 import re
 import requests
-from event_impact_analysis import issuer_name_in_text,HEADERS
+from event_impact_analysis import issuer_name_in_text,issuer_title_subject,HEADERS
 
 def _items(document):
     if isinstance(document,list):
@@ -20,7 +20,7 @@ def parse_issuer_news(document,name,now):
     if shortened!=name:aliases.append(shortened)
     for row in _items(document):
         title=str(row.get('title') or '').strip()
-        if not any(issuer_name_in_text(title,alias) for alias in aliases):continue
+        if not any(issuer_name_in_text(issuer_title_subject(title),alias) for alias in aliases):continue
         raw=str(row.get('datetime') or row.get('publishDateTime') or row.get('publishedAt') or '')
         try:
             if re.fullmatch(r'\d{14}',raw):published=datetime.strptime(raw,'%Y%m%d%H%M%S').replace(tzinfo=ZoneInfo('Asia/Seoul'))

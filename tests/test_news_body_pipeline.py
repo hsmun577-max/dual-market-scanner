@@ -1,11 +1,15 @@
 import unittest
 from datetime import datetime,timezone
 from unittest.mock import Mock,patch
-from event_impact_analysis import ArticleBody,article_text,canonical_article_url,issuer_name_in_text,_BODY_CACHE
+from event_impact_analysis import ArticleBody,article_text,canonical_article_url,issuer_name_in_text,issuer_title_subject,_BODY_CACHE
 from issuer_news import parse_issuer_news
 AT=datetime(2026,11,19,10,tzinfo=timezone.utc)
 
 class NewsBodyTests(unittest.TestCase):
+    def test_platform_attribution_is_not_naver_company_news(self):
+        title='엔비디아 3분기 매출 증가 : 네이버 블로그 - Naver Blog'
+        self.assertFalse(issuer_name_in_text(issuer_title_subject(title),'네이버'))
+        self.assertTrue(issuer_name_in_text(issuer_title_subject('네이버, 블로그 사업 매출 증가 - Naver Blog'),'네이버'))
     def test_three_syllable_company_not_another_company_or_unrelated_suffix(self):
         for title in ('디에스엠 실적','에스엠랩 매출 감소','갤럭시아에스엠 영업손실'):
             self.assertFalse(issuer_name_in_text(title,'에스엠'))

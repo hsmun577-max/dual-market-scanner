@@ -7,6 +7,9 @@ import math
 import os
 import time
 import requests
+import json
+import hashlib
+from pathlib import Path
 
 BASE='https://openapi.koreainvestment.com:9443'
 
@@ -38,12 +41,30 @@ class Client:
         cached=self._sessions.get((key,secret))
         if cached and cached[0]>time.monotonic():
             self.headers=dict(cached[1]); return
+        # GitHub steps run in separate Python processes. Keep this short-lived
+        # cache only in the job's private temporary directory, never in artifacts.
+        cache_file=None
+        if os.getenv('RUNNER_TEMP'):
+            digest=hashlib.sha256((key+':'+secret).encode()).hexdigest()
+            cache_file=Path(os.environ['RUNNER_TEMP'])/('dual-kis-session-'+digest+'.json')
+            try:
+                entry=json.loads(cache_file.read_text(encoding='utf-8'))
+                token=entry.get('access_token');expires=float(entry.get('expires_at',0))
+                if isinstance(token,str) and len(token)>10 and expires>time.time()+5:
+                    self.headers=dict(authorization='Bearer '+token,appkey=key,appsecret=secret,custtype='P')
+                    self._sessions[(key,secret)]=(time.monotonic()+min(1800,expires-time.time()),dict(self.headers));return
+            except (OSError,ValueError,TypeError):pass
         response=requests.post(BASE+'/oauth2/tokenP',json=dict(grant_type='client_credentials',appkey=key,appsecret=secret),timeout=8)
         if response.status_code!=200: raise RuntimeError('KIS authorization unavailable')
-        token=response.json().get('access_token')
+        body=response.json();token=body.get('access_token')
         if not token: raise RuntimeError('KIS authorization response missing token')
         self.headers=dict(authorization='Bearer '+token,appkey=key,appsecret=secret,custtype='P')
         self._sessions[(key,secret)]=(time.monotonic()+1800,dict(self.headers))
+        if cache_file is not None:
+            try:
+                cache_file.write_text(json.dumps(dict(access_token=token,expires_at=time.time()+1800)),encoding='utf-8')
+                cache_file.chmod(0o600)
+            except OSError:pass
     def get(self,path,tr_id,params):
         time.sleep(.15)
         r=requests.get(BASE+path,headers=dict(self.headers,tr_id=tr_id),params=params,timeout=5)

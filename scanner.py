@@ -604,6 +604,7 @@ def prepare_selected_analysis(report):
                 [row for row in risks if row.get("symbol") == symbol], report.get("sectors", []))
             item["risk_headlines"] = list(dict.fromkeys(
                 row.get("headline", "") for row in risks if row.get("symbol") == symbol))[:2]
+            item['risk_evidence']=[row for row in risks if row.get('symbol')==symbol]
     report["company_analysis_at"] = checked.isoformat()
 
 
