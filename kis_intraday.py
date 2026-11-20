@@ -202,10 +202,10 @@ def korean_company_news(symbol, now):
     name = KR_SYMBOL_NAMES.get(symbol + ".KS") or KR_SYMBOL_NAMES.get(symbol + ".KQ")
     if not name or name == symbol:
         return []
-    from issuer_news import issuer_news
+    from issuer_news import issuer_news_result
     from event_impact_analysis import issuer_name_in_text,issuer_title_subject
-    direct = issuer_news(symbol,name,now)
-    if direct: return direct
+    direct = issuer_news_result(symbol,name,now)
+    if direct['status']=='checked':return direct['articles']
     response = requests.get("https://news.google.com/rss/search", params={
         "q": f'"{name}" (실적 OR 수주 OR 공시 OR 매출 OR 투자 OR 규제 OR 공연 OR 문화교류 OR 한한령) when:1d',
         "hl": "ko", "gl": "KR", "ceid": "KR:ko",
@@ -711,26 +711,12 @@ def company_context(market, symbols, now):
         ticker = yf.Ticker(symbol[4:] if overseas else symbol + suffix)
         snapshot, risks = {"filing_status": "unavailable" if overseas else (
             "missing_dart_key" if not dart_key else "issuer_mapping_unavailable")}, []
-        try:
-            articles = ticker.get_news(count=12)
-            snapshot["news"] = recent_company_news(articles, now)
-            snapshot["news_status"] = "ok" if snapshot["news"] else "no_recent_articles"
-            risks.extend(headline_risks(market, symbol, articles, now))
-        except Exception as exc:
-            print(f"{market} {symbol} news unavailable ({type(exc).__name__})")
-        if not overseas and not snapshot.get("news"):
-            try:
-                articles = korean_company_news(symbol, now)
-                snapshot["news"] = articles
-                risks.extend({**item, "kind": "event", "market": market, "symbol": symbol,
-                              "assessment": "risk"} for item in articles
-                             if RISK_HEADLINE.search(item["headline"]))
-                snapshot["news_status"] = "ok" if articles else "no_recent_articles"
-            except Exception as exc:
-                snapshot["news_status"] = "unavailable"
-                print(f"{market} {symbol} Korean news unavailable ({type(exc).__name__})")
-        else:
-            snapshot["news_status"] = "ok" if snapshot.get("news") else snapshot.get("news_status", "unavailable")
+        from news_provider import collect_news
+        snapshot.update(collect_news(ticker, now, recent_company_news,
+            None if overseas else lambda: korean_company_news(symbol, now)))
+        risks.extend({**item, "kind": "event", "market": market, "symbol": symbol,
+                      "assessment": "risk"} for item in snapshot["news"]
+                     if RISK_HEADLINE.search(item["headline"]))
         try:
             snapshot.update(company_financials(ticker.get_income_stmt(freq="quarterly"), now.date()))
         except Exception as exc:

@@ -67,7 +67,7 @@ def company_news_events(company, read_body=None):
         except (requests.RequestException,ValueError):
             body,status='','unavailable'
         result.append({**row,'body':body,'body_status':status,'publication_verified':True,
-            'availability_basis':'source_news_timestamp','event_id':row.get('url'),'scope':'company'})
+            'availability_basis':row.get('availability_basis','source_news_timestamp'),'event_id':row.get('url'),'scope':'company'})
     return result
 
 
