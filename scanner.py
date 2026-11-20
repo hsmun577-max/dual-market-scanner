@@ -228,23 +228,57 @@ def scan_batches(market, names, benchmark):
     results, errors = [], []
     for start in range(0, len(symbols), 100):
         batch = symbols[start:start + 100]
-        try:
-            prices = yf.download(
-                batch, period="1y", interval="1d", auto_adjust=True,
-                progress=False, threads=8, timeout=15, group_by="ticker",
-                multi_level_index=True,
-            )
-        except Exception as exc:
+        prices = None
+        last_error = None
+        for attempt in range(3):
+            try:
+                prices = yf.download(
+                    batch, period="1y", interval="1d", auto_adjust=True,
+                    progress=False, threads=8, timeout=20, group_by="ticker",
+                    multi_level_index=True,
+                )
+                if prices is None or prices.empty:
+                    raise ValueError("일괄 가격 데이터 없음")
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    delay = 2 ** attempt
+                    print(
+                        f"{market}: batch {start + 1}-{start + len(batch)} "
+                        f"retry {attempt + 1}/2 in {delay}s: {type(exc).__name__}"
+                    )
+                    time.sleep(delay)
+
+        if last_error is not None:
             errors.extend(
-                {"market": market, "symbol": symbol, "error": str(exc)}
+                {"market": market, "symbol": symbol,
+                 "error": f"batch download failed after 3 attempts: {type(last_error).__name__}: {last_error}"}
                 for symbol in batch
             )
             continue
+
         found, failed = scan_market(market, batch, benchmark, names=names, prices=prices)
         results.extend(found)
         errors.extend(failed)
         print(f"{market}: {len(results) + len(errors)}/{len(symbols)}")
     return results, errors
+
+
+def summarize_scan_errors(errors, limit=10):
+    counts = {}
+    for row in errors:
+        raw = str(row.get("error") or "unknown error").splitlines()[0].strip()
+        category = raw[:180] or "unknown error"
+        key = (row.get("market", "unknown"), category)
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        {"market": market, "reason": reason, "count": count}
+        for (market, reason), count in sorted(
+            counts.items(), key=lambda item: (-item[1], item[0][0], item[0][1])
+        )[:limit]
+    ]
 
 
 def calculate_obv(close, volume):
@@ -876,6 +910,8 @@ def main():
         "attempted": attempted,
         "successful": len(all_results),
         "failed": len(all_errors),
+        "status": "partial" if all_errors or benchmark_errors else "complete",
+        "error_summary": summarize_scan_errors(all_errors),
         "benchmark_errors": benchmark_errors,
         "sectors": sectors,
         "sector_errors": sector_errors,
@@ -899,7 +935,7 @@ def main():
             "시세 미지원 또는 이력 부족 종목은 오류로 기록",
             "섹터 거래대금은 대표 ETF 종가×거래량 추정치이며 투자자 순매수·ETF 순유입은 미수집",
             "일봉 기반이며 실시간 매수 확정 불가",
-            "당일 미완성 봉 포함 가능",
+            "완료된 거래일 일봉 기준이며 일중 VWAP·실시간 호가 미포함",
             "실시간 VWAP 미구현",
             "기사·공시 조회는 발송 후보에 한정하며 거시 이벤트의 기업 실적 영향 정량평가는 미구현",
             "발송 후보의 분기 손익·매출 증감은 조회하나 기업가치 전체 평가는 미구현",
@@ -929,11 +965,16 @@ def main():
             allow_nan=False
         )
 
+    status_label = "SCAN PARTIAL" if report["status"] == "partial" else "SCAN COMPLETE"
     print(
-        f"SCAN COMPLETE: "
+        f"{status_label}: "
         f"{len(all_results)} success, "
         f"{len(all_errors)} failed"
     )
+    if report["error_summary"]:
+        print("SCAN ERROR SUMMARY: " + json.dumps(
+            report["error_summary"], ensure_ascii=False
+        ))
 
     if not all_results:
         raise SystemExit(
