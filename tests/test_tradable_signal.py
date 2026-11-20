@@ -67,4 +67,11 @@ class TradableSignalTests(unittest.TestCase):
         self.assertEqual(signal['stop_price'],19560)
         self.assertEqual(signal['take_profit_price'],21150)
 
+    def test_execution_check_preserves_verified_catalyst_policy(self):
+        r,q=fixture();r['preopen_signal'].update(strategy='event_catalyst',entry_floor=9900)
+        r['company_forecast'].update(base_price=10100,bull_price=10700,catalyst_context=dict(eligible=True))
+        self.assertTrue(validate_entry(r,q,AT,True)['trade_ready'])
+        r['company_forecast']['catalyst_context']['eligible']=False
+        self.assertFalse(validate_entry(r,q,AT,True)['trade_ready'])
+
 if __name__=='__main__':unittest.main()

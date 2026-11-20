@@ -1,0 +1,25 @@
+name: Tradable signal contract checks
+on:
+  push:
+    paths:
+      - 'tradable_signal.py'
+      - 'execution_quotes.py'
+      - 'tests/test_tradable_signal.py'
+      - '.github/workflows/signal-contract-check.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt 'exchange-calendars>=4.8,<5'
+      - name: Preserve trade contracts and approved catalyst policy
+        env:
+          PYTHONPATH: tests
+        run: python -m unittest test_tradable_signal test_execution_quotes test_peer_expansion test_evidence_repair test_optional_news test_event_impact_analysis test_composite_signal test_daily_delivery_update test_sector_leadership test_sector_update test_catalyst_policy test_preopen_signals -q
