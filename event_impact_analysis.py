@@ -182,6 +182,10 @@ def public_structured_body(document,url):
 
 def article_text(url, redirects=0):
     result=_read_article_text(url,redirects)
+    # A bounded retry is for transient transport/server failures only. Never
+    # retry access restrictions or substitute a headline for an unread body.
+    if result[1] in {'transient_network_error','transient_http_500','transient_http_502','transient_http_503','transient_http_504'}:
+        result=_read_article_text(url,redirects)
     parsed=urlparse(url or '')
     if not result[0] and parsed.hostname=='www.korea.kr':
         alternate=urlunparse((parsed.scheme,'m.korea.kr',parsed.path,'',parsed.query,''))
@@ -202,6 +206,8 @@ def _read_article_text(url, redirects=0):
     try:
         response=requests.get(url,headers=HEADERS,timeout=10 if any(host in url for host in ('korea.kr/','mofa.go.kr/')) else 5,allow_redirects=False,stream=True)
         try:
+            if response.status_code in {500,502,503,504}:
+                return '',f'transient_http_{response.status_code}'
             response.raise_for_status()
             if response.status_code in (301,302,303,307,308) and redirects<2:
                 destination=urljoin(url,response.headers.get('Location',''))
@@ -236,6 +242,10 @@ def _read_article_text(url, redirects=0):
             return result
         finally:
             response.close()
+    except (requests.Timeout,requests.ConnectionError):return '', 'transient_network_error'
+    except requests.HTTPError as exc:
+        code=getattr(exc.response,'status_code',None)
+        return '',f'http_error_{code}' if code else 'download_failed'
     except (requests.RequestException,ValueError): return '', 'download_failed'
 
 

@@ -40,3 +40,5 @@ jobs:
                   body,status=article_text(url)
                   print('PUBLIC_PATH_CHECK='+json.dumps(dict(url=url,status=status,characters=len(body))),flush=True)
           PY
+
+# Bounded retry of transient transport/server failures; never retry access denial.

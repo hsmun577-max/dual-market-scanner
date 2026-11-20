@@ -14,6 +14,7 @@ on:
       - 'preopen_signals.py'
       - 'tests/test_news_provider.py'
       - 'tests/test_analysis_batch.py'
+      - 'tests/test_article_retry.py'
       - 'tests/test_public_article_limits.py'
       - 'tests/test_kis_session_cache.py'
       - 'scanner.py'
@@ -39,4 +40,4 @@ jobs:
       - name: Preserve trade contracts and approved catalyst policy
         env:
           PYTHONPATH: tests
-        run: python -m unittest test_tradable_signal test_execution_quotes test_peer_expansion test_evidence_repair test_optional_news test_event_impact_analysis test_composite_signal test_daily_delivery_update test_sector_leadership test_sector_update test_catalyst_policy test_preopen_signals test_kis_session_cache test_public_article_limits test_news_body_pipeline test_news_provider test_analysis_batch -q
+        run: python -m unittest test_tradable_signal test_execution_quotes test_peer_expansion test_evidence_repair test_optional_news test_event_impact_analysis test_composite_signal test_daily_delivery_update test_sector_leadership test_sector_update test_catalyst_policy test_preopen_signals test_kis_session_cache test_public_article_limits test_news_body_pipeline test_news_provider test_analysis_batch test_article_retry -q
