@@ -757,11 +757,17 @@ def send_telegram_summary(report):
     confirmed.sort(key=lambda item: -item['company_forecast']['composite_score'])
     # A preopen price plan is not an executable live entry confirmation.
     heading=('조건부 매수 계획' if any(row.get('preopen_signal',{}).get('status')=='conditional_buy' for row in confirmed)
-             else '사전 관찰 후보' if confirmed else '분석 결과' if report.get('buy_evaluation',{}).get('completed') is True
+             else '사전 관찰 후보' if confirmed else '분석 결과' if (report.get('buy_evaluation',{}).get('completed') is True
+                 or report.get('buy_evaluation',{}).get('decision_completed',0)>0)
              else '분석 상태')
     lines.extend(["", heading])
     if not confirmed:
-        if report.get('buy_evaluation',{}).get('completed') is True:
+        evaluation=report.get('buy_evaluation',{})
+        if evaluation.get('decision_completed',0)>0:
+            lines.append(f"판정 완료 {evaluation['decision_completed']}종목 · 현재 매수 조건 충족 없음")
+            if evaluation.get('data_excluded'):
+                lines.append(f"자료 부족 {evaluation['data_excluded']}종목은 매수 판정에서 제외")
+        elif evaluation.get('completed') is True:
             lines.append("매수 조건 충족 종목 없음")
         else:
             assessed=[row for row in report['results'] if row.get('company_forecast',{}).get('composite_score') is not None]

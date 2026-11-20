@@ -79,6 +79,16 @@ class DailyDeliveryTests(unittest.TestCase):
         self.assertEqual(row['company_analysis']['filing_status'],'missing_dart_key')
         self.assertNotIn('분석 완료',text)
 
+    def test_scheduled_report_separates_completed_decisions_from_missing_sources(self):
+        report=dict(results=[],sectors=[],buy_evaluation=dict(completed=False,decision_completed=18,data_excluded=26))
+        with patch.dict(os.environ,{'TELEGRAM_BOT_TOKEN':'fake','TELEGRAM_CHAT_ID':'fake'}), patch.object(scanner.requests,'post') as post, patch('scanner.delivery_status',return_value=(True,'test')):
+            post.return_value=Mock(status_code=200,json=lambda:{'ok':True})
+            scanner.send_telegram_summary(report)
+        message=post.call_args.kwargs['json']['text']
+        self.assertIn('판정 완료 18종목',message)
+        self.assertIn('자료 부족 26종목',message)
+        self.assertNotIn('매수 판정 보류',message)
+
 
 if __name__=='__main__':
     unittest.main()

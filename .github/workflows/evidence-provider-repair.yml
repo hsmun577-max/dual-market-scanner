@@ -33,4 +33,10 @@ jobs:
                   bodies=[dict(url=e['url'],headline=e['headline'],status=e['body_status'],characters=len(e['body']),
                       available_at=e['available_at'],availability_basis=e['availability_basis']) for e in events]),ensure_ascii=False),flush=True)
               if result['status']!='checked':raise RuntimeError('Native provider did not verify issuer feed')
+          from event_impact_analysis import article_text
+          for office,article in [('144','0001150813'),('023','0004010600')]:
+              for path in ['article','mnews/article']:
+                  url=f'https://n.news.naver.com/{path}/{office}/{article}'
+                  body,status=article_text(url)
+                  print('PUBLIC_PATH_CHECK='+json.dumps(dict(url=url,status=status,characters=len(body))),flush=True)
           PY

@@ -1351,11 +1351,17 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
     confirmed = [row for row in candidates if row[4] is not None
                  and companies.get(row[0], {}).get("forecast", {}).get("composite_score") is not None]
     timestamp = f"{closes:%m/%d %H:%M} ET" if overseas else f"{closes:%m/%d %H:%M} KST"
-    incomplete=any(c.get('forecast',{}).get('assessment_status')=='incomplete' for c in companies.values())
-    heading='매수 신호' if confirmed else '분석 상태' if incomplete else '분석 결과'
+    assessed=sum(c.get('forecast',{}).get('assessment_status')=='complete'
+                 and c.get('forecast',{}).get('composite_score') is not None for c in companies.values())
+    incomplete=len(companies)-assessed
+    heading='매수 신호' if confirmed else '분석 상태' if incomplete and not assessed else '분석 결과'
     lines = format_sector_header(sectors, "US" if overseas else "KR") + ["", f"{heading} · {timestamp}"]
     if not confirmed:
-        lines.append("매수 판정 보류 · 분석자료 미확인" if incomplete else "매수 조건 충족 종목 없음")
+        if assessed:
+            lines.append(f"판정 완료 {assessed}종목 · 현재 매수 조건 충족 없음")
+            if incomplete:lines.append(f"자료 부족 {incomplete}종목은 매수 판정에서 제외")
+        else:
+            lines.append("매수 판정 보류 · 분석자료 미확인" if incomplete else "매수 조건 충족 종목 없음")
     for symbol, ratio, spread, price, entry_limit, stop, projection in confirmed[:5]:
         ticker = symbol[4:] if overseas else symbol
         name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (
