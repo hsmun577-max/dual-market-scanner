@@ -14,13 +14,13 @@ class SectorAndRecoveryTests(unittest.TestCase):
                    return_pct=1.,market_excess_pct=.5)]
         text='\n'.join(format_sector_header(rows,'KR'))
         self.assertIn('반도체',text)
-        self.assertIn('상대 강세',text)
-        self.assertIn('실시간 아님',text)
+        self.assertIn('1위 반도체',text)
+        self.assertNotIn('실시간 아님',text)
         self.assertNotIn('없음',text)
 
     def test_missing_sector_data_is_never_no_money_flow(self):
         text='\n'.join(format_sector_header([],'KR'))
-        self.assertIn('데이터 확인 실패',text)
+        self.assertIn('확인 불가',text)
         self.assertNotIn('없음',text)
 
     def frames(self):
@@ -69,9 +69,10 @@ class SectorAndRecoveryTests(unittest.TestCase):
                    return_pct=1.,market_excess_pct=.5)]
         text=format_notification('KRX',[('005930',2.,.1,10000.,10020.,9819.6,(10500.,'과거 저항'))],
                                  datetime(2026,11,18,9,15,tzinfo=KST),sectors=rows)
-        self.assertTrue(text.startswith('섹터 매수세'))
-        self.assertLess(text.index('반도체'),text.index('매수 신호'))
-        self.assertIn('대표 ETF',text)
+        self.assertTrue(text.startswith('오늘의 주요 섹터'))
+        self.assertLess(text.index('반도체'),text.index('분석 결과'))
+        self.assertNotIn('대표 ETF',text)
+        self.assertNotIn('매수 신호',text)
 
     def test_recovery_does_not_require_already_positive_long_trend(self):
         item=dict(market='KR',symbol='TEST',name='일반기업',signal=dict(score=4),indicators=dict(

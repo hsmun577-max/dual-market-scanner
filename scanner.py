@@ -535,6 +535,29 @@ def prepare_selected_analysis(report):
     from kis_intraday import company_context, KR_SYMBOL_NAMES as context_kr_names, US_SYMBOL_NAMES as context_us_names
     from economic_graph import load_profiles, discover, select_analysis_candidates
     from event_impact_analysis import world_events
+    from research_asset import is_fund
+    funds=[row for row in report['results'] if is_fund(row)]
+    for row in funds:
+        row['analysis_kind']='fund_screen_only'
+        for key in ('company_analysis','company_forecast','preopen_signal','advance_signal'):
+            row.pop(key,None)
+    report['research_scope']=dict(funds_screened=len(funds),funds_graded_as_operating_companies=False)
+    if (any(row['market']=='KR' for row in report['results'])
+            and ('industry_snapshot' in report or (os.getenv('KIS_APP_KEY') and os.getenv('KIS_APP_SECRET')))):
+        from industry_flow import snapshot,industry_sector_evidence,format_report
+        try:
+            industry=report.get('industry_snapshot')
+            if industry is None:
+                import exchange_calendars
+                local=datetime.now(ZoneInfo('Asia/Seoul'));cal=exchange_calendars.get_calendar('XKRX')
+                session=cal.date_to_session(local.date().isoformat(),direction='previous')
+                day=cal.previous_session(session) if local<cal.session_open(session).to_pydatetime() else session
+                industry=snapshot(day.strftime('%Y%m%d'))
+            report['industry_snapshot']=industry
+            report['sectors']=[*report.get('sectors',[]),*industry_sector_evidence(industry)]
+            if industry.get('rows'):report['sector_header_override']=format_report(industry).splitlines()
+        except Exception as exc:
+            report['industry_snapshot_error']=type(exc).__name__
 
     checked = datetime.now(timezone.utc)
     shared_events, event_coverage = world_events(checked)
@@ -543,7 +566,7 @@ def prepare_selected_analysis(report):
     report["event_discovery"] = {"profile_count":len(registry),"linked_symbols":linked,
                                  "feed_coverage":event_coverage,"universe_wide_news_coverage":False}
     for market in ("KR", "US"):
-        pool = [item for item in report["results"] if item["market"] == market]
+        pool = [item for item in report["results"] if item["market"] == market and not is_fund(item)]
         event_symbols = [item["symbol"] for item in pool for symbol in linked
             if (item["symbol"] == (registry.get(symbol,{}).get("source_symbol") or symbol.removeprefix("DNAS"))
                 or (market=="KR" and item["symbol"].split(".")[0]==symbol))]
@@ -723,7 +746,7 @@ def send_telegram_summary(report):
         print('Telegram skipped: '+reason)
         return
 
-    lines = report.get('sector_header_override') or format_sector_header(report.get("sectors", []))
+    lines = list(report.get('sector_header_override') or format_sector_header(report.get("sectors", [])))
     confirmed = [item for item in report["results"]
                  if (item.get("signal", {}).get("confirmed") is True
                  and item.get("signal", {}).get("entry_limit") is not None
@@ -731,13 +754,17 @@ def send_telegram_summary(report):
                  or item.get('advance_signal',{}).get('status')=='advance_candidate')
                  and item.get("company_forecast", {}).get("composite_score") is not None]
     confirmed.sort(key=lambda item: -item['company_forecast']['composite_score'])
-    lines.extend(["", "매수 신호"])
+    # A preopen price plan is not an executable live entry confirmation.
+    heading=('조건부 매수 계획' if any(row.get('preopen_signal',{}).get('status')=='conditional_buy' for row in confirmed)
+             else '사전 관찰 후보' if confirmed else '분석 결과' if report.get('buy_evaluation',{}).get('completed') is True
+             else '분석 상태')
+    lines.extend(["", heading])
     if not confirmed:
         if report.get('buy_evaluation',{}).get('completed') is True:
             lines.append("매수 조건 충족 종목 없음")
         else:
             assessed=[row for row in report['results'] if row.get('company_forecast',{}).get('composite_score') is not None]
-            lines.append("분석 미완료")
+            lines.append("매수 판정 보류 · 분석 미완료")
     for item in confirmed[:5]:
         lines.append(telegram_candidate_line(item))
 

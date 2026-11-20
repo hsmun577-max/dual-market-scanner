@@ -296,6 +296,20 @@ def _route(channel, event, company, direct):
     return None
 
 
+def event_body_required(event,company,at):
+    """Do not make an unrelated unread global article a company-specific buy gate."""
+    if event.get('scope')=='company' or direct_company_event(event,company):return True
+    headline=str(event.get('headline') or '').lower()
+    profile=exposure(company)
+    for channel,words in CHANNELS.items():
+        if not any(word in headline for word in words):continue
+        if _route(channel,event,company,False) is not None:return True
+        if channel in {'currency','trade_policy'} and profile & {'exporter','importer'}:return True
+    from economic_graph import profile as business_profile,PRODUCTS,contains
+    products=business_profile(company,at).get('products',[])
+    return any(contains(headline,PRODUCTS[product]) for product in products if product in PRODUCTS)
+
+
 def analyze_events(company, events, at, feed_coverage=()):
     events=list(events)
     skipped_news=[event for event in events if event.get('scope')=='company'
@@ -315,7 +329,7 @@ def analyze_events(company, events, at, feed_coverage=()):
         seen.add(identity)
         body=event.get('body','')
         if len(body)<400:
-            unsupported.append(dict(url=event.get('url'),required=direct_company_event(event,company),
+            unsupported.append(dict(url=event.get('url'),required=event_body_required(event,company,at),
                 body_status=event.get('body_status'),
                 reason='본문 미확보: 제목만으로 실적 영향 확정 금지'))
             continue
@@ -357,7 +371,7 @@ def analyze_events(company, events, at, feed_coverage=()):
     news_checked_quiet=(company.get('news_status')=='no_recent_articles'
         or (company.get('news_status')=='ok' and news_screen.get('checked') is True
             and news_screen.get('material_count')==0))
-    quiet=(not claims and not uncertain and not unsupported and coverage_checked
+    quiet=(not claims and not uncertain and not any(row['required'] for row in unsupported) and coverage_checked
            and (not events or bool(company.get('business_description')))
            and company.get('filing_status')=='checked' and news_checked_quiet)
     return dict(model='causal_rules_v1_not_calibrated',generated_at=at.isoformat(),

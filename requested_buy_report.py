@@ -12,6 +12,8 @@ from profile_universe import restore_index,restore_prices
 from preopen_signals import evaluate_preopen
 from industry_flow import snapshot,format_report,Client
 from telegram_text import split_telegram_text
+from execution_quotes import execution_quote
+from tradable_signal import validate_entry,format_requested_report
 
 KST=ZoneInfo('Asia/Seoul')
 
@@ -33,9 +35,10 @@ def main():
     with ThreadPoolExecutor(max_workers=2) as executor:
         industry_future=executor.submit(snapshot)
         report['sectors']=scanner.sector_flow_snapshot('KR',datetime.now(KST))
-        scanner.prepare_selected_analysis(report)
         try:industry=industry_future.result()
         except Exception as exc:industry=dict(rows=[],error=type(exc).__name__)
+        report['industry_snapshot']=industry
+        scanner.prepare_selected_analysis(report)
     decided=datetime.now(timezone.utc)
     report['preopen_session']=args.session
     evaluation=evaluate_preopen(report,previous,decided)
@@ -50,33 +53,21 @@ def main():
     for row in recommendations[:5]:
         if client:
             try:
-                q=client.get('/uapi/domestic-stock/v1/quotations/inquire-price','FHKST01010100',
-                    dict(FID_COND_MRKT_DIV_CODE='J',FID_INPUT_ISCD=row['symbol'].split('.')[0]))
-                price=float(q['stck_prpr'])
-                if price>0:quotes[row['symbol']]=dict(price=price,queried_at=datetime.now(KST).isoformat(),source='KIS inquire-price')
-            except (TypeError,ValueError,KeyError,requests.RequestException):pass
+                quotes[row['symbol']]=execution_quote(row['symbol'],datetime.now(KST),client)
+            except (TypeError,ValueError,KeyError,RuntimeError,requests.RequestException):pass
     sent_at=datetime.now(KST)
     if sent_at.date().isoformat()!=args.session:raise RuntimeError('Requested report session expired during analysis')
     if (sent_at-decided).total_seconds()>120:raise RuntimeError('Decision became stale before requested delivery')
     # Only the separately requested one-off transport bypasses preopen timing.
     # Every regular sender continues to use delivery_status unchanged.
-    lines=(format_report(industry).splitlines() if industry.get('rows') else ['오늘의 주요 섹터','확인 불가'])
-    lines+=['',f'매수 신호 · {sent_at:%m/%d %H:%M} KST · 요청 재분석']
-    for row in recommendations[:5]:
-        lines+=['',scanner.telegram_candidate_line(row)]
-        quote=quotes.get(row['symbol'])
-        if quote:
-            lines.append(f"  조회 현재가 {quote['price']:,.0f}원 · {datetime.fromisoformat(quote['queried_at']):%H:%M:%S}")
-        lines.append('  지정한 진입 조건 도달 시 매수 검토 · 체결 확인 아님')
-    if not recommendations:
-        incomplete=sum(v for k,v in evaluation.get('counts',{}).items() if k in
-            {'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch','missing_indicators','invalid_average_price','entry_tick_missing'})
-        if incomplete:lines.append('매수 판정 보류 · 종합 분석자료 미확인')
-        else:lines.append('현재 매수 조건을 충족한 종목 없음')
-    message='\n'.join(lines)
+    session_open=cal.session_open(args.session).to_pydatetime()<=sent_at<cal.session_close(args.session).to_pydatetime()
+    entries=[validate_entry(row,quotes.get(row['symbol']),sent_at,session_open) for row in recommendations[:5]]
+    sector_lines=(format_report(industry).splitlines() if industry.get('rows') else ['오늘의 주요 섹터','확인 불가'])
+    message=format_requested_report(sector_lines,entries,evaluation,sent_at)
     audit=dict(session=args.session,generated_at=sent_at.isoformat(),strategy_commit=os.getenv('GITHUB_SHA'),
         explicit_manual_request=True,scheduled_delivery_guards_unchanged=True,
-        evaluation=evaluation,recommendations=[dict(symbol=r['symbol'],name=r.get('name'),
+        evaluation=evaluation,entry_checks=entries,trade_ready_count=sum(e['trade_ready'] for e in entries),
+        recommendations=[dict(symbol=r['symbol'],name=r.get('name'),
             score=r['company_forecast']['composite_score'],plan=r['preopen_signal'],quote=quotes.get(r['symbol'])) for r in recommendations],
         missing_dimensions=dict(Counter(key for r in report['results'] for key in r.get('company_forecast',{}).get('missing_dimensions',[]))),
         confirmed_fills=0,message=message,telegram_sent=False)
@@ -84,7 +75,9 @@ def main():
     Path('requested-buy-audit.json').write_text(json.dumps(audit,ensure_ascii=False,default=str),encoding='utf-8')
     Path('requested-buy-message.txt').write_text(message,encoding='utf-8')
     receipts=[]
+    valid_until=min([datetime.fromisoformat(e['valid_until']) for e in entries if e['trade_ready']],default=None)
     for part in split_telegram_text(message):
+        if valid_until is not None and datetime.now(KST)>=valid_until:raise RuntimeError('Entry quote expired before send')
         try:
             response=requests.post('https://api.telegram.org/bot'+os.environ['TELEGRAM_BOT_TOKEN']+'/sendMessage',
                 json=dict(chat_id=os.environ['TELEGRAM_CHAT_ID'],text=part),timeout=10,allow_redirects=False)

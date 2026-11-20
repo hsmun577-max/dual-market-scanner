@@ -94,7 +94,7 @@ def snapshot(day=None):
                 turnover_share=True,breadth_counts=True,persistence=False,twenty_day_intensity=False))
 
 
-def rank_leading_sectors(data, limit=2):
+def score_industries(data):
     """Our observable leadership ranking; not a reproduction of a broker's proprietary model."""
     rows=[]
     for original in data.get('rows',[]):
@@ -113,15 +113,34 @@ def rank_leading_sectors(data, limit=2):
     for row in rows:
         row['leadership_score']=sum(weight*percentile(row[key],key,row['exchange'])
             for key,weight in [('market_excess_pct',.40),('turnover_share_pct',.25),('breadth',.20),('combined_net',.15)])
-    # A sector with falling prices or predominantly declining constituents is not a leader.
-    eligible=[r for r in rows if r['return_pct']>0 and r['market_excess_pct']>0 and r['breadth']>.5]
-    ranked=sorted(eligible,key=lambda r:(-r['leadership_score'],-r['market_excess_pct'],r['name']))
+    for row in rows:
+        row['confirmed_institutional_inflow']=row['combined_net']>0
+        row['leadership_basis']=('broad_uptrend' if row['return_pct']>0 and row['market_excess_pct']>0 and row['breadth']>.5
+            else 'relative_strength_and_inflow' if row['market_excess_pct']>0 and row['combined_net']>0
+            else 'relative_rank')
+    return rows
+
+
+def rank_leading_sectors(data, limit=2):
+    # Major sectors are a relative ranking, including in a declining market.
+    # A positive breadth threshold must not erase valid observed industry data.
+    ranked=sorted(score_industries(data),key=lambda r:(-r['leadership_score'],-r['market_excess_pct'],r['name']))
     selected=[]; names=set()
     for row in ranked:
         if row['name'] in names: continue
         selected.append(row); names.add(row['name'])
         if len(selected)>=limit: break
     return selected
+
+
+def industry_sector_evidence(data):
+    rows=[]
+    for row in score_industries(data):
+        day=row.get('business_date','')
+        if len(day)!=8 or not day.isdigit():continue
+        rows.append(dict(row,market='KR',sector_kind='official_industry',
+            data_date=f'{day[:4]}-{day[4:6]}-{day[6:]}',data_as_of=row.get('observed_at')))
+    return rows
 
 
 def format_report(data):

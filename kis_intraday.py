@@ -561,15 +561,25 @@ def dart_quarterly_financials(api_key, corp_code, filings):
             snapshot["operating_margin_yoy_pp"] = 100 * (operating / sales - prior_operating / prior_sales)
     all_accounts = {row.get("account_id"):row for row in body.get("list",[])
                     if row.get("rcept_no")==receipt and row.get("account_id")}
-    cfo = all_accounts.get("ifrs-full_CashFlowsFromUsedInOperatingActivities")
+    def financial_account(ids,names,kind):
+        for code in ids:
+            if all_accounts.get(code):return all_accounts[code]
+        return next((row for row in body.get('list',[]) if row.get('rcept_no')==receipt
+            and row.get('sj_div')==kind and re.sub(r'\s+','',row.get('account_nm','')) in names),None)
+    cfo = financial_account(('ifrs-full_CashFlowsFromUsedInOperatingActivities','ifrs_CashFlowsFromUsedInOperatingActivities'),
+        {'영업활동현금흐름','영업활동으로인한현금흐름'},'CF')
     if cfo:
         cash = amount(cfo,"thstrm_amount")
         ytd_income = amount(income,"thstrm_add_amount") if month!="03" else operating
         if cash is not None and ytd_income is not None and ytd_income>0:
             snapshot["operating_cash_conversion"] = cash/ytd_income
             snapshot["cashflow_period"] = f"{year} year-to-date through {month}"
-    liabilities = all_accounts.get("ifrs-full_Liabilities")
-    equity = all_accounts.get("ifrs-full_Equity")
+        ytd_sales=amount(revenue,'thstrm_add_amount') if month!='03' else sales
+        if cash is not None and ytd_sales is not None and ytd_sales>0:
+            snapshot['operating_cash_flow_margin_pct']=100*cash/ytd_sales
+            snapshot['cashflow_period']=f'{year} year-to-date through {month}'
+    liabilities = financial_account(('ifrs-full_Liabilities','ifrs_Liabilities'),{'부채총계'},'BS')
+    equity = financial_account(('ifrs-full_Equity','ifrs_Equity'),{'자본총계'},'BS')
     if liabilities and equity:
         total_liabilities, total_equity = amount(liabilities,"thstrm_amount"), amount(equity,"thstrm_amount")
         if total_liabilities is not None and total_equity is not None and total_equity>0:
@@ -797,7 +807,11 @@ def company_context(market, symbols, now):
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(fetch, symbols))
     snapshots = {symbol: snapshot for symbol, snapshot, _ in results}
-    apply_peer_valuations(snapshots, datetime.now(now.tzinfo))
+    if overseas:
+        apply_peer_valuations(snapshots, datetime.now(now.tzinfo))
+    else:
+        from valuation_data import expand_domestic_peer_valuations
+        expand_domestic_peer_valuations(snapshots,cached_profiles,datetime.now(now.tzinfo))
     from economic_graph import save_profiles
     save_profiles(snapshots)
     for symbol, snapshot, risks in results:
@@ -1351,9 +1365,11 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
     confirmed = [row for row in candidates if row[4] is not None
                  and companies.get(row[0], {}).get("forecast", {}).get("composite_score") is not None]
     timestamp = f"{closes:%m/%d %H:%M} ET" if overseas else f"{closes:%m/%d %H:%M} KST"
-    lines = format_sector_header(sectors, "US" if overseas else "KR") + ["", f"매수 신호 · {timestamp}"]
+    incomplete=any(c.get('forecast',{}).get('assessment_status')=='incomplete' for c in companies.values())
+    heading='매수 신호' if confirmed else '분석 상태' if incomplete else '분석 결과'
+    lines = format_sector_header(sectors, "US" if overseas else "KR") + ["", f"{heading} · {timestamp}"]
     if not confirmed:
-        lines.append("확인된 매수 신호 없음")
+        lines.append("매수 판정 보류 · 분석자료 미확인" if incomplete else "매수 조건 충족 종목 없음")
     for symbol, ratio, spread, price, entry_limit, stop, projection in confirmed[:5]:
         ticker = symbol[4:] if overseas else symbol
         name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (

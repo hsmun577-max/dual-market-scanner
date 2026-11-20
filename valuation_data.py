@@ -2,6 +2,7 @@
 from datetime import datetime,timedelta,timezone
 import math
 import os
+import re
 from statistics import median
 
 def finite(value):
@@ -28,6 +29,8 @@ def domestic_valuations(symbols, client=None):
             if not isinstance(row,dict): continue
             observed=datetime.now(timezone.utc).isoformat()
             values={'valuation_source':'KIS inquire-price','valuation_observed_at':observed}
+            if row.get('bstp_kor_isnm'):
+                values['domestic_industry_name']=row['bstp_kor_isnm'].strip()
             for source,target in [('per','trailing_pe'),('pbr','price_to_book'),
                                   ('eps','trailing_eps'),('bps','book_value_per_share'),('aspr_unit','price_tick')]:
                 value=finite(row.get(source))
@@ -52,13 +55,16 @@ def apply_peer_valuations(companies, at):
             own=finite(company.get(field))
             if own is None or own<=0: continue
             peers=[]; seen_peers=set()
+            own_name=str(company.get('company_name') or '').strip().casefold()
             for key,row in companies.items():
                 if key==symbol or row.get('source_symbol')==company.get('source_symbol') and row.get('source_symbol'):
                     continue
                 if tuple(row.get(k) for k in ('market','country','industry'))!=group or not usable(row):
                     continue
                 value=finite(row.get(field))
-                identity=row.get('source_symbol') or key
+                name=str(row.get('company_name') or '').strip().casefold()
+                if own_name and name==own_name:continue
+                identity=name or row.get('source_symbol') or key
                 if value is not None and value>0 and identity not in seen_peers:
                     peers.append((key,value)); seen_peers.add(identity)
             if len(peers)<3: continue
@@ -68,4 +74,45 @@ def apply_peer_valuations(companies, at):
                 observed_at=at.isoformat(),score=math.tanh(math.log(reference/own)),
                 interpretation='relative_peer_multiple_not_intrinsic_or_forward_value')
             break
+    return companies
+
+
+def expand_domestic_peer_valuations(companies, registry, at, provider=None, limit=48):
+    """Fetch dated quotes for comparable issuers outside the technical candidate shortlist."""
+    provider=provider or domestic_valuations
+    apply_peer_valuations(companies,at)
+    groups={tuple(c.get(k) for k in ('market','country','industry')) for c in companies.values()
+        if c.get('market')=='KR' and not c.get('peer_valuation')
+        and not (finite(c.get('trailing_pe')) and finite(c.get('forward_pe'))
+                 and min(float(c['trailing_pe']),float(c['forward_pe']))>0)}
+    groups={g for g in groups if all(g)}
+    targets=[];profiles={};seen=set()
+    own_symbols={c.get('source_symbol') or k for k,c in companies.items()}
+    for group in sorted(groups):
+        picked=0
+        for symbol,row in sorted(registry.items()):
+            if not re.fullmatch(r'\d{6}\.(KS|KQ)',symbol) or symbol in own_symbols:continue
+            if ('KR',row.get('country'),row.get('industry'))!=group:continue
+            try:dated=datetime.fromisoformat(row.get('profile_available_at') or row.get('available_at') or '')
+            except (TypeError,ValueError):continue
+            if dated.utcoffset() is None or not at-timedelta(days=180)<=dated<=at:continue
+            name=str(row.get('company_name') or '').strip().casefold()
+            if not name or (group,name) in seen:continue
+            seen.add((group,name));profiles[symbol]=dict(row,market='KR',source_symbol=symbol)
+            targets.append(symbol);picked+=1
+            if picked>=6 or len(targets)>=limit:break
+        if len(targets)>=limit:break
+    values=provider([s.split('.')[0] for s in targets]) if targets else {}
+    extended=dict(companies);evaluation_at=at
+    for symbol in targets:
+        if symbol.split('.')[0] in values:
+            value=values[symbol.split('.')[0]]
+            try:seen=datetime.fromisoformat(value.get('valuation_observed_at',''))
+            except (ValueError,TypeError):continue
+            if seen.utcoffset() is None or not at-timedelta(hours=24)<=seen<=at+timedelta(minutes=2):continue
+            evaluation_at=max(evaluation_at,seen)
+            extended['peer:'+symbol]={**profiles[symbol],**value}
+    apply_peer_valuations(extended,evaluation_at)
+    for company in companies.values():
+        company['peer_lookup']=dict(extra_issuers_requested=len(targets),extra_quotes_received=len(extended)-len(companies))
     return companies

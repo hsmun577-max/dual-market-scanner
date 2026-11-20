@@ -6,6 +6,7 @@ These are uncalibrated scenarios. Data coverage is not a probability of profit.
 import math
 from datetime import datetime, timedelta
 from catalyst_policy import SECTOR_PROXIES,catalyst_context
+import re
 
 
 def _number(mapping, key):
@@ -61,14 +62,18 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         quality.append((.4, math.tanh(margin/15)))
     free_cash_margin = _number(company, "free_cash_flow_margin_pct")
     conversion = _number(company, "operating_cash_conversion")
+    operating_cash_margin=_number(company,'operating_cash_flow_margin_pct')
     if free_cash_margin is not None:
         quality.append((.4, math.tanh(free_cash_margin/10)))
     if conversion is not None:
         quality.append((.2, math.tanh(conversion-1)))
+    if free_cash_margin is None and conversion is None and operating_cash_margin is not None:
+        quality.append((.4,math.tanh(operating_cash_margin/10)))
     if quality:
         components["earnings_quality"] = sum(w*v for w,v in quality)/sum(w for w,_ in quality)
         evidence["earnings_quality"] = {"operating_margin_pct": margin,
-            "free_cash_flow_margin_pct": free_cash_margin, "operating_cash_conversion": conversion}
+            "free_cash_flow_margin_pct": free_cash_margin, "operating_cash_conversion": conversion,
+            'operating_cash_flow_margin_pct':operating_cash_margin}
     debt = _number(company, "net_debt_to_equity")
     if debt is not None:
         components["balance_sheet"] = -math.tanh(debt)
@@ -107,8 +112,21 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         evidence["price_and_demand"] = {"return_5d":momentum,"relative_strength":strength,"volume_ratio":volume}
     sector_names = SECTOR_PROXIES
     matched = []
+    official_matched=[]
     for row in sectors:
         if company.get("market") and row.get("market") != company["market"]:
+            continue
+        if row.get('sector_kind')=='official_industry':
+            normal=lambda text:re.sub(r'[^0-9a-z가-힣]','',str(text).lower())
+            own=normal(company.get('domestic_industry_name'))
+            exchange='KSQ' if str(company.get('source_symbol','')).endswith('.KQ') else 'KSP'
+            seen=datetime.fromisoformat(row['data_as_of']) if row.get('data_as_of') else None
+            rank=_number(row,'leadership_score')
+            if (own and own==normal(row.get('name')) and row.get('exchange')==exchange
+                    and row.get('data_date') in {indicators.get('data_date'),at.astimezone(seen.tzinfo).date().isoformat() if seen else ''}
+                    and seen and seen.utcoffset() is not None and at-timedelta(minutes=15)<=seen<=at
+                    and rank is not None and 0<=rank<=1):
+                official_matched.append(2*rank-1)
             continue
         if row.get("name") not in sector_names.get(company.get("sector"),set()):
             continue
@@ -122,9 +140,14 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         if excess is not None and ratio is not None and ratio>0:
             matched.append(math.tanh(excess)*min(1,ratio/2))
     market_return = _number(indicators,"market_return_20d")
+    sector_method='dated_sector_etf_price_and_turnover'
+    if not matched and official_matched:
+        matched=official_matched
+        sector_method='official_matching_industry_relative_leadership'
     if matched and market_return is not None:
         components["sector_pressure"] = .5*sum(matched)/len(matched)+.5*math.tanh(market_return/.1)
-        evidence["sector_pressure"] = {"sector":company.get("sector"),"matching_proxies":len(matched)}
+        evidence["sector_pressure"] = {"sector":company.get("sector"),"matching_proxies":len(matched),
+            'method':sector_method,'domestic_industry':company.get('domestic_industry_name')}
     event_terms = []
     uncertainty = 0.
     unquantified_events = 0
@@ -219,7 +242,7 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         missing.append("world_event_coverage")
     if financial_period_missing(company):
         missing.append("latest_report_not_in_financials")
-    if free_cash_margin is None and conversion is None:
+    if free_cash_margin is None and conversion is None and operating_cash_margin is None:
         missing.append("cash_flow_quality")
     quarter = company.get("quarter", "")[:7]
     try:
