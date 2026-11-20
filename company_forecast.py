@@ -9,6 +9,20 @@ from catalyst_policy import SECTOR_PROXIES,catalyst_context
 import re
 
 
+# Entry policy: the five-session base scenario must cover this much before a candidate
+# is worth the 2% stop. Both entry paths (live intraday and preopen) read it from here so
+# the floor and the scenario formula below cannot drift apart again.
+MIN_BASE_REWARD_PCT = 3.3
+# Scenario shape. One five-session sigma at the composite threshold (60 points), growing
+# with the square root of the evidence bias and capped at two sigmas. The earlier
+# 0.6 x (daily volatility x sqrt(5)) x bias coefficient left a 60-point candidate at about
+# 0.7%, so no realistic quality candidate could ever reach the 3.3% floor.
+SCENARIO_THRESHOLD_SCORE = 60.0
+# composite_score = 50 + 50 * after_pricing, so this is the bias at the threshold.
+SCENARIO_EVIDENCE_BIAS = (SCENARIO_THRESHOLD_SCORE - 50) / 50
+SCENARIO_SIGMA_CAP = 2.0
+
+
 def _number(mapping, key):
     value = mapping.get(key)
     return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else None
@@ -231,8 +245,13 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         volatility_source = "ATR_proxy" if atr is not None and atr>0 else "assumed_2.5pct_daily"
     scale = max(.003,daily_volatility)*math.sqrt(5)
     after_pricing = composite*(1-priced_in)-.15*priced_in-.1*uncertainty
-    drift = .6*scale*after_pricing
+    bias = after_pricing/SCENARIO_EVIDENCE_BIAS
+    sigma_multiple = math.copysign(min(SCENARIO_SIGMA_CAP, math.sqrt(abs(bias))), bias)
+    drift = scale*sigma_multiple
     width = scale*(1+(1-coverage)*.7+uncertainty*.5+priced_in*.3)
+    # The entry price stays inside the bear/bull range: the wider of the volatility
+    # spread and the base scenario, so a strong candidate's bear case is not a gain.
+    width = max(width, abs(drift))
     missing = [key for key in weights if key not in components]
     if not causal_valid:
         missing.append("causal_event_analysis")
@@ -263,6 +282,8 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         "missing_dimensions":missing,
         "composite_score":round(max(0,min(100,50+50*after_pricing)),1) if complete else None,
         "volatility_source":volatility_source,"direction_score":round(composite,6),
+        "scenario_sigma_multiple":round(sigma_multiple,4),
+        "min_base_reward_pct":MIN_BASE_REWARD_PCT,
         "base_return_pct":round(drift*100,4),"bear_price":round(max(price*.01,price*(1+drift-width)),4),
         "base_price":round(price*(1+drift),4),"bull_price":round(price*(1+drift+width),4),
         "interpretation":"positive scenario bias" if drift>0 else "negative scenario bias" if drift<0 else "insufficient direction evidence",

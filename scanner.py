@@ -18,6 +18,7 @@ from sector_flow import fetch_intraday_sectors, format_sector_header
 from telegram_text import split_telegram_text
 from company_forecast import build_company_forecast
 from delivery_policy import delivery_status
+from exit_policy import DEFAULT_EXIT_POLICY, policy_snapshot
 import yfinance as yf
 
 KR_SYMBOL_NAMES = {
@@ -461,9 +462,16 @@ def classify_signal(indicators, inverse=False):
         "direction": direction
     }
 
-def build_risk_plan(price, stop_pct=0.02,
-                    target_pct=0.07,
-                    risk_budget=30000):
+def build_risk_plan(price, stop_pct=DEFAULT_EXIT_POLICY.stop_pct,
+                    target_pct=DEFAULT_EXIT_POLICY.take_profit_pct,
+                    risk_budget=30000,
+                    policy=DEFAULT_EXIT_POLICY):
+    """Sell levels of the current policy: −2% stop, +6% take profit, surge hold.
+
+    ``target_price`` is the default +6% level, not a hard sell when a
+    short-term surge carried the price through it: ``exit_policy`` carries the
+    trailing parameters used by ``exit_policy.ExitTracker``.
+    """
     stop_price = price * (1 - stop_pct)
     target_price = price * (1 + target_pct)
 
@@ -478,10 +486,13 @@ def build_risk_plan(price, stop_pct=0.02,
         "reference_entry": safe_float(price),
         "stop_price": safe_float(stop_price),
         "target_price": safe_float(target_price),
+        "stop_pct": safe_float(stop_pct),
+        "take_profit_pct": safe_float(target_pct),
         "quantity_risk_only": quantity,
         "risk_reward_ratio": safe_float(
             target_pct / stop_pct
         ),
+        "exit_policy": policy_snapshot(policy),
         "warning": (
             "참고 계산이며 실제 주문 신호가 아님. "
             "가용 현금, 수수료, 슬리피지 미반영."
@@ -671,26 +682,58 @@ def telegram_candidate_line(item):
         return (f"• {name} ({code}) · 호재형 조건부 매수 · 종합 {score:.1f}/100\n"
                 f"  매수 구간 {floor_label}~{entry_label} · 눌림 구간 진입 시\n"
                 f"  기준 종가 {preopen['reference_date']} · 상승 시나리오 목표 {upper_label}\n"
-                "  손절 −2% · 기본 익절 +6% (실제 체결가 기준)")
+                f"  손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
+                f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
+                "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)")
     basis = f" · {preopen['reference_date']} 종가 기준" if conditional else ''
     return (f"• {name} ({code}) · {label} · 종합 {score:.1f}/100\n"
             f"  매수 상한 {entry_label}{basis}\n"
             f"  5거래일 분석 목표 · 기준/상승 {target_label}\n"
-            "  손절 −2% · 기본 익절 +6% (실제 체결가 기준)")
+            f"  손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
+            f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
+            "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)")
+
+def benchmark_daily_closes(benchmark):
+    """Benchmark close series without an unfinished bar or a duplicated session.
+
+    The index is downloaded separately from the sector ETFs, so its last row is
+    sometimes the current day with no close yet (NaN). Left in place, that row
+    makes the excess return NaN, which drops the sector_pressure component and
+    therefore the whole composite score.
+    """
+    if benchmark is None:
+        raise ValueError("시장 기준 지표 없음")
+    if "Close" not in benchmark.columns:
+        raise ValueError("시장 기준 지표에 종가 열 없음")
+    columns = [name for name in ("Close", "Adj Close") if name in benchmark.columns]
+    closes = benchmark[columns].replace([np.inf, -np.inf], np.nan).dropna(subset=["Close"])
+    closes = closes.loc[~closes.index.duplicated(keep="last")].sort_index()
+    if len(closes) < 2:
+        raise ValueError("시장 기준 지표 종가 2개 미만")
+    return closes
+
 
 def sector_metrics(prices, benchmark):
     data = prices[["Close", "Adj Close", "Volume"]].replace([np.inf, -np.inf], np.nan).dropna()
-    data = data.sort_index()
+    data = data.loc[~data.index.duplicated(keep="last")].sort_index()
     if len(data) < 21:
         raise ValueError("섹터 일봉 21개 미만")
+    # Compare only sessions both series hold. When the index still lags the sector
+    # ETF by a session (premarket runs), the excess return is computed on the last
+    # shared session instead of being dropped altogether.
+    benchmark = benchmark_daily_closes(benchmark)
+    common = data.index.intersection(benchmark.index)
+    if len(common) < 21:
+        raise ValueError("섹터와 시장 기준 지표의 공통 거래일 21개 미만")
+    lag = int(len(data.index) - len(common))
+    data = data.loc[common]
+    benchmark = benchmark.loc[common]
 
     turnover = data["Close"] * data["Volume"]
     average_turnover = float(turnover.iloc[-21:-1].mean())
     if average_turnover <= 0:
         raise ValueError("유효한 거래대금 기준 없음")
-    dates = data.index[-2:]
-    if benchmark is None or len(benchmark) < 2 or not dates.equals(benchmark.index[-2:]):
-        raise ValueError("섹터와 시장 기준 지표의 최근 거래일 불일치")
+    dates = common[-2:]
 
     change = float(data["Adj Close"].iloc[-1] / data["Adj Close"].iloc[-2] - 1)
     market_change = float(benchmark["Close"].iloc[-1] / benchmark["Close"].iloc[-2] - 1)
@@ -701,6 +744,7 @@ def sector_metrics(prices, benchmark):
     early = change > 0 and relative > 0 and ratio >= 1.3
     return {
         "data_date": dates[-1].date().isoformat(),
+        "benchmark_lag_sessions": lag,
         "return_pct": safe_float(change * 100),
         "market_excess_pct": safe_float(relative * 100),
         "estimated_turnover": safe_float(turnover.iloc[-1]),

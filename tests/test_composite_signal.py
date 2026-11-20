@@ -1,8 +1,9 @@
 from copy import deepcopy
 from unittest.mock import patch
 from datetime import datetime, timedelta
+import math
 import unittest
-from company_forecast import build_company_forecast
+from company_forecast import MIN_BASE_REWARD_PCT, SCENARIO_SIGMA_CAP, build_company_forecast
 from kis_intraday import evaluate_candidate, format_notification, KST
 
 AT=datetime(2026,11,18,9,15,tzinfo=KST)
@@ -108,16 +109,13 @@ class CompositeSignalTests(unittest.TestCase):
         evidence=[dict(kind=kind,market='KRX',symbol='*',assessment=grade,
                        available_at=(AT-timedelta(minutes=1)).isoformat())
                   for kind,grade in [('market','supportive'),('event','clear')]]
+        # The real scenario formula, not a patched base price, must carry the candidate.
         status,candidate=evaluate_candidate(bars,quote,AT,'KRX','005930',evidence,False,
                                             company=company,sectors=sectors)
-        self.assertEqual(status,'insufficient_expected_reward')
-        self.assertIsNone(candidate)
-        forecast=build_company_forecast(company,indicators,100.5,AT,sectors=sectors)
-        forecast['base_price']=105.
-        with patch('kis_intraday.build_company_forecast',return_value=forecast):
-            status,candidate=evaluate_candidate(bars,quote,AT,'KRX','005930',evidence,False,
-                                                company=company,sectors=sectors)
         self.assertEqual(status,'buy_signal')
+        forecast=company['forecast']
+        self.assertGreaterEqual(forecast['composite_score'],60)
+        self.assertGreaterEqual(forecast['base_price']/candidate[4]-1,MIN_BASE_REWARD_PCT/100)
         text=format_notification('KRX',[candidate],AT,{'005930':company},sectors)
         self.assertIn('종합 ',text)
         self.assertIn('/100',text)
@@ -127,6 +125,40 @@ class CompositeSignalTests(unittest.TestCase):
                                             company={},sectors=sectors)
         self.assertEqual(status,'composite_assessment_incomplete')
         self.assertIsNone(candidate)
+
+    def test_low_volatility_candidate_still_fails_the_reward_floor(self):
+        company,indicators,sectors=inputs()
+        indicators['volatility_20d']=.01
+        company['price_indicators']=indicators
+        bars={0:dict(high=100.,low=99.,close=99.9,volume=100),
+              1:dict(high=100.,low=99.5,close=100.,volume=100),
+              2:dict(high=100.3,low=99.9,close=100.2,volume=250)}
+        quote=dict(event_time=(AT-timedelta(seconds=1)).isoformat(),spread_pct=.1,ask=100.2,bid=100.1)
+        evidence=[dict(kind=kind,market='KRX',symbol='*',assessment=grade,
+                       available_at=(AT-timedelta(minutes=1)).isoformat())
+                  for kind,grade in [('market','supportive'),('event','clear')]]
+        status,candidate=evaluate_candidate(bars,quote,AT,'KRX','005930',evidence,False,
+                                            company=company,sectors=sectors)
+        self.assertGreaterEqual(company['forecast']['composite_score'],60)
+        self.assertLess(company['forecast']['base_return_pct'],MIN_BASE_REWARD_PCT)
+        self.assertEqual(status,'insufficient_expected_reward')
+        self.assertIsNone(candidate)
+
+    def test_reward_floor_and_scenario_shape_meet_at_the_score_threshold(self):
+        company,indicators,sectors=inputs()
+        for volatility in (.015,.02,.03):
+            indicators.update(volatility_20d=volatility)
+            forecast=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
+            self.assertAlmostEqual(forecast['scenario_sigma_multiple'],
+                                   math.sqrt((forecast['composite_score']-50)/10),places=2)
+            # A candidate above the 60-point threshold clears the 3.3% floor from
+            # 1.5% daily volatility upward, using the real formula.
+            self.assertGreaterEqual(forecast['composite_score'],60)
+            self.assertGreaterEqual(forecast['base_return_pct'],MIN_BASE_REWARD_PCT)
+            self.assertLessEqual(forecast['scenario_sigma_multiple'],SCENARIO_SIGMA_CAP)
+            self.assertLessEqual(forecast['bear_price'],100.)
+            self.assertGreaterEqual(forecast['bull_price'],100.)
+        self.assertEqual(forecast['min_base_reward_pct'],MIN_BASE_REWARD_PCT)
 
 
 if __name__=='__main__':
