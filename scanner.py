@@ -687,7 +687,25 @@ def prepare_selected_analysis(report):
             item["risk_headlines"] = list(dict.fromkeys(
                 row.get("headline", "") for row in risks if row.get("symbol") == symbol))[:2]
             item['risk_evidence']=[row for row in risks if row.get('symbol')==symbol]
+            if is_fund(item):
+                # A listed fund has no issuer income statement; grading it as an operating
+                # company produced "analysis incomplete" rows for ETFs (QQQ, SPY, BIL...).
+                # The quote type only arrives with the profile, so it is re-checked here.
+                item['analysis_kind']='fund_screen_only'
+                item.pop('company_forecast',None)
+                item.pop('company_analysis',None)
+                item.pop('risk_evidence',None)
     report["company_analysis_at"] = checked.isoformat()
+    demoted=[row for row in report['results'] if row.get('analysis_kind')=='fund_screen_only']
+    previous=report.get('research_scope',{})
+    report['research_scope']=dict(funds_screened=max(len(demoted),previous.get('funds_screened',0) or 0),
+                                  funds_demoted_after_profile=len(demoted),
+                                  funds_graded_as_operating_companies=False)
+    # The daily alert is the same conditional-plan path as the preopen delivery: without
+    # this pass nothing in the scan could ever carry a buy plan, because a daily close is
+    # never a live execution confirmation.
+    from preopen_signals import evaluate_preopen_markets
+    evaluate_preopen_markets(report, datetime.now(timezone.utc))
 
 
 def telegram_candidate_line(item):
@@ -701,7 +719,7 @@ def telegram_candidate_line(item):
     if advance.get('status')=='advance_candidate' and not conditional and score is not None:
         return (f"• {item.get('name') or item['symbol']} ({item['symbol'].split('.')[0]}) · 사전 매수 후보 · 종합 {score:.1f}/100\n"
                 f"  예정 재료 {advance['event_window_start']}~{advance['event_window_end']}\n"
-                "  정책 결과 발표 전 수혜 가능성 분석 · 매수 확정 대기")
+                "  정책 결과 발표 전 수혜 가능성 분석 · 매수 확정 대기" + caveat_note(item))
     if (signal.get("confirmed") is not True and not conditional) or score is None or entry is None:
         return ""
     symbol = item["symbol"]
@@ -721,14 +739,35 @@ def telegram_candidate_line(item):
                 f"  기준 종가 {preopen['reference_date']} · 상승 시나리오 목표 {upper_label}\n"
                 f"  손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
                 f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
-                "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)")
+                "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)" + caveat_note(item))
     basis = f" · {preopen['reference_date']} 종가 기준" if conditional else ''
+    caveat = caveat_note(item)
     return (f"• {name} ({code}) · {label} · 종합 {score:.1f}/100\n"
             f"  매수 상한 {entry_label}{basis}\n"
             f"  5거래일 분석 목표 · 기준/상승 {target_label}\n"
             f"  손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
             f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
-            "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)")
+            "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)" + caveat)
+
+
+CAVEAT_LABELS = {
+    "valuation_outlook": "밸류에이션", "sector_pressure": "업종 수급", "events": "이벤트",
+    "unread_event_bodies": "기사 본문", "cash_flow_quality": "현금흐름",
+    "world_event_coverage": "세계 이벤트", "causal_event_analysis": "이벤트 분석",
+    "growth_scale_unverified": "매출 성장 검증", "leverage_unverified": "부채 검증",
+    "growth": "매출 성장", "earnings_quality": "이익의 질", "balance_sheet": "재무구조",
+    "price_and_demand": "가격·수요",
+}
+
+
+def caveat_note(item):
+    """Say which evidence is missing instead of hiding a partial assessment."""
+    caveats = [key for key in (item.get('company_forecast', {}).get('caveats')
+                               or item.get('preopen_signal', {}).get('caveats') or []) if key]
+    if not caveats:
+        return ""
+    labels = [CAVEAT_LABELS.get(key, key) for key in dict.fromkeys(caveats)][:3]
+    return "\n  자료 일부 미확보: " + ", ".join(labels) + " (점수에 반영해 감점)"
 
 def benchmark_daily_closes(benchmark):
     """Benchmark close series without an unfinished bar or a duplicated session.

@@ -20,20 +20,30 @@ def inputs():
 
 
 class CompositeSignalTests(unittest.TestCase):
-    def test_feed_success_alone_does_not_prove_causal_analysis(self):
+    def test_missing_causal_analysis_keeps_the_verified_evidence_but_flags_it(self):
         company,indicators,sectors=inputs()
+        complete=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
         del company['event_analysis']
         result=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
-        self.assertIsNone(result['composite_score'])
         self.assertIn('causal_event_analysis',result['missing_dimensions'])
+        self.assertEqual(result['assessment_status'],'partial')
+        self.assertIsNotNone(result['composite_score'])
+        # The events dimension scored nothing either way here, so the score itself is not
+        # inflated; the evidence coverage is what records the gap.
+        self.assertLess(result['data_coverage'],complete['data_coverage'])
+        self.assertLessEqual(result['composite_score'],complete['composite_score'])
 
-    def test_unread_news_cannot_be_scored_as_complete(self):
+    def test_unread_news_body_keeps_the_score_and_widens_it(self):
         company,indicators,sectors=inputs()
+        complete=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
         company['event_analysis'].update(score=.3,status='directional_hypotheses',
                                        unread_events=[dict(url='https://example.com')])
         result=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
-        self.assertIsNone(result['composite_score'])
         self.assertIn('unread_event_bodies',result['missing_dimensions'])
+        self.assertIn('unread_event_bodies',result['caveats'])
+        self.assertEqual(result['assessment_status'],'partial')
+        self.assertIsNotNone(result['composite_score'])
+        self.assertLess(result['composite_score'],complete['composite_score'])
 
     def test_new_periodic_filing_blocks_old_financials(self):
         company,indicators,sectors=inputs()

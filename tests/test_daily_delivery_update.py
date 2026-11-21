@@ -55,11 +55,18 @@ class DailyDeliveryTests(unittest.TestCase):
             scanner.prepare_selected_analysis(report)
         context.assert_called_once()
         self.assertEqual(row['fundamentals'],'영업흑자')
-        text=scanner.telegram_candidate_line(row)
-        self.assertEqual(text,'')
         self.assertEqual(row['company_analysis']['operating_margin_pct'],12.)
         self.assertEqual(row['company_analysis']['revenue_yoy_pct'],20.)
-        self.assertIsNone(row['company_forecast']['composite_score'])
+        # Financial statements, filings and price evidence are present: valuation and cash
+        # flow gaps are caveats, so the row keeps a score and the daily alert carries the
+        # conditional plan instead of ending as "analysis incomplete".
+        self.assertIsNotNone(row['company_forecast']['composite_score'])
+        self.assertEqual(row['company_forecast']['assessment_status'],'partial')
+        self.assertIsNotNone(row.get('preopen_signal'))
+        self.assertEqual(row['preopen_signal']['status'],'conditional_buy')
+        text=scanner.telegram_candidate_line(row)
+        self.assertIn('조건부 매수',text)
+        self.assertIn('자료 일부 미확보',text)
         self.assertNotIn('미검증',text)
         with patch.dict(os.environ,{'TELEGRAM_BOT_TOKEN':'fake','TELEGRAM_CHAT_ID':'fake'}), patch.object(scanner.requests,'post') as post, patch('scanner.delivery_status',return_value=(True,'test')):
             post.return_value=Mock(status_code=200,json=lambda:{'ok':True})
@@ -67,8 +74,30 @@ class DailyDeliveryTests(unittest.TestCase):
         messages=[call.kwargs['json']['text'] for call in post.call_args_list]
         self.assertTrue(messages[0].startswith('오늘의 주요 섹터'))
         self.assertNotIn('DART 연결','\n'.join(messages))
-        self.assertIn('분석 미완료','\n'.join(messages))
+        self.assertIn('조건부 매수 계획','\n'.join(messages))
+        self.assertIn('삼성전자','\n'.join(messages))
         self.assertTrue(all(len(message)<=3800 for message in messages))
+
+    def test_a_row_without_financial_statements_is_still_refused_and_reported(self):
+        row=self.row()
+        report=dict(results=[row],sectors=[],successful=1,attempted=1)
+        snapshot=dict(quarter='2026-09',checked_at='2026-11-18T10:00:00+09:00',
+            filing_status='checked',news_status='no_recent_articles')
+        with patch('kis_intraday.company_context',return_value=({'005930':snapshot},[])), \
+             patch('event_impact_analysis.world_events',return_value=([],[])), \
+             patch('economic_graph.load_profiles',return_value={}):
+            scanner.prepare_selected_analysis(report)
+        self.assertIsNone(row['company_forecast']['composite_score'])
+        self.assertEqual(row['company_forecast']['assessment_status'],'incomplete')
+        self.assertEqual(scanner.telegram_candidate_line(row),'')
+        self.assertFalse(report['buy_evaluation']['completed'])
+        self.assertGreater(report['buy_evaluation']['data_excluded'],0)
+        with patch.dict(os.environ,{'TELEGRAM_BOT_TOKEN':'fake','TELEGRAM_CHAT_ID':'fake'}), patch.object(scanner.requests,'post') as post, patch('scanner.delivery_status',return_value=(True,'test')):
+            post.return_value=Mock(status_code=200,json=lambda:{'ok':True})
+            scanner.send_telegram_summary(report)
+        message=post.call_args.kwargs['json']['text']
+        self.assertIn('분석 미완료',message)
+        self.assertNotIn('삼성전자',''.join(message.split('\n')[1:]))
 
     def test_long_reports_are_split_and_failures_are_not_relabelled_verified(self):
         self.assertTrue(all(len(part)<=3800 for part in split_telegram_text('가'*9000)))

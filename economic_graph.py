@@ -227,8 +227,15 @@ def save_profiles(companies, path='reports/company-profiles.json'):
     temporary.replace(file)
 
 
-def select_analysis_candidates(pool, market, event_symbols=(), limit=48):
-    """Reserve research capacity for event links and liquid names before chart gates."""
+def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_slots=12):
+    """Reserve research capacity for event links, then for the names the entries could use.
+
+    On a scan of 13,000 instruments the event and mega-cap rows used to take the whole
+    analysis budget, and the names that actually passed the entry filters were never
+    looked at — so the only candidates an entry plan could be built for were dropped
+    without a score. The entry-filtered names therefore come first, then event research,
+    then the liquidity anchors that keep the report's context.
+    """
     from candidate_selection import (rank_market_candidates,rank_recovery_candidates,
                                       liquidity_rejection_reason,average_turnover)
     from advance_policy import eligible_for_advance_research
@@ -238,13 +245,13 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48):
     indexed={row['symbol']:row for row in eligible}
     event_rows=sorted((indexed[s] for s in set(event_symbols) if s in indexed),
                         key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:max(1,2*limit//3)]
-    trend=rank_market_candidates(eligible,market,limit=5)
-    recovery=rank_recovery_candidates(eligible,market,limit=5)
+    trend=rank_market_candidates(eligible,market,limit=max(5,entry_slots))
+    recovery=rank_recovery_candidates(eligible,market,limit=max(5,entry_slots))
     neutral=sorted(eligible,key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:8]
     selected=[]; seen=set()
     from itertools import zip_longest
-    interleaved=[row for group in zip_longest(trend,recovery,neutral) for row in group if row is not None]
-    for row in [*event_rows,*interleaved]:
+    entry=[row for group in zip_longest(trend,recovery) for row in group if row is not None]
+    for row in [*entry,*event_rows,*neutral]:
         if row['symbol'] not in seen:
             selected.append(row); seen.add(row['symbol'])
     return selected[:limit]

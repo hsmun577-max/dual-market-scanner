@@ -27,6 +27,7 @@ from candidate_selection import instrument_rejection_reason, rank_market_candida
 from sector_flow import format_sector_header
 from telegram_text import split_telegram_text
 from exit_policy import DEFAULT_EXIT_POLICY
+from provider_retry import call as provider_call, isolate_yfinance_cache
 from scanner import (BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, calculate_indicators,
                      classify_signal, clean_prices, sector_flow_snapshot, yf_download)
 
@@ -36,6 +37,8 @@ SYMBOLS = tuple(symbol.split(".")[0] for symbol in list(KR_SYMBOL_NAMES)[:9])
 US_SYMBOLS = ("AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "GOOGL", "TSLA")
 OPEN_TIMES = {"NXT": time(8), "KRX": time(9), "US-early": time(4), "US-late": time(8, 20)}
 BAR_SECONDS = 300
+# Reopening the feed keeps the bars already collected, so a short disconnect is cheap.
+RECONNECT_BACKOFF_SECONDS = (2, 5, 10, 20)
 MAX_QUOTE_AGE = 10
 MAX_SPREAD_PCT = 0.5
 MIN_VOLUME_RATIO = 1.5
@@ -427,17 +430,24 @@ def sec_submission_context(recent, cik, now):
     return filings[:3], risks
 
 
+def sec_user_agent():
+    """SEC rejects a User-Agent without a contact address with HTTP 403."""
+    from sec_financials import user_agent
+    return user_agent()
+
+
 def us_company_filings(ticker, now):
     # Resolve the issuer's CIK from the ticker-specific filing index.
-    index = ticker.get_sec_filings() or []
+    index = provider_call(ticker.get_sec_filings) or []
     urls = [str(item.get("edgarUrl") or "") for item in index]
     ciks = [match[1] for url in urls if (match := re.search(r"_(\d{1,10})$", url))]
     if ciks:
         cik = ciks[0]
         try:
-            response = requests.get(
+            response = provider_call(
+                requests.get,
                 f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json",
-                headers={"User-Agent": "Dual Market Scanner https://github.com/hsmun577-max/dual-market-scanner"},
+                headers={"User-Agent": sec_user_agent()},
                 timeout=5,
             )
             response.raise_for_status()
@@ -770,11 +780,31 @@ def dart_quarterly_financials(api_key, corp_code, filings, yfinance_revenue=None
     return snapshot
 
 
+def sec_company_financials(ticker_symbol, now, price=None):
+    """US fundamentals from SEC XBRL when the Yahoo statement is unavailable.
+
+    Yahoo answers 404 or a rate limit for valid tickers often enough that the whole US
+    side of a scan lost its income statement. The SEC company facts carry the same
+    reported quarter, so the fallback reads them instead of leaving every US issuer
+    unscored. Only reported values are returned.
+    """
+    from sec_financials import cik_for_ticker, fetch_companyfacts, financials
+    try:
+        cik = provider_call(cik_for_ticker, ticker_symbol, attempts=2, backoff=(3,))
+        if cik is None:
+            return {}
+        document = provider_call(fetch_companyfacts, cik, attempts=2, backoff=(3,))
+        return financials(document, now.date(), price)
+    except Exception as exc:
+        print(f"US {ticker_symbol} SEC company facts unavailable ({type(exc).__name__})")
+        return {}
+
+
 def company_quality_metrics(ticker, snapshot, now):
     """Read operating cash, leverage and earnings expectations with dated statements."""
     result = {}
     try:
-        info = ticker.get_info() or {}
+        info = provider_call(ticker.get_info) or {}
         for source, target in (("trailingPE","trailing_pe"),("forwardPE","forward_pe"),
                                ("forwardEps","forward_eps"),("trailingEps","trailing_eps"),
                                ("priceToBook","price_to_book")):
@@ -808,7 +838,7 @@ def company_quality_metrics(ticker, snapshot, now):
 
     quarter = snapshot.get("quarter","")[:7]
     try:
-        flow = ticker.get_cash_flow(freq="quarterly")
+        flow = provider_call(ticker.get_cash_flow, freq="quarterly")
         column = next((column for column in sorted(flow.columns, reverse=True)
                        if column.date() < now.date() and str(column.date())[:7] == quarter), None)
         if column is not None:
@@ -826,7 +856,7 @@ def company_quality_metrics(ticker, snapshot, now):
         result["leverage_comparison"] = "industry_specific_model_required"
         return result
     try:
-        balance = ticker.get_balance_sheet(freq="quarterly")
+        balance = provider_call(ticker.get_balance_sheet, freq="quarterly")
         columns = sorted((column for column in balance.columns if column.date()<now.date()), reverse=True)
         if columns:
             column = columns[0]
@@ -859,6 +889,42 @@ def restore_business_profile(snapshot, cached, now):
     return snapshot
 
 
+def download_company_history(tickers, market, retries=2):
+    """Batch history download that re-requests the symbols a batch silently dropped.
+
+    A locked cache or one timed-out connection inside a multi-ticker download returns the
+    other symbols and only logs the failure (``['LNTH']: OperationalError('database is
+    locked')``), which then looked like an issuer with no price history. Each missing
+    symbol is asked for on its own before that conclusion is recorded.
+    """
+    tickers = list(dict.fromkeys(tickers))
+    frames = {}
+    batch = yf_download(tickers, period="6mo", auto_adjust=False, group_by="ticker",
+                        progress=False, threads=4, timeout=8, multi_level_index=True)
+    if batch is not None:
+        for ticker in tickers:
+            if ticker in batch.columns.get_level_values(0):
+                frames[ticker] = batch[ticker]
+    missing = [ticker for ticker in tickers if ticker not in frames]
+    for ticker in missing[:12]:
+        single = yf_download(ticker, period="6mo", auto_adjust=False, progress=False,
+                             threads=False, timeout=15)
+        if single is None or single.empty:
+            continue
+        if hasattr(single.columns, "get_level_values"):
+            single.columns = single.columns.get_level_values(0)
+        frames[ticker] = single
+    if not frames:
+        print(f"{market} company price history unavailable")
+        return None
+    if missing:
+        recovered = [ticker for ticker in missing if ticker in frames]
+        print(f"{market} company price history retried {len(missing)}: recovered {len(recovered)}"
+              + (f" missing {', '.join(t for t in missing if t not in frames)}"
+                 if any(t not in frames for t in missing) else ""))
+    return frames
+
+
 def company_context(market, symbols, now):
     from economic_graph import load_profiles
     cached_profiles = load_profiles()
@@ -881,12 +947,8 @@ def company_context(market, symbols, now):
     benchmark_symbol = BENCHMARKS["US" if overseas else "KR"]
     mapped_tickers = {symbol: (symbol[4:] if overseas else symbol + (
         ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS")) for symbol in symbols}
-    try:
-        history_prices = yf_download([*mapped_tickers.values(), benchmark_symbol], period="6mo",
-                                     auto_adjust=False, group_by="ticker", progress=False,
-                                     threads=4, timeout=8, multi_level_index=True)
-    except Exception as exc:
-        print(f"{market} company price history unavailable ({type(exc).__name__})")
+    isolate_yfinance_cache()
+    history_prices = download_company_history([*mapped_tickers.values(), benchmark_symbol], market)
 
     def fetch(symbol):
         suffix = ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS"
@@ -900,11 +962,17 @@ def company_context(market, symbols, now):
                       "assessment": "risk"} for item in snapshot["news"]
                      if RISK_HEADLINE.search(item["headline"]))
         try:
-            snapshot.update(company_financials(ticker.get_income_stmt(freq="quarterly"), now.date()))
+            frame = provider_call(ticker.get_income_stmt, freq="quarterly")
+            snapshot.update(company_financials(frame, now.date()))
         except Exception as exc:
             print(f"{market} {symbol} financials unavailable ({type(exc).__name__})")
+        if overseas and "operating_margin_pct" not in snapshot:
+            fallback = sec_company_financials(mapped_tickers[symbol], now)
+            if fallback:
+                snapshot.update(fallback)
+                print(f"{market} {symbol} financials read from SEC XBRL")
         try:
-            dates = sorted(str(day)[:10] for day in (ticker.calendar or {}).get("Earnings Date", []))
+            dates = sorted(str(day)[:10] for day in (provider_call(lambda: ticker.calendar) or {}).get("Earnings Date", []))
             snapshot["earnings_dates"] = dates
             if now.date().isoformat() in dates:
                 risks.append({"kind": "event", "market": market, "symbol": symbol,
@@ -1362,7 +1430,26 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     return "buy_signal", (symbol, *metrics, limit, stop, projection)
 
 
-async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None, observation_only=False, resistance=None, refresh_context=None, companies=None, sector_snapshot=None, followup_minutes=30, volume_baseline=None):
+def late_subscription(rt_cd, received, opens, bars):
+    """Whether a subscription ack leaves the symbol unusable for the opening decision.
+
+    An ack that arrives after the open means the opening bars were missed — unless they
+    were already collected before a reconnect, in which case the symbol is still valid.
+    """
+    return rt_cd != "0" or (received >= opens and set(bars) != {0, 1, 2})
+
+
+async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None,
+                  observation_only=False, resistance=None, refresh_context=None, companies=None,
+                  sector_snapshot=None, followup_minutes=30, volume_baseline=None,
+                  reconnect_attempts=4, on_exit=None):
+    """Collect the opening bars, publish the decision once, then watch the sell rule.
+
+    A dropped feed no longer ends the run. The session is re-opened with the bars already
+    collected, and if it stays down the same three five-minute bars are rebuilt from KIS
+    REST and a live quote is taken, so the decision can still be applied. Whatever route
+    produced the bars, the exit rule is evaluated on the bars that follow the signal.
+    """
     resistance = resistance or {}
     closes = opens + timedelta(minutes=15)
     feeds = FEEDS[market]
@@ -1372,114 +1459,164 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
     quotes = {}
     followup = {symbol: [] for symbol in symbols}
     after_bars = {symbol: {} for symbol in symbols}
-    evaluated = False
-    refresh_task = None
-    next_refresh = opens + timedelta(minutes=5)
-    deadline = closes
-    async with connect(FEED_URL, open_timeout=15, close_timeout=3) as socket:
-        for tr_id, symbol in sorted(pending):
-            await socket.send(json.dumps(subscription(approval, tr_id, symbol)))
-        while True:
-            received = datetime.now(KST)
-            if refresh_task is not None and refresh_task.done():
+    flags = {"evaluated": False, "published": None, "task": None,
+             "refresh_task": None, "next_refresh": opens + timedelta(minutes=5),
+             "deadline": closes, "source": None}
+
+    def decide(rejected_set, source, decision_at=None):
+        decision_at = decision_at or closes
+        candidates = []
+        decisions = {}
+        composite_scores = {}
+        for symbol in symbols:
+            if symbol in rejected_set:
+                decisions[symbol] = "subscription_failed"
+                continue
+            status, candidate = evaluate_candidate(
+                bars[symbol], quotes.get(symbol), decision_at, samples_path.stem, symbol,
+                evidence, market == "US", observation_only, resistance.get(symbol, ()),
+                company=(companies or {}).get(symbol),
+                sectors=(sector_snapshot or {}).get("rows", []),
+                volume_baseline=(volume_baseline or {}).get(symbol),
+            )
+            decisions[symbol] = status
+            composite_scores[symbol] = (companies or {}).get(symbol, {}).get("forecast", {}).get("composite_score")
+            if candidate is not None:
+                candidates.append(candidate)
+        counts = {status: sum(value == status for value in decisions.values())
+                  for status in sorted(set(decisions.values()))}
+        print(f"{samples_path.stem} 판정 집계 {json.dumps(counts)} ({source})", flush=True)
+        for symbol, status in decisions.items():
+            print(f"{samples_path.stem} {symbol} 판정 {status}", flush=True)
+        dump(samples_path.with_name(f"{samples_path.stem}-decisions-replay.json"),
+             {"signal_at": decision_at.isoformat(), "counts": counts, "symbols": decisions,
+              "composite_scores": composite_scores, "source": source}, indent=2)
+        if len(rejected_set) == len(symbols):
+            raise RuntimeError("개장 전 구독 승인에 성공한 종목이 없습니다")
+        return dict(candidates=candidates, decisions=decisions, counts=counts,
+                    composite_scores=composite_scores, source=source)
+
+    def publish(rejected_set, source, decision_at=None):
+        payload = decide(rejected_set, source, decision_at)
+        ordered = sorted(payload["candidates"],
+                         key=lambda row: (-(payload["composite_scores"].get(row[0]) or 0), -row[1], row[0]))
+        flags["published"] = payload
+        flags["evaluated"] = True
+        flags["source"] = source
+        return asyncio.create_task(asyncio.to_thread(on_signal, ordered))
+
+    async def session():
+        pending.clear()
+        pending.update((tr_id, symbol) for tr_id in feeds for symbol in symbols
+                       if symbol not in rejected)
+        async with connect(FEED_URL, open_timeout=15, close_timeout=3) as socket:
+            for tr_id, symbol in sorted(pending):
+                await socket.send(json.dumps(subscription(approval, tr_id, symbol)))
+            while True:
+                received = datetime.now(KST)
+                refresh_task = flags["refresh_task"]
+                if refresh_task is not None and refresh_task.done():
+                    try:
+                        refreshed, events = refresh_task.result()
+                        if not flags["evaluated"]:
+                            if companies is not None:
+                                companies.update(refreshed)
+                            evidence.extend(events)
+                            dump(Path("signal-context.json"), evidence)
+                            print(f"{samples_path.stem} 기업·뉴스 갱신 완료 {received.isoformat()}", flush=True)
+                        else:
+                            print(f"{samples_path.stem} 판정 후 도착한 기업·뉴스 자료 제외", flush=True)
+                    except Exception as exc:
+                        print(f"{samples_path.stem} 기업·뉴스 갱신 실패 ({type(exc).__name__})", flush=True)
+                    flags["refresh_task"] = None
+                if (refresh_context is not None and not flags["evaluated"] and received < closes
+                        and received >= flags["next_refresh"] and flags["refresh_task"] is None):
+                    flags["refresh_task"] = asyncio.create_task(asyncio.to_thread(refresh_context))
+                    flags["next_refresh"] = received + timedelta(minutes=5)
+                seconds_left = (flags["deadline"] - received).total_seconds()
+                if seconds_left <= 0:
+                    if flags["evaluated"]:
+                        break
+                    rejected.update(symbol for _, symbol in pending)
+                    print(f"{market} 구독 검증 {len(symbols) - len(rejected)}/{len(symbols)}")
+                    flags["task"] = publish(rejected, "stream")
+                    flags["deadline"] = closes + timedelta(minutes=followup_minutes, seconds=30)
+                    continue
                 try:
-                    refreshed, events = refresh_task.result()
-                    if not evaluated:
-                        if companies is not None:
-                            companies.update(refreshed)
-                        evidence.extend(events)
-                        dump(Path("signal-context.json"), evidence)
-                        print(f"{samples_path.stem} 기업·뉴스 갱신 완료 {received.isoformat()}", flush=True)
-                    else:
-                        print(f"{samples_path.stem} 판정 후 도착한 기업·뉴스 자료 제외", flush=True)
-                except Exception as exc:
-                    print(f"{samples_path.stem} 기업·뉴스 갱신 실패 ({type(exc).__name__})", flush=True)
-                refresh_task = None
-            if refresh_context is not None and not evaluated and received < closes and received >= next_refresh and refresh_task is None:
-                refresh_task = asyncio.create_task(asyncio.to_thread(refresh_context))
-                next_refresh = received + timedelta(minutes=5)
-            seconds_left = (deadline - received).total_seconds()
-            if seconds_left <= 0:
-                if evaluated:
-                    break
-                rejected.update(symbol for _, symbol in pending)
-                print(f"{market} 구독 검증 {len(symbols) - len(rejected)}/{len(symbols)}")
-                candidates = []
-                decisions = {}
-                composite_scores = {}
-                for symbol in symbols:
-                    if symbol in rejected:
-                        decisions[symbol] = "subscription_failed"
+                    raw = await asyncio.wait_for(socket.recv(decode=True), min(seconds_left, 60))
+                except TimeoutError:
+                    continue
+                received = datetime.now(KST)
+                if raw.startswith("{"):
+                    status = json.loads(raw)
+                    header = status.get("header", {})
+                    if header.get("tr_id") == "PINGPONG":
+                        await socket.pong(raw.encode("utf-8"))
                         continue
-                    status, candidate = evaluate_candidate(
-                        bars[symbol], quotes.get(symbol), closes, samples_path.stem, symbol,
-                        evidence, market == "US", observation_only, resistance.get(symbol, ()),
-                        company=(companies or {}).get(symbol),
-                        sectors=(sector_snapshot or {}).get("rows", []),
-                        volume_baseline=(volume_baseline or {}).get(symbol),
-                    )
-                    decisions[symbol] = status
-                    composite_scores[symbol] = (companies or {}).get(symbol, {}).get("forecast", {}).get("composite_score")
-                    if candidate is not None:
-                        candidates.append(candidate)
-                counts = {status: sum(value == status for value in decisions.values())
-                          for status in sorted(set(decisions.values()))}
-                print(f"{samples_path.stem} 판정 집계 {json.dumps(counts)}", flush=True)
-                for symbol, status in decisions.items():
-                    print(f"{samples_path.stem} {symbol} 판정 {status}", flush=True)
-                dump(samples_path.with_name(f"{samples_path.stem}-decisions-replay.json"),
-                     {"signal_at": closes.isoformat(), "counts": counts, "symbols": decisions,
-                      "composite_scores": composite_scores}, indent=2)
-                if len(rejected) == len(symbols):
-                    raise RuntimeError("개장 전 구독 승인에 성공한 종목이 없습니다")
-                notification = asyncio.create_task(asyncio.to_thread(
-                    on_signal, sorted(candidates, key=lambda row: (-(composite_scores.get(row[0]) or 0), -row[1], row[0]))
-                ))
-                evaluated = True
-                deadline = closes + timedelta(minutes=followup_minutes, seconds=30)
-                continue
-            try:
-                raw = await asyncio.wait_for(socket.recv(decode=True), min(seconds_left, 60))
-            except TimeoutError:
-                continue
-            received = datetime.now(KST)
-            if raw.startswith("{"):
-                status = json.loads(raw)
-                header = status.get("header", {})
-                if header.get("tr_id") == "PINGPONG":
-                    await socket.pong(raw.encode("utf-8"))
+                    pair = (header.get("tr_id"), header.get("tr_key"))
+                    if pair in pending:
+                        pending.remove(pair)
+                        if late_subscription(status.get("body", {}).get("rt_cd"), received,
+                                             opens, bars[pair[1]]):
+                            rejected.add(pair[1])
                     continue
-                pair = (header.get("tr_id"), header.get("tr_key"))
-                if pair in pending:
-                    pending.remove(pair)
-                    if status.get("body", {}).get("rt_cd") != "0" or received >= opens:
-                        rejected.add(pair[1])
-                continue
-            for item in parse_records(raw, feeds, received):
-                symbol = item["symbol"]
-                if market == "US" and not symbol.startswith(("DNAS","DNYS","DAMS")):
-                    matches = [key for key in bars if key[4:]==symbol]
-                    if len(matches)!=1:
+                for item in parse_records(raw, feeds, received):
+                    symbol = item["symbol"]
+                    if market == "US" and not symbol.startswith(("DNAS", "DNYS", "DAMS")):
+                        matches = [key for key in bars if key[4:] == symbol]
+                        if len(matches) != 1:
+                            continue
+                        symbol = matches[0]
+                    event_time = datetime.fromisoformat(item["event_time"])
+                    if symbol not in bars or symbol in rejected or not opens <= event_time:
                         continue
-                    symbol = matches[0]
-                event_time = datetime.fromisoformat(item["event_time"])
-                if symbol not in bars or symbol in rejected or not opens <= event_time:
-                    continue
-                if not -1 <= item["lag_seconds"] <= MAX_QUOTE_AGE:
-                    continue
-                if evaluated:
-                    if item["kind"] == "quote" and event_time >= closes and received <= deadline:
-                        followup[symbol].append({"at": received.isoformat(), "bid": item["bid"], "ask": item["ask"]})
-                    elif item["kind"] == "trade" and event_time >= closes and received <= deadline:
-                        slot = int((event_time - closes).total_seconds()) // BAR_SECONDS
-                        update_bar(after_bars[symbol], slot, event_time, item["price"], item["size"])
-                elif received < closes and event_time < closes and item["kind"] == "trade":
-                    slot = int((event_time - opens).total_seconds()) // BAR_SECONDS
-                    update_bar(bars[symbol], slot, event_time, item["price"], item["size"])
-                elif received < closes and event_time < closes and item["kind"] == "quote" and (
-                    symbol not in quotes or item["event_time"] >= quotes[symbol]["event_time"]
-                ):
-                    quotes[symbol] = item
+                    if not -1 <= item["lag_seconds"] <= MAX_QUOTE_AGE:
+                        continue
+                    if flags["evaluated"]:
+                        if item["kind"] == "quote" and event_time >= closes and received <= flags["deadline"]:
+                            followup[symbol].append({"at": received.isoformat(), "bid": item["bid"], "ask": item["ask"]})
+                        elif item["kind"] == "trade" and event_time >= closes and received <= flags["deadline"]:
+                            slot = int((event_time - closes).total_seconds()) // BAR_SECONDS
+                            update_bar(after_bars[symbol], slot, event_time, item["price"], item["size"])
+                    elif received < closes and event_time < closes and item["kind"] == "trade":
+                        slot = int((event_time - opens).total_seconds()) // BAR_SECONDS
+                        update_bar(bars[symbol], slot, event_time, item["price"], item["size"])
+                    elif received < closes and event_time < closes and item["kind"] == "quote" and (
+                        symbol not in quotes or item["event_time"] >= quotes[symbol]["event_time"]
+                    ):
+                        quotes[symbol] = item
+
+    attempts = 0
+    while True:
+        try:
+            await session()
+            break
+        except (WebSocketException, OSError, TimeoutError, asyncio.IncompleteReadError, json.JSONDecodeError) as exc:
+            attempts += 1
+            print(f"{market} 실시간 연결 끊김 ({type(exc).__name__}) · 재연결 {attempts}/{reconnect_attempts}", flush=True)
+            if attempts > reconnect_attempts or datetime.now(KST) >= closes + timedelta(minutes=2):
+                print(f"{market} 실시간 재연결 포기 · REST 5분봉 대체 수집", flush=True)
+                break
+            await asyncio.sleep(RECONNECT_BACKOFF_SECONDS[min(attempts - 1, len(RECONNECT_BACKOFF_SECONDS) - 1)])
+
+    if not flags["evaluated"]:
+        from rest_fallback import market_snapshot
+        try:
+            rest_bars, rest_quotes = market_snapshot("US" if market == "US" else market,
+                                                     symbols, opens, closes)
+        except Exception as exc:
+            rest_bars, rest_quotes = {}, {}
+            print(f"{market} REST 5분봉 대체 수집 실패 ({type(exc).__name__})", flush=True)
+        if rest_bars:
+            for symbol, found in rest_bars.items():
+                bars[symbol] = found
+            quotes.update(rest_quotes)
+            print(f"{market} REST 5분봉 {len(rest_bars)}종목 · 호가 {len(rest_quotes)}종목", flush=True)
+            # The bars are the opening bars, but the quote is taken now: the decision time
+            # used to age-check that quote is therefore now, not the planned close time.
+            flags["task"] = publish(set(), "rest", datetime.now(KST))
+        else:
+            raise RuntimeError(f"{market} 실시간·REST 모두 시세를 받지 못해 판정할 수 없습니다")
 
     with samples_path.open("w", encoding="utf-8") as output:
         for symbol in symbols:
@@ -1509,13 +1646,90 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 ],
             }
             output.write(dumps(row) + "\n")
-    await notification
-    if refresh_task is not None:
+    if flags["task"] is not None:
+        await flags["task"]
+    if flags["refresh_task"] is not None:
         try:
-            await refresh_task
+            await flags["refresh_task"]
         except Exception as exc:
             print(f"{samples_path.stem} 기업·뉴스 갱신 종료 ({type(exc).__name__})", flush=True)
+    if on_exit is not None and flags["published"] and flags["published"]["candidates"]:
+        decisions = exit_watch(flags["published"]["candidates"], bars, after_bars, closes)
+        if decisions:
+            try:
+                await asyncio.to_thread(on_exit, decisions)
+            except Exception as exc:
+                print(f"{samples_path.stem} 매도 규칙 점검 알림 실패 ({type(exc).__name__})", flush=True)
 
+
+def exit_watch(candidates, bars, after_bars, closes):
+    """Apply the sell rule to the bars observed after each delivered signal.
+
+    The entry is the signal's limit price, not a confirmed fill, and every alert built from
+    this says so. Without post-signal bars, or without a pre-entry volume baseline, the
+    rule keeps its fixed +6%/−2% branch and reports that the surge could not be confirmed.
+    """
+    from exit_policy import evaluate_series
+    decisions = []
+    for row in candidates:
+        if row[4] is None:
+            continue
+        symbol = row[0]
+        observations = []
+        for slot, bar in sorted((after_bars.get(symbol) or {}).items()):
+            observations.append(dict(at=closes + timedelta(minutes=5 * slot), price=bar["close"],
+                                     volume=bar["volume"], high=bar["high"], low=bar["low"]))
+        if not observations:
+            continue
+        opening = bars.get(symbol) or {}
+        baseline = [opening[slot]["volume"] for slot in (0, 1) if slot in opening]
+        decision = evaluate_series(row[4], observations, entry_at=closes,
+                                   baseline_volume=(sum(baseline) / len(baseline)) if baseline else None)
+        if decision is None:
+            continue
+        decisions.append(dict(symbol=symbol, entry=row[4], decision=decision,
+                              last_price=observations[-1]["price"],
+                              return_pct=round((observations[-1]["price"] / row[4] - 1) * 100, 2),
+                              volume_baseline=(sum(baseline) / len(baseline)) if baseline else None))
+    return decisions
+
+
+def format_exit_watch(market, decisions, closes):
+    """One message that says what the sell rule says now, and that no fill was observed."""
+    overseas = market.startswith("US-")
+    lines = [f"매도 규칙 점검 · {closes:%m/%d %H:%M} {'ET' if overseas else 'KST'} 신호 기준",
+             "실제 체결은 확인되지 않았습니다. 신호가 기준가로 계산한 참고 판정입니다."]
+    for row in decisions:
+        symbol = row["symbol"]
+        ticker = symbol[4:] if overseas else symbol
+        name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (
+            KR_SYMBOL_NAMES.get(symbol + ".KS") or KR_SYMBOL_NAMES.get(symbol + ".KQ") or symbol)
+        decision = row["decision"]
+
+        def price_label(value, step=Decimal("0.01" if overseas else "1")):
+            if value is None:
+                return "-"
+            number = Decimal(str(value)).quantize(step, rounding=ROUND_DOWN)
+            return ("$" + f"{number:,.2f}") if overseas else f"{number:,.0f}원"
+        if decision["action"] == "exit":
+            state = {"stop_loss": "손절", "take_profit": "기본 익절",
+                     "surge_trailing_exit": "급등 후 거래량 급감·고점 하락 청산",
+                     "trailing_floor_breached": "급등 보유 하한 이탈"}.get(decision["reason"], decision["reason"])
+            lines.extend(["", f"• {name} ({ticker}) · 매도 신호 · {state}",
+                          f"  청산 기준 {price_label(decision.get('exit_price'))} · 신호가 대비 {row['return_pct']:+.2f}%",
+                          f"  기준가 {price_label(row['entry'])} · 고점 {price_label(decision.get('peak'))}"])
+        else:
+            if decision["reason"] == "surge_hold":
+                state = "단기 급등 확인 → +6%에서 팔지 않고 트레일링 보유"
+            else:
+                state = "기본 규칙 유지 (손절 −2% · 익절 +6%)"
+            extra = ""
+            if decision["reason"] != "surge_hold" and decision.get("mode") == "fixed" and row.get("volume_baseline") is None:
+                extra = " · 급등 판정에 필요한 기준 거래량 없음"
+            lines.extend(["", f"• {name} ({ticker}) · 보유 · {state}{extra}",
+                          f"  현재 {price_label(row['last_price'])} · 신호가 대비 {row['return_pct']:+.2f}%",
+                          f"  익절 {price_label(decision.get('target_price'))} · 손절 {price_label(decision.get('stop_price'))}"])
+    return "\n".join(lines)
 
 def confirmed_contract_events(companies, market, observed_at):
     return [
@@ -1630,6 +1844,41 @@ def notify(market, candidates, closes, token, chat_id, companies=None, sectors=N
         print(f"Telegram sent: {market} intraday candidates (part {result['parts_sent']})")
     SENT_INTRADAY.add(key)
     result["sent"] = True
+    return result
+
+
+def notify_exit(market, decisions, closes, token, chat_id):
+    """Deliver the sell-rule check for the signals of this session.
+
+    It is a separate message type from the buy alert: the buy gate refuses a repeated or
+    stale decision, while this one reports what the rule says about the signals already
+    sent, and it never claims a fill.
+    """
+    now = datetime.now(KST)
+    result = {"market": market, "mode": "exit_watch", "decision_at": closes.isoformat(),
+              "checked_at": now.isoformat(), "items": len(decisions), "parts_sent": 0,
+              "sent": False, "suppressed_by_gate": False, "reason": None}
+    if not token or not chat_id:
+        result.update(suppressed_by_gate=True, reason="configuration_not_set")
+        return result
+    message = format_exit_watch(market, decisions, closes)
+    parts = split_telegram_text(message)
+    for part in parts:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": part},
+                timeout=10, allow_redirects=False,
+            )
+            if response.status_code != 200:
+                raise RuntimeError(f"Telegram returned HTTP {response.status_code}")
+            body = response.json()
+            if not isinstance(body, dict) or body.get("ok") is not True:
+                raise RuntimeError("Telegram did not confirm delivery")
+        except (requests.RequestException, ValueError):
+            raise RuntimeError("Telegram request failed or returned invalid JSON") from None
+    result.update(sent=bool(parts), parts_sent=len(parts))
+    print(f"Telegram confirmed: {len(parts)} exit watch parts", flush=True)
     return result
 
 
@@ -1768,7 +2017,13 @@ def main():
             opens = collection_open(scheduled_open, datetime.now(local_zone))
             if opens != scheduled_open:
                 print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=15):%H:%M}")
-            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds), resistance=resistance, refresh_context=refresh_companies, companies=companies, sector_snapshot=sector_snapshot, volume_baseline=volume_baselines(history, symbols, overseas, opens)))
+            def publish_exit(decisions):
+                delivery = notify_exit(market, decisions, opens + timedelta(minutes=15), token, chat_id)
+                dump(Path(f"{market}-exit-watch.json"), delivery)
+                if not delivery.get("sent"):
+                    print("EXIT_WATCH=" + json.dumps(delivery, ensure_ascii=False), flush=True)
+
+            asyncio.run(collect(approval, "US" if overseas else market, symbols, opens, publish, Path(f"{market}.jsonl"), evidence, observation_only=bool(missing_kinds), resistance=resistance, refresh_context=refresh_companies, companies=companies, sector_snapshot=sector_snapshot, volume_baseline=volume_baselines(history, symbols, overseas, opens), on_exit=publish_exit))
         else:
             print(f"{market} 감시 후보 없음")
             publish([])
