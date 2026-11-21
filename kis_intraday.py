@@ -857,6 +857,9 @@ def company_quality_metrics(ticker, snapshot, now):
             value = info.get(source)
             if isinstance(value,(int,float)) and math.isfinite(value):
                 result[target] = float(value)
+                if target in ('trailing_pe','forward_pe','price_to_book'):
+                    # Per-field source so a KIS trailing PE cannot be compared with this one.
+                    result[target+'_source'] = 'Yahoo Finance observed multiples'
         if any(key in result for key in ('trailing_pe','price_to_book')):
             result['valuation_source'] = 'Yahoo Finance observed multiples'
             result['valuation_observed_at'] = datetime.now(now.tzinfo).isoformat()
@@ -930,6 +933,7 @@ def apply_derived_valuation(snapshot, now):
             and snapshot.get("price_indicators", {}).get("price")):
         close = snapshot["price_indicators"]["price"]
         snapshot["trailing_pe"] = close / snapshot["trailing_eps"]
+        snapshot["trailing_pe_source"] = "reported four-quarter EPS with the last close"
         snapshot["valuation_source"] = "reported four-quarter EPS with the last close"
         snapshot["valuation_observed_at"] = datetime.now(now.tzinfo).isoformat()
     return snapshot

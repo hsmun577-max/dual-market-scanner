@@ -5,6 +5,13 @@ import re
 
 MIN_AVERAGE_TURNOVER = {"KR": 5_000_000_000, "US": 10_000_000}
 MIN_PRICE = {"KR": 1000, "US": 5}
+# Demand has to be observed in volume, not inferred from the price high alone. The
+# five-session backtest of 2,300 candidates (2025-02-28~2026-11-12, 565 symbols) shows the
+# 1.2-1.8x band has no edge over the same day's universe (-0.54%p for individual stocks)
+# while 1.8x and above turns positive, and the improvement is monotonic up to 3x. A price
+# breakout on 1.2-1.5x volume was -0.67%p, so a breakout does not replace volume.
+MIN_DEMAND_VOLUME_RATIO = 1.2
+MIN_EXPANSION_VOLUME_RATIO = 1.8
 SPECIAL_SECURITY = re.compile(
     r"스팩|애퀴지션|우선주|유닛|워런트|\b(?:spac|acquisition|preferred|warrants?|units?)\b", re.I)
 CASH_OR_BOND = re.compile(
@@ -59,6 +66,17 @@ def liquidity_rejection_reason(item, market):
     return None
 
 
+def market_headwind_reason(indicators):
+    """The entries have no edge while the market index is below its 20-day average.
+
+    Compared same-day (so market direction is already removed), individual-stock
+    candidates were -1.11%p against their own universe on those days and +0.14%p on the
+    other days. ``None`` means the regime was not observed: an archived report or a
+    missing benchmark must not be read as a headwind.
+    """
+    return "market_headwind" if indicators.get("market_above_ma20") is False else None
+
+
 def candidate_rejection_reason(item, market):
     reason = liquidity_rejection_reason(item, market)
     if reason:
@@ -72,11 +90,12 @@ def candidate_rejection_reason(item, market):
         return "weak_relative_trend"
     if values.get("overheated") or values["return_5d"] > 0.12 or values["price"] / values["ma20"] > 1.08:
         return "extended_price"
-    if not values.get("obv_rising") or values["volume_ratio"] < 1.2:
+    if not values.get("obv_rising") or values["volume_ratio"] < MIN_DEMAND_VOLUME_RATIO:
         return "unconfirmed_demand"
-    if not values.get("breakout") and values["volume_ratio"] < 1.5:
-        return "no_price_or_volume_trigger"
-    return None
+    if values["volume_ratio"] < MIN_EXPANSION_VOLUME_RATIO:
+        return "insufficient_demand_expansion"
+    # A stock that passes every own-signal test is still held back by its market.
+    return market_headwind_reason(values)
 
 
 def rank_market_candidates(candidates, market, limit=5):

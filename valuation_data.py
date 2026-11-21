@@ -34,7 +34,11 @@ def domestic_valuations(symbols, client=None):
             for source,target in [('per','trailing_pe'),('pbr','price_to_book'),
                                   ('eps','trailing_eps'),('bps','book_value_per_share'),('aspr_unit','price_tick')]:
                 value=finite(row.get(source))
-                if value is not None: values[target]=value
+                if value is not None:
+                    values[target]=value
+                    if target in ('trailing_pe','price_to_book'):
+                        # Per-field source: a Yahoo forward PE must not be divided by this one.
+                        values[target+'_source']='KIS inquire-price'
             result[symbol]=values
         except Exception:
             continue

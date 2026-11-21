@@ -15,6 +15,7 @@ import requests
 from candidate_selection import candidate_rejection_reason, rank_market_candidates
 from sector_flow import fetch_intraday_sectors, format_sector_header
 from telegram_text import split_telegram_text
+from research_asset import is_fund
 from company_forecast import build_company_forecast
 from delivery_policy import delivery_status
 from exit_policy import DEFAULT_EXIT_POLICY, policy_snapshot
@@ -371,8 +372,18 @@ def calculate_indicators(data, benchmark=None):
 
     relative_strength = None
     market_return = None
+    market_above_ma20 = None
+    market_ma20 = None
 
     if benchmark is not None:
+        # Market regime from the index itself: an entry needs the index above its own
+        # 20-day average. Left as None (not False) when the index is unavailable so a
+        # fetch gap cannot read as a headwind.
+        index_closes = benchmark["Close"].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
+        if len(index_closes) >= 20:
+            market_ma20 = float(index_closes.tail(20).mean())
+            market_above_ma20 = bool(float(index_closes.iloc[-1]) > market_ma20)
+
         aligned = pd.concat(
             [
                 close.rename("stock"),
@@ -422,6 +433,8 @@ def calculate_indicators(data, benchmark=None):
         "atr14_pct": safe_float(100 * pd.concat([high-low, (high-close.shift()).abs(),
             (low-close.shift()).abs()],axis=1).max(axis=1).tail(14).mean()/price),
         "market_return_20d": safe_float(market_return),
+        "market_above_ma20": market_above_ma20,
+        "market_ma20": safe_float(market_ma20),
         "average_turnover_20d": safe_float((close * volume).iloc[-21:-1].mean()),
         "return_5d": safe_float(return_5),
         "return_20d": safe_float(return_20),
@@ -725,6 +738,7 @@ def telegram_candidate_line(item):
     symbol = item["symbol"]
     overseas = item["market"] == "US"
     name = item.get("name") or symbol
+    kind = " · ETF" if is_fund(item) else ""
     code = symbol if overseas else symbol.split(".")[0]
     entry_label = "$" + f"{entry:,.2f}" if overseas else f"{entry:,.0f}원"
     target, upside = forecast["base_price"], forecast["bull_price"]
@@ -742,7 +756,7 @@ def telegram_candidate_line(item):
                 "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)" + caveat_note(item))
     basis = f" · {preopen['reference_date']} 종가 기준" if conditional else ''
     caveat = caveat_note(item)
-    return (f"• {name} ({code}) · {label} · 종합 {score:.1f}/100\n"
+    return (f"• {name} ({code}) · {label}{kind} · 종합 {score:.1f}/100\n"
             f"  매수 상한 {entry_label}{basis}\n"
             f"  5거래일 분석 목표 · 기준/상승 {target_label}\n"
             f"  손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
@@ -890,6 +904,22 @@ def sector_flow_snapshot(market, now):
     return rows
 
 
+def market_regime_note(report):
+    """Say when the market itself held candidates back, so a quiet day is not a silent zero."""
+    names = {"KR": "KOSPI", "US": "S&P500(SPY)"}
+    lines = []
+    for market, data in sorted((report.get("market_regime") or {}).items()):
+        if not data.get("observed"):
+            lines.append(f"시장 국면({names.get(market, market)}): 지수 확인 불가 · 국면 필터 미적용")
+            continue
+        state = "상승 국면(지수 > 20일선)" if data.get("above_ma20") else "하락 국면(지수 < 20일선)"
+        note = f"시장 국면({names.get(market, market)}): {state}"
+        if data.get("above_ma20") is False and data.get("headwind_skipped"):
+            note += f" · 추세 통과 {data['headwind_skipped']}종목은 시장 역풍으로 보류"
+        lines.append(note)
+    return lines
+
+
 def send_telegram_summary(report):
     """Send the daily/preopen summary and report what actually happened.
 
@@ -914,6 +944,7 @@ def send_telegram_summary(report):
         return result
 
     lines = list(report.get('sector_header_override') or format_sector_header(report.get("sectors", [])))
+    lines.extend(market_regime_note(report))
     confirmed = [item for item in report["results"]
                  if (item.get("signal", {}).get("confirmed") is True
                  and item.get("signal", {}).get("entry_limit") is not None
@@ -1033,6 +1064,17 @@ def main():
         for tickers in watchlist.values()
     )
     sectors, sector_errors = scan_sectors(benchmarks) if all_results else ([], [])
+    market_regime = {}
+    for market in BENCHMARKS:
+        rows = [item for item in all_results if item["market"] == market]
+        observed = next((item["indicators"].get("market_above_ma20") for item in rows
+                         if item["indicators"].get("market_above_ma20") is not None), None)
+        ma20 = next((item["indicators"].get("market_ma20") for item in rows
+                     if item["indicators"].get("market_ma20") is not None), None)
+        headwind_skipped = sum(1 for item in rows if item.get("selection_filter") == "market_headwind")
+        market_regime[market] = {"index_symbol": BENCHMARKS[market], "above_ma20": observed,
+                                 "index_ma20": ma20, "headwind_skipped": headwind_skipped,
+                                 "observed": observed is not None}
 
     report = {
         "generated_at": datetime.now(
@@ -1047,6 +1089,7 @@ def main():
         "status": "partial" if all_errors or benchmark_errors or sector_errors else "complete",
         "error_summary": summarize_scan_errors(all_errors),
         "benchmark_errors": benchmark_errors,
+        "market_regime": market_regime,
         "sectors": sectors,
         "sector_errors": sector_errors,
         "market_summary": {

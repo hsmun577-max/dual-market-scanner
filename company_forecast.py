@@ -43,6 +43,41 @@ def _number(mapping, key):
     return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else None
 
 
+# A forward multiple this far from trailing is a basis or unit mismatch, not an outlook.
+# Two providers are compared (KIS trailing PE, Yahoo forward PE for Korean issuers), and a
+# Yahoo forward EPS that is off by a factor of ten (Samsung Electronics 27.56 trailing vs
+# 2.35 forward) turned the axis into a constant +4.9 points for every Korean large cap.
+FORWARD_TO_TRAILING_BOUNDS = (1 / 3, 3)
+
+
+def valuation_outlook_component(company):
+    """Earnings-outlook axis from two multiples, only when they are comparable.
+
+    Returns ``(score, evidence, exclusion)``. Nothing is scored when the trailing and
+    forward multiples come from different sources or when the forward multiple is more
+    than 3x away from trailing; the caller then falls back to peer multiples, which are
+    same-source, instead of dividing one provider by another.
+    """
+    trailing = _number(company, "trailing_pe")
+    forward = _number(company, "forward_pe")
+    if trailing is None or forward is None or min(trailing, forward) <= 0:
+        return None, None, None
+    trailing_source = company.get("trailing_pe_source")
+    forward_source = company.get("forward_pe_source")
+    pair = {"trailing_pe": trailing, "forward_pe": forward,
+            "trailing_pe_source": trailing_source, "forward_pe_source": forward_source}
+    if trailing_source and forward_source and trailing_source != forward_source:
+        return None, None, {"reason": "mixed_sources", **pair}
+    ratio = trailing / forward
+    low, high = FORWARD_TO_TRAILING_BOUNDS
+    if not low <= ratio <= high:
+        return None, None, {"reason": "implausible_forward_multiple",
+                            "trailing_to_forward": round(ratio, 4), **pair}
+    return (math.tanh(math.log(ratio)),
+            {**pair, "meaning": "earnings outlook at current pricing, not peer fair value"},
+            None)
+
+
 def financial_period_missing(company):
     """A newer periodic filing must not silently leave an older quarter scored."""
     try:
@@ -117,12 +152,12 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         if liabilities is not None:
             components["balance_sheet"] = -math.tanh(liabilities-1)
             evidence["balance_sheet"] = {"liabilities_to_equity":liabilities}
-    trailing = _number(company, "trailing_pe")
-    forward = _number(company, "forward_pe")
-    if trailing is not None and forward is not None and min(trailing,forward)>0:
-        components["valuation_outlook"] = math.tanh(math.log(trailing/forward))
-        evidence["valuation_outlook"] = {"trailing_pe":trailing,"forward_pe":forward,
-                                        "meaning":"earnings outlook at current pricing, not peer fair value"}
+    valuation, valuation_evidence, valuation_excluded = valuation_outlook_component(company)
+    if valuation_excluded is not None:
+        evidence["valuation_outlook_excluded"] = valuation_excluded
+    if valuation is not None:
+        components["valuation_outlook"] = valuation
+        evidence["valuation_outlook"] = valuation_evidence
     elif company.get('peer_valuation'):
         peer = company['peer_valuation']
         peer_at = datetime.fromisoformat(peer['observed_at'])
