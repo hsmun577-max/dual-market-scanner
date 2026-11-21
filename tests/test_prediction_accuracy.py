@@ -165,5 +165,35 @@ class InstrumentLabelTests(unittest.TestCase):
         self.assertNotIn("ETF", telegram_candidate_line(plain))
 
 
+class MarketRegimeAlertTests(unittest.TestCase):
+    def _send(self, report):
+        from unittest.mock import Mock, patch
+        import os
+        import scanner
+        with patch.dict(os.environ, {'TELEGRAM_BOT_TOKEN': 'fake', 'TELEGRAM_CHAT_ID': 'fake'}), \
+             patch.object(scanner.requests, 'post') as post, \
+             patch('scanner.delivery_status', return_value=(True, 'test')):
+            post.return_value = Mock(status_code=200, json=lambda: {'ok': True})
+            scanner.send_telegram_summary(report)
+        return post.call_args.kwargs['json']['text']
+
+    def test_a_quiet_day_says_the_market_held_the_candidates_back(self):
+        report = dict(results=[], sectors=[],
+                      buy_evaluation=dict(completed=True, decision_completed=12, data_excluded=0,
+                                          counts={'market_headwind': 9, 'composite_score_below_policy': 3}))
+        message = self._send(report)
+        self.assertIn('판정 완료 12종목', message)
+        self.assertIn('시장 역풍으로 보류 9종목', message)
+
+    def test_the_regime_line_is_not_duplicated_when_the_report_carries_it(self):
+        report = dict(results=[], sectors=[],
+                      buy_evaluation=dict(completed=True, decision_completed=1, data_excluded=0,
+                                          counts={'market_headwind': 1}),
+                      market_regime={'KR': {'above_ma20': False, 'observed': True, 'headwind_skipped': 1}})
+        message = self._send(report)
+        self.assertIn('시장 국면(KOSPI)', message)
+        self.assertNotIn('시장 역풍으로 보류 1종목', message)
+
+
 if __name__ == "__main__":
     unittest.main()
