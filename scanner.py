@@ -964,6 +964,11 @@ def send_telegram_summary(report):
             lines.append(f"판정 완료 {evaluation['decision_completed']}종목 · 현재 매수 조건 충족 없음")
             if evaluation.get('data_excluded'):
                 lines.append(f"자료 부족 {evaluation['data_excluded']}종목은 매수 판정에서 제외")
+            blocked = (evaluation.get('counts') or {}).get('market_headwind')
+            if blocked and not (report.get('market_regime') or {}):
+                # Stored preopen reports do not carry the regime block; the count still
+                # says why nothing qualified instead of leaving a silent zero.
+                lines.append(f"시장 역풍으로 보류 {blocked}종목 (지수 < 20일선)")
         elif evaluation.get('completed') is True:
             lines.append("매수 조건 충족 종목 없음")
         else:
