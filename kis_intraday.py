@@ -1655,7 +1655,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
             break
         except (WebSocketException, OSError, TimeoutError, asyncio.IncompleteReadError, json.JSONDecodeError) as exc:
             attempts += 1
-            print(f"{market} 실시간 연결 끊김 ({type(exc).__name__}) · 재연결 {attempts}/{reconnect_attempts}", flush=True)
+            print(f"{market} 실시간 연결 끊김 ({type(exc).__name__}) · 재연결 시도 {attempts}/{reconnect_attempts}", flush=True)
             if attempts > reconnect_attempts or datetime.now(KST) >= closes + timedelta(minutes=2):
                 print(f"{market} 실시간 재연결 포기 · REST 5분봉 대체 수집", flush=True)
                 break

@@ -62,6 +62,13 @@ class MultiMarketSessionTests(unittest.TestCase):
         self.assertEqual(report["preopen_sessions"], {"KR": "2026-11-19"})
         self.assertEqual(report["results"][0]["preopen_signal"]["expires_session"], "2026-11-19")
 
+    def test_a_plan_is_dated_to_the_session_it_applies_to(self):
+        report = dict(results=[row("KR", "005930.KS", "2026-11-19")], sectors=[])
+        evaluate_preopen_markets(report, AT)
+        self.assertEqual(report["preopen_session"], "2026-11-20")
+        self.assertEqual(report["results"][0]["preopen_signal"]["reference_date"], "2026-11-19")
+        self.assertEqual(report["results"][0]["preopen_signal"]["expires_session"], "2026-11-20")
+
     def test_a_partial_score_is_planned_and_labelled(self):
         report = dict(results=[row("KR", "005930.KS")], sectors=[])
         report["results"][0]["company_forecast"] = forecast(70, "partial", ["valuation_outlook"])
