@@ -197,6 +197,7 @@ def financials(document, today=None, price=None):
             result["trailing_eps"] = trailing_eps
             if isinstance(price, (int, float)) and price > 0:
                 result["trailing_pe"] = price / trailing_eps
+                result["trailing_pe_source"] = "SEC XBRL trailing four-quarter EPS with observed price"
                 result["valuation_source"] = "SEC XBRL trailing four-quarter EPS with observed price"
                 result["valuation_observed_at"] = datetime.now(tz=None).astimezone().isoformat()
     return result

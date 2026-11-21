@@ -105,7 +105,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         elif values.get('breakdown'): status='breakdown'
         elif not catalyst and (values.get('overheated') or values.get('return_5d',0)>.12 or price/values['ma20']>1.08):
             status='extended_price'
-        elif trend_reason and not event_support: status=trend_reason
+        elif trend_reason and (trend_reason == 'market_headwind' or not event_support): status=trend_reason
         elif score<MIN_COMPOSITE_SCORE: status='composite_score_below_policy'
         elif catalyst:
             tick=company.get('price_tick',.01 if row['market']=='US' else None)
