@@ -39,6 +39,14 @@ def session_dates(report,at=None):
     return dates
 
 
+def next_session(day,market):
+    """The session a plan built from ``day``'s close applies to."""
+    from exchange_calendars import get_calendar
+    try:
+        return get_calendar('XKRX' if market=='KR' else 'XNYS').next_session(day).date().isoformat()
+    except (KeyError,ValueError):return None
+
+
 def _expected_session(previous_session,market):
     if isinstance(previous_session,dict):return previous_session.get(market)
     return previous_session
@@ -176,8 +184,12 @@ def evaluate_preopen_markets(report, at=None):
     markets=[market for market in ('KR','US')
              if market in sessions and any(row.get('market')==market and 'company_analysis' in row
                                            for row in report.get('results',[]))]
+    caller_session=report.get('preopen_session') if isinstance(report.get('preopen_session'),str) else None
     for market in markets:
-        report['preopen_session']=sessions[market]
+        # ``preopen_session`` is the session the plan is for; the reference session the
+        # entry limit comes from is passed separately, so a plan is never dated before it
+        # was made.
+        report['preopen_session']=caller_session or next_session(sessions[market],market) or sessions[market]
         parts[market]=evaluate_preopen(report,sessions[market],at,market=market)
     if not parts:
         report['buy_evaluation']=dict(completed=False,decision_completed=0,data_excluded=0,
