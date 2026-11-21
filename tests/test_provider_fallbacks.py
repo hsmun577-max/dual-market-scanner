@@ -79,6 +79,53 @@ class _patched_get:
         return False
 
 
+class ValuationTests(unittest.TestCase):
+    def frame(self, values):
+        import pandas as pd
+        columns = pd.to_datetime(["2026-09-30", "2026-06-30", "2026-03-31", "2025-12-31"])
+        return pd.DataFrame([values], index=["DilutedEPS"], columns=columns)
+
+    def test_four_reported_quarters_give_trailing_eps(self):
+        import kis_intraday as k
+        frame = self.frame([1.4, 1.2, 1.0, 0.8])
+        frame.loc["TotalRevenue"] = [100, 90, 80, 70]
+        frame.loc["OperatingIncome"] = [15, 12, 10, 8]
+        self.assertAlmostEqual(k.trailing_eps(frame, datetime(2026, 11, 20).date()), 4.4)
+        result = k.company_financials(frame, datetime(2026, 11, 20).date())
+        self.assertAlmostEqual(result["trailing_eps"], 4.4)
+        self.assertIn("four quarters", result["eps_source"])
+
+    def test_three_quarters_or_a_loss_never_become_a_trailing_multiple(self):
+        import kis_intraday as k
+        import pandas as pd
+        frame = pd.DataFrame([[1.0, None, None, None]], index=["DilutedEPS"],
+                             columns=pd.to_datetime(["2026-09-30", "2026-06-30", "2026-03-31", "2025-12-31"]))
+        self.assertIsNone(k.trailing_eps(frame, datetime(2026, 11, 20).date()))
+        loss = self.frame([-3.0, 1.0, 1.0, 1.0])
+        self.assertIsNone(k.trailing_eps(loss, datetime(2026, 11, 20).date()))
+
+    def test_the_last_close_fills_a_missing_multiple(self):
+        import kis_intraday as k
+        from zoneinfo import ZoneInfo
+        snapshot = dict(trailing_eps=4.4, price_indicators=dict(price=56.0),
+                        valuation_observed_at=None)
+        k.apply_derived_valuation(snapshot, datetime(2026, 11, 20, 9, tzinfo=ZoneInfo("Asia/Seoul")))
+        self.assertAlmostEqual(snapshot["trailing_pe"], 56 / 4.4)
+        self.assertIn("reported four-quarter EPS", snapshot["valuation_source"])
+        kept = dict(trailing_pe=20.0, trailing_eps=4.4, price_indicators=dict(price=56.0))
+        k.apply_derived_valuation(kept, datetime(2026, 11, 20, 9, tzinfo=ZoneInfo("Asia/Seoul")))
+        self.assertEqual(kept["trailing_pe"], 20.0)
+
+    def test_an_empty_quote_summary_is_asked_again(self):
+        import kis_intraday as k
+        answers = [{}, dict(trailingPE=20.0)]
+        ticker = Mock()
+        ticker.get_info.side_effect = lambda: answers.pop(0)
+        info = k.observed_info(ticker)
+        self.assertEqual(info["trailingPE"], 20.0)
+        self.assertEqual(ticker.get_info.call_count, 2)
+
+
 class ProviderRetryTests(unittest.TestCase):
     def test_a_throttle_is_retried_and_the_second_answer_is_used(self):
         calls = []

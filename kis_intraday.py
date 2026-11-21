@@ -27,7 +27,7 @@ from candidate_selection import instrument_rejection_reason, rank_market_candida
 from sector_flow import format_sector_header
 from telegram_text import split_telegram_text
 from exit_policy import DEFAULT_EXIT_POLICY
-from provider_retry import call as provider_call, isolate_yfinance_cache
+from provider_retry import call as provider_call, isolate_yfinance_cache, transient
 from scanner import (BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, calculate_indicators,
                      classify_signal, clean_prices, sector_flow_snapshot, yf_download)
 
@@ -371,6 +371,30 @@ def dart_financial_reports(api_key, corp_code, now):
             for row in body.get("list", []) if re.fullmatch(r"\d{14}", row.get("rcept_no", ""))]
 
 
+def trailing_eps(statement, today):
+    """Sum the last four reported quarterly EPS figures, if the statement carries them.
+
+    Yahoo rate-limits the quote summary that normally supplies trailing EPS, while the same
+    statement download usually succeeds. Four reported quarters give a trailing multiple
+    without estimating anything.
+    """
+    key = next((key for key in ("DilutedEPS", "Diluted EPS", "BasicEPS", "Basic EPS")
+                if key in statement.index), None)
+    if key is None:
+        return None
+    values = []
+    for column in sorted((col for col in statement.columns if col.date() < today), reverse=True)[:4]:
+        try:
+            value = float(statement.loc[key, column])
+        except (TypeError, ValueError):
+            return None
+        values.append(value if math.isfinite(value) else None)
+    if len(values) < 4 or any(value is None for value in values):
+        return None
+    total = sum(values)
+    return total if total > 0 else None
+
+
 def company_financials(statement, today):
     revenue_key = next((key for key in ("TotalRevenue", "Total Revenue") if key in statement.index), None)
     income_key = next((key for key in ("OperatingIncome", "Operating Income") if key in statement.index), None)
@@ -391,6 +415,10 @@ def company_financials(statement, today):
                 prior_income = float(statement.loc[income_key, prior])
                 if math.isfinite(prior_income):
                     result["operating_margin_yoy_pp"] = 100 * (income / sales - prior_income / prior_sales)
+        eps = trailing_eps(statement, today)
+        if eps is not None:
+            result["trailing_eps"] = eps
+            result["eps_source"] = "reported quarterly EPS, four quarters"
         return result
     return {}
 
@@ -800,11 +828,29 @@ def sec_company_financials(ticker_symbol, now, price=None):
         return {}
 
 
+def observed_info(ticker, attempts=2):
+    """Issuer profile and multiples, retried when the answer is empty or throttled.
+
+    Yahoo answers an empty quote summary (or a 404 "no fundamentals data" for a valid
+    ticker) while it is throttling; one retry with a pause recovers most of those, and an
+    empty dict must not become "this issuer has no multiples".
+    """
+    def throttled(exc):
+        return transient(exc) or "404" in str(exc)
+
+    info = {}
+    for _attempt in range(attempts):
+        info = provider_call(ticker.get_info, attempts=2, backoff=(3, 6), retry_on=throttled) or {}
+        if info:
+            return info
+    return info
+
+
 def company_quality_metrics(ticker, snapshot, now):
     """Read operating cash, leverage and earnings expectations with dated statements."""
     result = {}
     try:
-        info = provider_call(ticker.get_info) or {}
+        info = observed_info(ticker)
         for source, target in (("trailingPE","trailing_pe"),("forwardPE","forward_pe"),
                                ("forwardEps","forward_eps"),("trailingEps","trailing_eps"),
                                ("priceToBook","price_to_book")):
@@ -872,6 +918,21 @@ def company_quality_metrics(ticker, snapshot, now):
     except Exception as exc:
         result["balance_sheet_error"] = type(exc).__name__
     return result
+
+
+def apply_derived_valuation(snapshot, now):
+    """Price over reported four-quarter EPS when the quote summary has no multiple.
+
+    This is an observed trailing multiple from filed earnings, not an estimate, and it is
+    only used when the provider gave no multiple of its own.
+    """
+    if (snapshot.get("trailing_pe") is None and snapshot.get("trailing_eps")
+            and snapshot.get("price_indicators", {}).get("price")):
+        close = snapshot["price_indicators"]["price"]
+        snapshot["trailing_pe"] = close / snapshot["trailing_eps"]
+        snapshot["valuation_source"] = "reported four-quarter EPS with the last close"
+        snapshot["valuation_observed_at"] = datetime.now(now.tzinfo).isoformat()
+    return snapshot
 
 
 def restore_business_profile(snapshot, cached, now):
@@ -1015,6 +1076,7 @@ def company_context(market, symbols, now):
         restore_business_profile(snapshot, cached_profiles.get(mapped_tickers[symbol], {}),
                                  datetime.now(now.tzinfo))
         snapshot.update(domestic_values.get(symbol, {}))
+        apply_derived_valuation(snapshot, now)
         official_name = (US_SYMBOL_NAMES.get(symbol[4:]) if overseas else
                          KR_SYMBOL_NAMES.get(mapped_tickers[symbol]))
         if official_name:
