@@ -13,6 +13,13 @@ import re
 # is worth the 2% stop. Both entry paths (live intraday and preopen) read it from here so
 # the floor and the scenario formula below cannot drift apart again.
 MIN_BASE_REWARD_PCT = 3.3
+# Evidence gaps that withhold a score. They are integrity or completeness failures of the
+# financial statements themselves: a newer filing than the quarter scored, statements too
+# old for the period, or evidence stamped in the future. A missing supporting dimension
+# (valuation multiples, sector flow, event bodies, cash-flow detail) is a caveat that
+# reduces the edge, not a reason to discard the whole issuer.
+BLOCKING_GAPS = frozenset({"current_financial_period", "latest_report_not_in_financials",
+                           "future_company_evidence"})
 # One composite threshold for every entry path (live intraday, preopen plan and the
 # execution check), so a 55-point candidate cannot alert and then be refused.
 MIN_COMPOSITE_SCORE = 60.0
@@ -238,8 +245,16 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
                           "feeds_checked":feeds_checked,"uncertainty":uncertainty,
                           "causal_analysis":causal if causal_valid else {"status":"unavailable_or_stale"},
                           "meaning":"rule based event direction; not quantified earnings impact"}
+    unread_required = sum(1 for row in causal.get("unread_events", []) if row.get("required", True))
+    if unread_required:
+        # A body we could not read removes positive event credit; it does not erase the
+        # financial and price evidence we did verify. Keep the score and widen it.
+        uncertainty = max(uncertainty, min(.8, .25 + .1 * unread_required))
+    # A missing dimension credits nothing: the raw sum keeps its weight at zero instead
+    # of renormalising the rest upward. An issuer with three of seven dimensions scored
+    # therefore keeps a small edge, not the full strength of its strongest component.
     coverage = sum(weights[key] for key in components)
-    composite = sum(weights[key]*value for key,value in components.items())/coverage if coverage else 0.
+    composite = sum(weights[key]*value for key,value in components.items())
     ma20 = _number(indicators,"ma20")
     extension = max(0,price/ma20-1) if ma20 is not None and ma20>0 else 0.
     # A rise that has already occurred reduces the remaining event/earnings scenario.
@@ -265,7 +280,7 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     missing = [key for key in weights if key not in components]
     if not causal_valid:
         missing.append("causal_event_analysis")
-    elif any(row.get("required",True) for row in causal.get("unread_events", [])):
+    elif unread_required:
         missing.append("unread_event_bodies")
     if causal_valid and not any(row.get("status")=="checked" for row in causal.get("feed_coverage", [])):
         missing.append("world_event_coverage")
@@ -287,14 +302,21 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     available = company.get("available_at") or company.get("checked_at")
     if available and datetime.fromisoformat(available)>at:
         missing.append("future_company_evidence")
-    complete = not missing
+    blocking = [gap for gap in missing if gap in BLOCKING_GAPS]
+    if "growth" not in components and "earnings_quality" not in components:
+        # No income statement at all would make the score a chart reading, not a company
+        # assessment; that case stays unscored whatever else was collected.
+        blocking.append("financial_statements")
+    status = "incomplete" if blocking else "partial" if missing else "complete"
     return {"model":"uncalibrated_multifactor_scenarios_v1","generated_at":at.isoformat(),
         "horizon_sessions":5,"data_coverage":round(coverage,4),
         "components":components,"weights":weights,"evidence":evidence,"priced_in_fraction":round(priced_in,4),
         "catalyst_context":catalyst,
-        "assessment_status":"complete" if complete else "incomplete",
+        "assessment_status":status,
+        "score_withheld_reasons":sorted(set(blocking)),
+        "caveats":[gap for gap in missing if gap not in blocking],
         "missing_dimensions":missing,
-        "composite_score":round(max(0,min(100,50+50*after_pricing)),1) if complete else None,
+        "composite_score":round(max(0,min(100,50+50*after_pricing)),1) if not blocking else None,
         "volatility_source":volatility_source,"direction_score":round(composite,6),
         "scenario_sigma_multiple":round(sigma_multiple,4),
         "min_base_reward_pct":MIN_BASE_REWARD_PCT,

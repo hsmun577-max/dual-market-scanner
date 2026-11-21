@@ -7,11 +7,55 @@ from advance_policy import advance_context,eligible_for_advance_research
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
 from exit_policy import DEFAULT_EXIT_POLICY,policy_snapshot
 
-def evaluate_preopen(report, previous_session, at=None):
+INCOMPLETE_REASONS={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch',
+                    'missing_indicators','invalid_average_price','entry_tick_missing'}
+
+
+def session_dates(report,at=None):
+    """Last completed session per market, taken from the rows' own price data.
+
+    The daily scan keeps the most recent completed bar, so the plan's reference date is
+    that bar's date. It is still checked against the exchange calendar: a row carrying an
+    old or invented date must not silently become the reference the entry limit is based
+    on, and a market whose rows disagree is reported by the session check below.
+    """
+    at=at or datetime.now(timezone.utc)
+    from exchange_calendars import get_calendar
+    calendars={'KR':get_calendar('XKRX'),'US':get_calendar('XNYS')}
+    dates={}
+    for market,calendar in calendars.items():
+        seen=Counter(row.get('indicators',{}).get('data_date') for row in report.get('results',[])
+            if row.get('market')==market and 'company_analysis' in row)
+        seen.pop(None,None)
+        for day,_count in seen.most_common():
+            try:
+                if not calendar.is_session(day):continue
+                close=calendar.session_close(day).to_pydatetime()
+                if close.utcoffset() is None:continue
+                if close>at:continue
+            except (ValueError,TypeError):continue
+            dates[market]=day
+            break
+    return dates
+
+
+def _expected_session(previous_session,market):
+    if isinstance(previous_session,dict):return previous_session.get(market)
+    return previous_session
+
+
+def evaluate_preopen(report, previous_session, at=None, market=None):
+    """Score the analysed candidates into conditional plans.
+
+    ``previous_session`` is either one date or a mapping of market to date, because the
+    Korean and US scans close on different local days. ``market`` restricts the pass to
+    one market so a multi-market report can merge the two without double counting.
+    """
     at=at or datetime.now(timezone.utc)
     if at.utcoffset() is None: raise ValueError('Timezone-aware decision time required')
-    counts=Counter(); missing=Counter(); recommendations=[]; advance=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]
     for row in report.get('results',[]):
+        if market is not None and row.get('market')!=market: continue
         row.pop('preopen_signal',None)
         row.pop('advance_signal',None)
         if 'company_analysis' not in row:
@@ -22,22 +66,23 @@ def evaluate_preopen(report, previous_session, at=None):
             generated=datetime.fromisoformat(forecast.get('generated_at',''))
             fresh=generated.utcoffset() is not None and at-timedelta(minutes=30)<=generated<=at
         except (ValueError,TypeError): fresh=False
+        score=forecast.get('composite_score')
         if not fresh: status='analysis_stale_or_missing'
-        elif (not isinstance(forecast.get('composite_score'),(int,float))
-              or not math.isfinite(forecast['composite_score'])
-              or forecast.get('assessment_status')!='complete'):
+        elif not isinstance(score,(int,float)) or not math.isfinite(score):
+            # Only an integrity gap withholds the score (see company_forecast.BLOCKING_GAPS).
             status='analysis_incomplete'
             missing.update(forecast.get('missing_dimensions',[]))
-        elif row.get('indicators',{}).get('data_date')!=previous_session:
+        elif row.get('indicators',{}).get('data_date')!=_expected_session(previous_session,row.get('market')):
             status='price_session_mismatch'
         if status:
             counts[status]+=1
             row['preopen_decision']=status
             continue
+        caveats.update(forecast.get('caveats',[]))
         reason=liquidity_rejection_reason(row,row['market'])
         values=row['indicators']; price=values['price']
         early=advance_context(company,values,at)
-        if early['eligible'] and forecast['composite_score']>=55 and eligible_for_advance_research(row,row['market']):
+        if early['eligible'] and score>=55 and eligible_for_advance_research(row,row['market']):
             row['advance_signal']=dict(status='advance_candidate',confirmed=False,**early)
             advance.append(row['symbol'])
         graph=company.get('event_analysis',{}).get('economic_graph',{})
@@ -53,7 +98,7 @@ def evaluate_preopen(report, previous_session, at=None):
         elif not catalyst and (values.get('overheated') or values.get('return_5d',0)>.12 or price/values['ma20']>1.08):
             status='extended_price'
         elif trend_reason and not event_support: status=trend_reason
-        elif forecast['composite_score']<MIN_COMPOSITE_SCORE: status='composite_score_below_policy'
+        elif score<MIN_COMPOSITE_SCORE: status='composite_score_below_policy'
         elif catalyst:
             tick=company.get('price_tick',.01 if row['market']=='US' else None)
             upper=forecast.get('bull_price')
@@ -78,7 +123,9 @@ def evaluate_preopen(report, previous_session, at=None):
         if status=='conditional_buy':
             row['preopen_signal']=dict(status=status,confirmed=False,entry_limit=entry_limit,
                 entry_floor=entry_floor,strategy=strategy,
-                reference_price=price,reference_date=previous_session,generated_at=at.isoformat(),
+                reference_price=price,reference_date=_expected_session(previous_session,row.get('market')),
+                generated_at=at.isoformat(),composite_score=score,
+                caveats=list(forecast.get('caveats',[])),
                 entry_basis='source_dated_catalyst_pullback_band' if catalyst else 'previous_session_close_limit_not_current_market_quote',
                 fresh_execution_quote_required=True,
                 target_basis='upside_scenario_not_expected_return' if catalyst else 'base_scenario',
@@ -87,17 +134,67 @@ def evaluate_preopen(report, previous_session, at=None):
                 take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot())
             recommendations.append(row['symbol'])
         counts[status]+=1; row['preopen_decision']=status
-    incomplete={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch',
-                'missing_indicators','invalid_average_price','entry_tick_missing'}
     evaluated=sum(counts.values())
-    excluded=sum(counts[s] for s in incomplete)
+    excluded=sum(counts[s] for s in INCOMPLETE_REASONS)
     report['buy_evaluation']=dict(completed=bool(evaluated) and not excluded,
         decision_completed=evaluated-excluded, data_excluded=excluded,
         connected=True,mode='conditional_preopen',scope='analysed_candidates',
-        previous_session=previous_session,generated_at=at.isoformat(),evaluated=evaluated,
-        counts=dict(counts),missing_dimensions=dict(missing),recommendations=recommendations,
+        previous_session=_expected_session(previous_session,market) if market else previous_session,
+        generated_at=at.isoformat(),evaluated=evaluated,
+        counts=dict(counts),missing_dimensions=dict(missing),caveats=dict(caveats),
+        recommendations=recommendations,
         advance_candidates=advance,
         policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,stop_pct=2,take_profit_pct=6,
                     take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot()),
         live_execution_confirmed=False)
     return report['buy_evaluation']
+
+
+def _merge(parts):
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]
+    for part in parts.values():
+        counts.update(part['counts']); missing.update(part['missing_dimensions'])
+        caveats.update(part.get('caveats',{}))
+        recommendations.extend(part['recommendations']); advance.extend(part['advance_candidates'])
+    evaluated=sum(counts.values()); excluded=sum(counts[s] for s in INCOMPLETE_REASONS)
+    policy=next(iter(parts.values()))['policy'] if parts else {}
+    return dict(completed=bool(evaluated) and not excluded,
+        decision_completed=evaluated-excluded,data_excluded=excluded,
+        connected=True,mode='conditional_preopen',scope='analysed_candidates',
+        previous_session={market:part['previous_session'] for market,part in parts.items()},
+        markets=sorted(parts),generated_at=next(iter(parts.values()))['generated_at'] if parts else None,
+        evaluated=evaluated,counts=dict(counts),missing_dimensions=dict(missing),
+        caveats=dict(caveats),recommendations=recommendations,advance_candidates=advance,
+        policy=policy,live_execution_confirmed=False)
+
+
+def evaluate_preopen_markets(report, at=None):
+    """Evaluate every market the report carries with its own reference session."""
+    at=at or datetime.now(timezone.utc)
+    sessions=session_dates(report,at)
+    parts={}
+    markets=[market for market in ('KR','US')
+             if market in sessions and any(row.get('market')==market and 'company_analysis' in row
+                                           for row in report.get('results',[]))]
+    for market in markets:
+        report['preopen_session']=sessions[market]
+        parts[market]=evaluate_preopen(report,sessions[market],at,market=market)
+    if not parts:
+        report['buy_evaluation']=dict(completed=False,decision_completed=0,data_excluded=0,
+            connected=True,mode='conditional_preopen',scope='analysed_candidates',
+            previous_session={},markets=[],generated_at=at.isoformat(),evaluated=0,
+            counts={},missing_dimensions={},caveats={},recommendations=[],advance_candidates=[],
+            policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
+                        stop_pct=2,take_profit_pct=6,
+                        take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot()),
+            live_execution_confirmed=False)
+        return report['buy_evaluation'],{}
+    merged=_merge(parts)
+    report['buy_evaluation']=merged
+    report['buy_evaluation_by_market']=parts
+    report['preopen_sessions']=dict(sessions)
+    # Keep the caller's single session when it set one (the preopen delivery does); the
+    # per-market dates stay in ``preopen_sessions`` so a signal never expires on a dict.
+    if not isinstance(report.get('preopen_session'),str):
+        report['preopen_session']=sessions.get('KR') or sessions.get('US')
+    return merged,parts
