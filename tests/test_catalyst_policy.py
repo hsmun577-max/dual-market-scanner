@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime,timedelta,timezone
 from catalyst_policy import catalyst_context
-from company_forecast import build_company_forecast
+from company_forecast import MIN_COMPOSITE_SCORE, build_company_forecast
 from preopen_signals import evaluate_preopen
 from event_publication import publication_metadata
 
@@ -70,7 +70,7 @@ class CatalystTests(unittest.TestCase):
         c.update(operating_margin_pct=-20,revenue_yoy_pct=-40,operating_margin_yoy_pp=-10,
                  free_cash_flow_margin_pct=-20,operating_cash_conversion=.1,net_debt_to_equity=3)
         weak=build_company_forecast(c,i,i['price'],AT,sectors=s)
-        self.assertLess(weak['composite_score'],60)
+        self.assertLess(weak['composite_score'],MIN_COMPOSITE_SCORE)
         self.assertGreater(healthy['composite_score'],weak['composite_score'])
 
 class PublicationTests(unittest.TestCase):
