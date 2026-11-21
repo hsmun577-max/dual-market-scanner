@@ -75,8 +75,8 @@ def bars_from_rows(rows, opens, closes, zone, date_keys=("xymd",), time_keys=("x
         slot = int((at - opens).total_seconds()) // 300
         bar = slots.get(slot)
         if bar is None:
-            slots[slot] = {"high": high, "low": low, "close": price, "volume": volume,
-                           "last": at.isoformat()}
+            slots[slot] = {"open": price, "high": high, "low": low, "close": price,
+                           "volume": volume, "last": at.isoformat()}
             continue
         bar["high"] = max(bar["high"], high)
         bar["low"] = min(bar["low"], low)

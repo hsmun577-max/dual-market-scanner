@@ -239,6 +239,7 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_s
     from candidate_selection import (rank_market_candidates,rank_recovery_candidates,
                                       liquidity_rejection_reason,average_turnover)
     from advance_policy import eligible_for_advance_research
+    from catalyst_track import watch_candidates as catalyst_watch_candidates
     event_set=set(event_symbols)
     eligible=[row for row in pool if liquidity_rejection_reason(row,market) is None
         or (row['symbol'] in event_set and eligible_for_advance_research(row,market))]
@@ -247,11 +248,20 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_s
                         key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:max(1,2*limit//3)]
     trend=rank_market_candidates(eligible,market,limit=max(5,entry_slots))
     recovery=rank_recovery_candidates(eligible,market,limit=max(5,entry_slots))
+    # Names the first screen rejected as a rebound or an unconfirmed trend are researched
+    # too: only after a company's disclosure is read can a confirmed catalyst lift them,
+    # and that read never happens for a row that was never selected.
+    catalyst=catalyst_watch_candidates(eligible,market,limit=max(2,limit//8))
     neutral=sorted(eligible,key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:8]
-    selected=[]; seen=set()
+    selected=[]; seen=set(); entries=set(); catalysts=set()
     from itertools import zip_longest
     entry=[row for group in zip_longest(trend,recovery) for row in group if row is not None]
-    for row in [*entry,*event_rows,*neutral]:
+    for row in [*entry,*event_rows,*catalyst,*neutral]:
         if row['symbol'] not in seen:
             selected.append(row); seen.add(row['symbol'])
+    entries={row['symbol'] for row in entry}; catalysts={row['symbol'] for row in catalyst}
+    for row in selected[:limit]:
+        # Only a name that arrived through the catalyst budget is labelled with it.
+        if row['symbol'] in catalysts and row['symbol'] not in entries:
+            row['selection_reason']='catalyst_watch'
     return selected[:limit]
