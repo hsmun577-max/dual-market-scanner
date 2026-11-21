@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta
 import math
 import unittest
-from company_forecast import MIN_BASE_REWARD_PCT, SCENARIO_SIGMA_CAP, build_company_forecast
+from company_forecast import (MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE,
+                              SCENARIO_SIGMA_CAP, SCENARIO_THRESHOLD_SCORE, build_company_forecast)
 from kis_intraday import evaluate_candidate, format_notification, KST
 
 AT=datetime(2026,11,18,9,15,tzinfo=KST)
@@ -122,7 +123,7 @@ class CompositeSignalTests(unittest.TestCase):
                                             company=company,sectors=sectors)
         self.assertEqual(status,'buy_signal')
         forecast=company['forecast']
-        self.assertGreaterEqual(forecast['composite_score'],60)
+        self.assertGreaterEqual(forecast['composite_score'],MIN_COMPOSITE_SCORE)
         self.assertGreaterEqual(forecast['base_price']/candidate[4]-1,MIN_BASE_REWARD_PCT/100)
         text=format_notification('KRX',[candidate],AT,{'005930':company},sectors)
         self.assertIn('종합 ',text)
@@ -147,7 +148,7 @@ class CompositeSignalTests(unittest.TestCase):
                   for kind,grade in [('market','supportive'),('event','clear')]]
         status,candidate=evaluate_candidate(bars,quote,AT,'KRX','005930',evidence,False,
                                             company=company,sectors=sectors)
-        self.assertGreaterEqual(company['forecast']['composite_score'],60)
+        self.assertGreaterEqual(company['forecast']['composite_score'],MIN_COMPOSITE_SCORE)
         self.assertLess(company['forecast']['base_return_pct'],MIN_BASE_REWARD_PCT)
         self.assertEqual(status,'insufficient_expected_reward')
         self.assertIsNone(candidate)
@@ -159,9 +160,11 @@ class CompositeSignalTests(unittest.TestCase):
             forecast=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
             self.assertAlmostEqual(forecast['scenario_sigma_multiple'],
                                    math.sqrt((forecast['composite_score']-50)/10),places=2)
-            # A candidate above the 60-point threshold clears the 3.3% floor from
-            # 1.5% daily volatility upward, using the real formula.
-            self.assertGreaterEqual(forecast['composite_score'],60)
+            # A candidate at the scenario anchor (``SCENARIO_THRESHOLD_SCORE``=60) clears the
+            # 3.3% floor from 1.5% daily volatility upward, using the real formula. The entry
+            # gate is lower (``MIN_COMPOSITE_SCORE``=53), so this score still passes it.
+            self.assertGreaterEqual(forecast['composite_score'],MIN_COMPOSITE_SCORE)
+            self.assertGreaterEqual(forecast['composite_score'],SCENARIO_THRESHOLD_SCORE)
             self.assertGreaterEqual(forecast['base_return_pct'],MIN_BASE_REWARD_PCT)
             self.assertLessEqual(forecast['scenario_sigma_multiple'],SCENARIO_SIGMA_CAP)
             self.assertLessEqual(forecast['bear_price'],100.)

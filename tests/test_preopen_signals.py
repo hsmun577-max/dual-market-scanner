@@ -94,7 +94,7 @@ class PreopenTests(unittest.TestCase):
             row=self.row();row['indicators'][field]=value
             result=evaluate_preopen(self.report(row),'2026-11-18',AT)
             self.assertTrue(result['completed']);self.assertEqual(result['recommendations'],[])
-        for field,value in [('composite_score',59),('base_price',10200)]:
+        for field,value in [('composite_score',52),('base_price',10200)]:
             row=self.row();row['company_forecast'][field]=value
             self.assertEqual(evaluate_preopen(self.report(row),'2026-11-18',AT)['recommendations'],[])
     def test_scoped_event_can_research_and_plan_before_ma60_turns_but_not_buy_overheated(self):
@@ -106,5 +106,25 @@ class PreopenTests(unittest.TestCase):
         row['indicators']['overheated']=True
         self.assertEqual(evaluate_preopen(self.report(row),'2026-11-18',AT)['recommendations'],[])
         self.assertNotIn('preopen_signal',row)
+    def test_score_gate_is_53_and_the_reward_floor_still_binds(self):
+        from company_forecast import MIN_COMPOSITE_SCORE,MIN_BASE_REWARD_PCT
+        # The user moved the conditional-buy score gate from 60 to 53 on 2026-11-21.
+        self.assertEqual(MIN_COMPOSITE_SCORE,53.0)
+        row=self.row();row['company_forecast']['composite_score']=55
+        result=evaluate_preopen(self.report(row),'2026-11-18',AT)
+        self.assertEqual(result['recommendations'],['352820.KS'])
+        self.assertEqual(result['policy']['min_composite'],53.0)
+        # Below the new gate the score still refuses the candidate.
+        row=self.row();row['company_forecast']['composite_score']=52.9
+        result=evaluate_preopen(self.report(row),'2026-11-18',AT)
+        self.assertEqual(result['recommendations'],[])
+        self.assertEqual(row['preopen_decision'],'composite_score_below_policy')
+        # And the 3.3% base-reward floor still refuses a low-score band candidate
+        # whose scenario does not cover it.
+        row=self.row();row['company_forecast'].update(composite_score=55,base_price=10300)
+        result=evaluate_preopen(self.report(row),'2026-11-18',AT)
+        self.assertEqual(result['recommendations'],[])
+        self.assertEqual(row['preopen_decision'],'insufficient_expected_reward')
+        self.assertGreater(MIN_BASE_REWARD_PCT,3.0)
 
 if __name__=='__main__':unittest.main()

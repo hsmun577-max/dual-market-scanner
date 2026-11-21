@@ -21,14 +21,17 @@ MIN_BASE_REWARD_PCT = 3.3
 BLOCKING_GAPS = frozenset({"current_financial_period", "latest_report_not_in_financials",
                            "future_company_evidence"})
 # One composite threshold for every entry path (live intraday, preopen plan and the
-# execution check), so a 55-point candidate cannot alert and then be refused.
-MIN_COMPOSITE_SCORE = 60.0
+# execution check), so a candidate cannot alert and then be refused. Lowered from 60 to 53
+# by the user's policy decision; the 3.3% base-reward floor still gates every entry.
+MIN_COMPOSITE_SCORE = 53.0
 # A revenue growth rate beyond this is a period-basis or unit mix-up, not growth.
 MAX_VERIFIED_REVENUE_GROWTH_PCT = 300.0
-# Scenario shape. One five-session sigma at the composite threshold (60 points), growing
-# with the square root of the evidence bias and capped at two sigmas. The earlier
-# 0.6 x (daily volatility x sqrt(5)) x bias coefficient left a 60-point candidate at about
-# 0.7%, so no realistic quality candidate could ever reach the 3.3% floor.
+# Scenario shape. One five-session sigma at this calibration score, growing with the
+# square root of the evidence bias and capped at two sigmas. The earlier
+# 0.6 x (daily volatility x sqrt(5)) x bias coefficient left a candidate at this score at
+# about 0.7%, so no realistic quality candidate could ever reach the 3.3% floor.
+# This is the scenario calibration anchor, not the entry gate: it stays at 60 so lowering
+# MIN_COMPOSITE_SCORE does not inflate every candidate's base/bear/bull prices.
 SCENARIO_THRESHOLD_SCORE = 60.0
 # composite_score = 50 + 50 * after_pricing, so this is the bias at the threshold.
 SCENARIO_EVIDENCE_BIAS = (SCENARIO_THRESHOLD_SCORE - 50) / 50
