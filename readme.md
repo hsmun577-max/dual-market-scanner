@@ -42,6 +42,20 @@
 - **ETF/개별주 표기**: 알림 후보 줄에 `· ETF`를 붙여, 승률 우위가 확인된 ETF와 개별주를 구분해 보여 줍니다.
 - **손절 폭은 -2% 유지**: -5% 확대는 최근 2개월 하락장에서 도움이 되지 않았고(-2% net -1.02% vs -5% -1.18%), 전체 21개월에서만 +0.23%p 우세합니다(상승 국면 +0.39%p, 하락 국면 -0.17%p). 즉 -5%는 상승장용 값이라 시장 국면에 따라 달라지는 결정이며, 코드에는 사용자 결정 전까지 -2%를 그대로 둡니다.
 
+## 실적·호재 촉매 트랙 (2026-11-21)
+
+기존 구조는 차트·국면 필터를 먼저 통과한 뒤에야 뉴스·공시를 읽었습니다. 그래서 지니언스(`263860.KQ`, 2026-11-12 08:18 3Q 영업익 +253% 어닝 서프라이즈, 당일 +21%)처럼 **공시가 먼저 뜨고 차트는 초입(`rebound`)·하락 국면(`market_headwind`)이라 탈락한 종목**은 근거를 읽기 전에 버려졌습니다. `catalyst_track.py`가 그 순서를 뒤집습니다.
+
+- **포착**: `rebound`·`weak_relative_trend`·`unconfirmed_uptrend`·`unconfirmed_demand`·`insufficient_demand_expansion`·`market_headwind`로 1차 탈락한 종목도, 확정 호재가 있으면 `[실적·호재 촉매]` 조건부 매수로 승격합니다(`preopen_signals.catalyst_plan`, `strategy='earnings_catalyst'`).
+- **근거는 확정·숫자만**: ① DART(또는 SEC·Yahoo) 손익계산서의 **영업이익 전년 동기 대비 +50% 이상**(흑자전환 포함, 손실은 제외), ② DART 단일판매·공급계약 문서의 금액과 **매출대비 5% 이상**, ③ 발행사 뉴스 중 본문을 실제로 읽었고 제목에 숫자가 있는 확정 기사(예: `3분기 영업익 253% 급증`)입니다. `추진·검토·기대·전망·MOU·양해각서·협약·논의`와 해지·취소·정정은 숫자가 있어도 제외합니다.
+- **시점**: 공시는 결의 시각 이전에 공개된 것만 씁니다(DART 지수는 날짜만 주므로 그날 18:00 이후로 보수적으로 봅니다). 신선도 창은 72시간입니다.
+- **안전장치 유지**: `insufficient_liquidity`·`low_price`·`missing_indicators`·`breakdown`·`overheated`/`extended_price`(최근 5일 +12% 초과, 20일선 대비 +8% 초과)·ETF/펀드는 촉매가 있어도 승격하지 않습니다. 승격 문턱은 종합점수 45점이며 체결검증도 같은 값을 읽습니다.
+- **장초반 셀온 차단 (`catalyst_sell_on_news`)**: 촉매 종목은 진입 시점에 **현재가가 당일 시가 아래**(음봉)이거나 **동시간대 거래량이 1.2배 미달**이면 진입하지 않습니다. 장중 수집 경로(`kis_intraday.evaluate_candidate`, 5분봉 시가 + 동시간대 거래량 기준)와 체결검증 경로(`tradable_signal.validate_entry`, `execution_quotes`의 시가·현재가·동시간 거래량)가 같은 `catalyst_track.entry_gate`를 씁니다. 근거를 확인할 수 없을 때도 `catalyst_session_unverified`·`catalyst_volume_unverified`로 보류합니다.
+- **진입·매도**: 진입은 전일 종가 −0.5×ATR% 밴드(눌림 진입, 갭 추격 금지)이고, 상승 시나리오가 +6% 여유를 남겨야 합니다. 매도는 기존 정책 그대로 **−2% 손절 / +6% 기본 익절 / 급등 시 트레일링 보유**입니다.
+- **알림**: 텔레그램 줄에 `[실적·호재 촉매] 조건부 매수`와 `근거 <공시 요약> · <시각>`, `장초반 시가 아래·동시간 거래량 1.2배 미달이면 진입하지 않음`이 함께 나갑니다.
+- **선별 예산**: `economic_graph.select_analysis_candidates`가 1차 탈락 종목 중 촉매 가능성이 있는 종목(거래량 1.2배 이상)에 분석 슬롯(전체의 1/8, 최소 2개)을 먼저 배정합니다. `prepare_selected_analysis`는 이를 `report['catalyst_watch']`로 남깁니다.
+- **회귀 테스트**: `tests/test_catalyst_track.py`가 지니언스 3Q 사례(`rebound`+`market_headwind`+영업익 +253%)를 고정하고, `extended_price`·`breakdown`·`insufficient_liquidity`·ETF가 여전히 차단되는지, 시가 하회·거래량 미달이 셀온으로 막히는지 검증합니다.
+
 ## 전수 검증(F-01~F-18) 수정 (2026-11-20)
 
 - **F-01 장중 발송 게이트 분리**: 장전 창을 장중 판정에 재사용해 모든 장중 알림이 조용히 차단되던 문제를 고쳤습니다(`intraday_delivery_status`). 시장 세션일 여부, 판정 후 10분 이내, 같은 신호 중복 없음을 확인하고, 막히면 `suppressed_by_gate`와 사유를 남깁니다. 장전 계획 알림은 기존 창을 그대로 씁니다.

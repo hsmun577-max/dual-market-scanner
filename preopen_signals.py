@@ -4,11 +4,48 @@ from collections import Counter
 import math
 from candidate_selection import liquidity_rejection_reason,candidate_rejection_reason
 from advance_policy import advance_context,eligible_for_advance_research
+from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE,confirmed_catalyst,liftable_reason
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
 from exit_policy import DEFAULT_EXIT_POLICY,policy_snapshot
 
 INCOMPLETE_REASONS={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch',
                     'missing_indicators','invalid_average_price','entry_tick_missing'}
+
+
+def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, score, strategy):
+    """A prior-close band entry for a confirmed catalyst: identify it early, never chase.
+
+    The band is the previous session's close less half the 14-day ATR, so a gap-up past it
+    is not bought; the upside case still has to leave the +6% policy room.
+    """
+    values=row['indicators']; price=values['price']
+    for key in ('bull_price','base_price'):
+        value=forecast.get(key)
+        if not isinstance(value,(int,float)) or isinstance(value,bool) or not math.isfinite(value):
+            return 'catalyst_outlook_not_positive',None
+    if forecast['base_price']<=price:
+        return 'catalyst_outlook_not_positive',None
+    tick=(row.get('company_analysis') or {}).get('price_tick',.01 if row.get('market')=='US' else None)
+    if not isinstance(tick,(int,float)) or isinstance(tick,bool) or not math.isfinite(tick) or tick<=0:
+        return 'entry_tick_missing',None
+    entry_limit=round(math.floor(min(price,forecast['bull_price']/1.06)/tick)*tick,2)
+    if entry_limit<price:
+        return 'insufficient_catalyst_upside_room',None
+    entry_floor=None
+    atr=values.get('atr14_pct')
+    if isinstance(atr,(int,float)) and not isinstance(atr,bool) and math.isfinite(atr) and atr>0:
+        entry_floor=max(tick,round(math.floor(price*(1-.5*atr/100)/tick)*tick,2))
+    plan=dict(status='conditional_buy',confirmed=False,entry_limit=entry_limit,
+        entry_floor=entry_floor,strategy=strategy,
+        reference_price=price,reference_date=reference_date,
+        generated_at=at.isoformat(),composite_score=score,
+        caveats=list(forecast.get('caveats',[])),
+        entry_basis='source_dated_catalyst_pullback_band',fresh_execution_quote_required=True,
+        target_basis='upside_scenario_not_expected_return',expires_session=expires_session,
+        stop_pct=DEFAULT_EXIT_POLICY.stop_pct,take_profit_pct=DEFAULT_EXIT_POLICY.take_profit_pct,
+        take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot(),
+        catalyst=dict(evidence))
+    return 'conditional_buy',plan
 
 
 def session_dates(report,at=None):
@@ -61,7 +98,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
     """
     at=at or datetime.now(timezone.utc)
     if at.utcoffset() is None: raise ValueError('Timezone-aware decision time required')
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]
     for row in report.get('results',[]):
         if market is not None and row.get('market')!=market: continue
         row.pop('preopen_signal',None)
@@ -99,36 +136,40 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             for link in graph.get('expectation_links',[]))
         trend_reason=candidate_rejection_reason(row,row['market'])
         catalyst=forecast.get('catalyst_context',{}).get('eligible') is True
-        entry_limit=price; entry_floor=None; strategy='trend'
+        # A confirmed, quantified disclosure may override a soft chart rejection. The
+        # safety blocks (liquidity, price, breakdown, extended, fund) are checked inside
+        # ``liftable_reason`` and can never be lifted here.
+        lift_reason=liftable_reason(row,row['market'])
+        catalyst_evidence=confirmed_catalyst(company,at,row.get('market')) if lift_reason else {}
+        ready_evidence=catalyst_evidence.get('eligible') is True
+        entry_limit=price; entry_floor=None; strategy='trend'; plan=None
+        reference_date=_expected_session(previous_session,row.get('market'))
         if reason: status=reason
         elif values['ma20']<=0: status='invalid_average_price'
         elif values.get('breakdown'): status='breakdown'
         elif not catalyst and (values.get('overheated') or values.get('return_5d',0)>.12 or price/values['ma20']>1.08):
             status='extended_price'
+        elif lift_reason and ready_evidence and score<MIN_CATALYST_COMPOSITE_SCORE:
+            status='catalyst_score_below_policy'
+        elif lift_reason and ready_evidence:
+            status,plan=catalyst_plan(row,forecast,catalyst_evidence,at,reference_date,
+                report.get('preopen_session'),score,'earnings_catalyst')
+            if plan: strategy='earnings_catalyst'
         elif trend_reason and (trend_reason == 'market_headwind' or not event_support): status=trend_reason
         elif score<MIN_COMPOSITE_SCORE: status='composite_score_below_policy'
         elif catalyst:
-            tick=company.get('price_tick',.01 if row['market']=='US' else None)
-            upper=forecast.get('bull_price')
-            if not isinstance(tick,(int,float)) or not math.isfinite(tick) or tick<=0:
-                status='entry_tick_missing'
-            elif not isinstance(upper,(int,float)) or not math.isfinite(upper) or forecast['base_price']<=price:
-                status='catalyst_outlook_not_positive'
-            else:
-                # Prior-close limit: identify the idea early without authorizing a gap-up chase.
-                raw=min(price,upper/1.06)
-                entry_limit=round(math.floor(raw/tick)*tick,2)
-                if entry_limit<price:
-                    status='insufficient_catalyst_upside_room'
-                else:
-                    status='conditional_buy'
-                    entry_floor=max(tick,round(math.floor(price*(1-.5*values['atr14_pct']/100)/tick)*tick,2))
-                    strategy='event_catalyst'
+            status,plan=catalyst_plan(row,forecast,forecast.get('catalyst_context',{}),at,
+                reference_date,report.get('preopen_session'),score,'event_catalyst')
+            if plan: strategy='event_catalyst'
         elif not math.isfinite(forecast.get('base_price',float('nan'))) or forecast['base_price']/price-1<MIN_BASE_REWARD_PCT/100:
             status='insufficient_expected_reward'
         else:
             status='conditional_buy'
-        if status=='conditional_buy':
+        if plan:
+            row['preopen_signal']=plan
+            recommendations.append(row['symbol'])
+            if plan.get('strategy')=='earnings_catalyst': catalyst_picks.append(row['symbol'])
+        elif status=='conditional_buy':
             row['preopen_signal']=dict(status=status,confirmed=False,entry_limit=entry_limit,
                 entry_floor=entry_floor,strategy=strategy,
                 reference_price=price,reference_date=_expected_session(previous_session,row.get('market')),
@@ -152,6 +193,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         counts=dict(counts),missing_dimensions=dict(missing),caveats=dict(caveats),
         recommendations=recommendations,
         advance_candidates=advance,
+        catalyst_candidates=catalyst_picks,
         policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,stop_pct=2,take_profit_pct=6,
                     take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot()),
         live_execution_confirmed=False)
@@ -159,11 +201,12 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
 
 
 def _merge(parts):
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]
     for part in parts.values():
         counts.update(part['counts']); missing.update(part['missing_dimensions'])
         caveats.update(part.get('caveats',{}))
         recommendations.extend(part['recommendations']); advance.extend(part['advance_candidates'])
+        catalyst.extend(part.get('catalyst_candidates',[]))
     evaluated=sum(counts.values()); excluded=sum(counts[s] for s in INCOMPLETE_REASONS)
     policy=next(iter(parts.values()))['policy'] if parts else {}
     return dict(completed=bool(evaluated) and not excluded,
@@ -173,7 +216,7 @@ def _merge(parts):
         markets=sorted(parts),generated_at=next(iter(parts.values()))['generated_at'] if parts else None,
         evaluated=evaluated,counts=dict(counts),missing_dimensions=dict(missing),
         caveats=dict(caveats),recommendations=recommendations,advance_candidates=advance,
-        policy=policy,live_execution_confirmed=False)
+        catalyst_candidates=catalyst,policy=policy,live_execution_confirmed=False)
 
 
 def evaluate_preopen_markets(report, at=None):
@@ -196,6 +239,7 @@ def evaluate_preopen_markets(report, at=None):
             connected=True,mode='conditional_preopen',scope='analysed_candidates',
             previous_session={},markets=[],generated_at=at.isoformat(),evaluated=0,
             counts={},missing_dimensions={},caveats={},recommendations=[],advance_candidates=[],
+            catalyst_candidates=[],
             policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
                         stop_pct=2,take_profit_pct=6,
                         take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot()),

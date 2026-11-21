@@ -666,6 +666,12 @@ def prepare_selected_analysis(report):
             if (item["symbol"] == (registry.get(symbol,{}).get("source_symbol") or symbol.removeprefix("DNAS"))
                 or (market=="KR" and item["symbol"].split(".")[0]==symbol))]
         selected = select_analysis_candidates(pool, market, event_symbols)
+        watched=[item['symbol'] for item in selected if item.get('selection_reason')=='catalyst_watch']
+        if watched:
+            # Research budget spent before any news is read; the promotion itself only
+            # happens when a confirmed disclosure exists (preopen_signals).
+            report.setdefault('catalyst_watch',[]).extend(watched)
+            print(f"{market} 실적·호재 촉매 감시 {len(watched)}종목: {', '.join(watched)}")
         keys = {}
         for item in selected:
             symbol = item["symbol"].split(".")[0] if market == "KR" else "DNAS" + item["symbol"]
@@ -744,16 +750,33 @@ def telegram_candidate_line(item):
     target, upside = forecast["base_price"], forecast["bull_price"]
     target_label = "$" + f"{target:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{target:,.0f} / {upside:,.0f}원"
     label = '조건부 매수' if conditional else '매수 확인'
-    if conditional and preopen.get('strategy')=='event_catalyst':
-        floor=preopen['entry_floor']
-        floor_label=f'${floor:,.2f}' if overseas else f'{floor:,.0f}원'
+    if conditional and preopen.get('strategy') in ('event_catalyst','earnings_catalyst'):
+        from catalyst_track import MIN_ENTRY_VOLUME_RATIO
+        track = preopen.get('strategy')=='earnings_catalyst'
+        floor=preopen.get('entry_floor')
+        floor_label=(f'${floor:,.2f}' if overseas else f'{floor:,.0f}원') if floor else None
         upper_label=f'${upside:,.2f}' if overseas else f'{upside:,.0f}원'
-        return (f"• {name} ({code}) · 호재형 조건부 매수 · 종합 {score:.1f}/100\n"
-                f"  매수 구간 {floor_label}~{entry_label} · 눌림 구간 진입 시\n"
+        entry_zone=f'{floor_label}~{entry_label}' if floor_label else entry_label
+        heading='[실적·호재 촉매] 조건부 매수' if track else '호재형 조건부 매수'
+        # The reason travels with the signal: a catalyst entry is only as good as the
+        # disclosure behind it and whether the session is actually buying it.
+        basis_line=''; guard=''
+        evidence=preopen.get('catalyst') or {}
+        if track and evidence.get('summary'):
+            when=''
+            try:
+                when=datetime.fromisoformat(evidence['observed_at']).astimezone(
+                    ZoneInfo('Asia/Seoul')).strftime('%m/%d %H:%M')
+            except (KeyError,TypeError,ValueError):when=''
+            basis_line=f"\n  근거 {evidence['summary']}" + (f' · {when}' if when else '')
+            guard=(f'\n  장초반 시가 아래·동시간 거래량 {MIN_ENTRY_VOLUME_RATIO:.1f}배 미달이면 진입하지 않음')
+        return (f"• {name} ({code}) · {heading} · 종합 {score:.1f}/100{basis_line}\n"
+                f"  매수 구간 {entry_zone} · 눌림 구간 진입 시\n"
                 f"  기준 종가 {preopen['reference_date']} · 상승 시나리오 목표 {upper_label}\n"
                 f"  손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
                 f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
-                "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)" + caveat_note(item))
+                "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"
+                f"{guard}" + caveat_note(item))
     basis = f" · {preopen['reference_date']} 종가 기준" if conditional else ''
     caveat = caveat_note(item)
     return (f"• {name} ({code}) · {label}{kind} · 종합 {score:.1f}/100\n"

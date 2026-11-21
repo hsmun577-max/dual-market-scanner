@@ -415,6 +415,14 @@ def company_financials(statement, today):
                 prior_income = float(statement.loc[income_key, prior])
                 if math.isfinite(prior_income):
                     result["operating_margin_yoy_pp"] = 100 * (income / sales - prior_income / prior_sales)
+                    # The same prior-year quarter gives the operating-profit change a
+                    # confirmed catalyst track can read; a loss turning positive is a
+                    # turnaround, not a percentage of a negative base.
+                    result["operating_income_prior_amount"] = prior_income
+                    if prior_income > 0:
+                        result["operating_income_yoy_pct"] = 100 * (income / prior_income - 1)
+                    elif income > 0:
+                        result["operating_income_turnaround"] = True
         eps = trailing_eps(statement, today)
         if eps is not None:
             result["trailing_eps"] = eps
@@ -748,6 +756,15 @@ def dart_quarterly_financials(api_key, corp_code, filings, yfinance_revenue=None
             snapshot["revenue_yoy_pct"] = 100 * (sales / prior_sales - 1)
             if prior_operating is not None:
                 snapshot["operating_margin_yoy_pp"] = 100 * (operating / sales - prior_operating / prior_sales)
+        if prior_operating is not None:
+            # ``frmtrm_q_amount`` is the same quarter a year earlier, so this is the
+            # figure a confirmed earnings-surprise track may read. A loss that turned
+            # positive is recorded as a turnaround instead of a negative-base ratio.
+            snapshot["operating_income_prior_amount"] = prior_operating
+            if prior_operating > 0:
+                snapshot["operating_income_yoy_pct"] = 100 * (operating / prior_operating - 1)
+            elif operating > 0:
+                snapshot["operating_income_turnaround"] = True
     elif cumulative_prior_sales is not None and cumulative_prior_sales > 0:
         # Quarter figures cannot be separated here; score the year-to-date margin and
         # its growth, which are internally consistent, and say so.
@@ -756,6 +773,10 @@ def dart_quarterly_financials(api_key, corp_code, filings, yfinance_revenue=None
         if cumulative_prior_operating is not None:
             snapshot["operating_margin_yoy_pp"] = 100 * (
                 operating / sales - cumulative_prior_operating / cumulative_prior_sales)
+            # Same cumulative basis, so it is kept apart from the quarterly figure.
+            snapshot["operating_income_prior_amount"] = cumulative_prior_operating
+            if cumulative_prior_operating > 0:
+                snapshot["operating_income_ytd_yoy_pct"] = 100 * (operating / cumulative_prior_operating - 1)
     revenue_three_month = snapshot["revenue_three_month_amount"]
     if revenue_three_month is not None and yfinance_revenue:
         try:
@@ -1414,7 +1435,9 @@ def daily_candidates(previous_session, overseas=False):
 def update_bar(bars, slot, event_time, price, size):
     bar = bars.get(slot)
     if bar is None:
-        bars[slot] = {"high": price, "low": price, "close": price, "last": event_time, "volume": size}
+        # The slot's first trade is the opening price the catalyst gate compares against.
+        bars[slot] = {"open": price, "high": price, "low": price, "close": price,
+                      "last": event_time, "volume": size}
         return
     bar["high"] = max(bar["high"], price)
     bar["low"] = min(bar["low"], price)
@@ -1463,7 +1486,24 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
         return reason, None
     if overseas and quote is not None and quote.get("ask", 0) < 5:
         return "low_price", None
+    company = company if company is not None else {}
     status, metrics = evaluate_breakout(bars, quote, closes, volume_baseline)
+    if not observation_only:
+        from catalyst_track import confirmed_catalyst, entry_gate
+        catalyst = confirmed_catalyst(company, closes, "US" if overseas else "KR") if company else {}
+        if catalyst.get("eligible"):
+            # A confirmed catalyst is not an entry: it must be held above the session's open
+            # on expanding same-time volume, or the market is selling the news.
+            reference = None
+            if set(bars) == {0, 1, 2}:
+                reference, _basis = volume_reference(bars, volume_baseline)
+            tone = entry_gate((quote or {}).get("ask") or (quote or {}).get("price"),
+                              (bars.get(0) or {}).get("open"),
+                              bars[2]["volume"] / reference if reference and reference > 0 else None)
+            company["catalyst_entry_gate"] = tone
+            company["catalyst_track"] = catalyst
+            if not tone["allowed"]:
+                return tone["reason"], None
     if metrics is None:
         return status, None
     if observation_only or evidence is None:
@@ -1475,7 +1515,6 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     status = context_status(evidence, window, symbol, closes)
     if status != "supported":
         return status, None
-    company = company if company is not None else {}
     applicable = [row for row in evidence if row.get("symbol") in (symbol, "*")
                   and row.get("market") in (window, "*")]
     forecast = build_company_forecast(company, company.get("price_indicators", {}),

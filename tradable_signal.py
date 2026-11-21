@@ -3,6 +3,7 @@ from datetime import datetime,timedelta
 import math
 from decimal import Decimal,ROUND_CEILING
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
+from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE, entry_gate
 from exit_policy import DEFAULT_EXIT_POLICY
 
 def krx_tick(price):
@@ -39,7 +40,11 @@ def validate_entry(row,quote,at,session_open):
     if forecast.get('assessment_status')!='complete' or forecast.get('missing_dimensions'):
         return reject('analysis_incomplete')
     score=number(forecast.get('composite_score'));created=stamp(forecast.get('generated_at'))
-    if score is None or score<MIN_COMPOSITE_SCORE:return reject('score_below_policy')
+    # The catalyst track's own floor is lower than the momentum gate (its evidence is the
+    # disclosure), so the execution check must read the same floor the plan was made on.
+    required=(MIN_CATALYST_COMPOSITE_SCORE if plan.get('strategy')=='earnings_catalyst'
+              else MIN_COMPOSITE_SCORE)
+    if score is None or score<required:return reject('score_below_policy')
     if created is None or not at-timedelta(minutes=30)<=created<=at:return reject('stale_analysis')
     seen=stamp((quote or {}).get('observed_at'));trade=stamp((quote or {}).get('trade_at'))
     if seen is None or not at-timedelta(seconds=10)<=seen<=at:return reject('quote_unverified_or_stale')
@@ -57,10 +62,21 @@ def validate_entry(row,quote,at,session_open):
     if floor is None and ask<limit*.98:return reject('price_moved_requires_reanalysis')
     base=number(forecast.get('base_price'));bull=number(forecast.get('bull_price'))
     if base is None or bull is None or base<=ask or bull<base:return reject('invalid_price_targets')
-    if plan.get('strategy')=='event_catalyst':
-        if forecast.get('catalyst_context',{}).get('eligible') is not True:return reject('catalyst_not_verified')
+    if plan.get('strategy') in ('event_catalyst','earnings_catalyst'):
+        verified=(forecast.get('catalyst_context',{}).get('eligible') is True
+                  if plan.get('strategy')=='event_catalyst'
+                  else (plan.get('catalyst') or {}).get('eligible') is True)
+        if not verified:return reject('catalyst_not_verified')
         if floor is None:return reject('entry_band_missing')
         if bull/ask-1<.06:return reject('insufficient_catalyst_upside_room')
+        if plan.get('strategy')=='earnings_catalyst':
+            # A disclosed catalyst is not an entry. If the stock trades under its open or
+            # same-time volume has not expanded, the market is selling the news.
+            tone=entry_gate(quote.get('last_price',ask),quote.get('day_open'),quote.get('volume_ratio'))
+            if not tone['allowed']:
+                return dict(reject(tone['reason']),detail=tone['detail'],
+                    session_price=quote.get('last_price'),day_open=quote.get('day_open'),
+                    volume_ratio=quote.get('volume_ratio'),catalyst=plan.get('catalyst'))
     elif base/ask-1<MIN_BASE_REWARD_PCT/100:return reject('insufficient_expected_reward')
     return dict(result,trade_ready=True,reason='entry_conditions_met',score=score,
         reference_price=plan.get('reference_price'),reference_date=plan.get('reference_date'),
@@ -68,6 +84,7 @@ def validate_entry(row,quote,at,session_open):
         stop_price=round_trigger(Decimal(str(ask))*Decimal('.98')),
         take_profit_price=round_trigger(Decimal(str(ask))*Decimal(str(1+DEFAULT_EXIT_POLICY.take_profit_pct))),base_target=base,bull_target=bull,
         take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=DEFAULT_EXIT_POLICY.snapshot(),
+        catalyst=plan.get('catalyst') if plan.get('strategy')=='earnings_catalyst' else None,
         quote_at=seen.isoformat(),valid_until=(at+timedelta(seconds=30)).isoformat(),
         generated_at=at.isoformat(),filled=False)
 
@@ -77,7 +94,10 @@ def format_requested_report(sector_lines,signals,evaluation,at):
     if ready:
         lines.append(f'매수 신호 · {at:%m/%d %H:%M:%S} KST')
         for row in ready[:5]:
-            lines.extend(['',f"• {row['name']} ({row['symbol'].split('.')[0]}) · 종합 {row['score']:.1f}/100",
+            evidence=row.get('catalyst') or {}
+            track='[실적·호재 촉매] ' if evidence else ''
+            lines.extend(['',f"• {row['name']} ({row['symbol'].split('.')[0]}) · {track}종합 {row['score']:.1f}/100",
+                *([f"근거 {evidence['summary']}"] if evidence.get('summary') else []),
                 f"진입 확인가 {row['indicative_entry']:,.0f}원 · 매수 상한 {row['entry_limit']:,.0f}원",
                 f"{datetime.fromisoformat(row['valid_until']):%H:%M:%S}까지 가격 재확인 후 진입",
                 f"분석 목표 {row['base_target']:,.0f}원 / 상승 시나리오 {row['bull_target']:,.0f}원",
