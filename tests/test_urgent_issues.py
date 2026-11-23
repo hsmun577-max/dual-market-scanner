@@ -144,6 +144,17 @@ class UrgentIssueSelectionTests(unittest.TestCase):
         items = select_urgent_issues(data, now=NOW)['US']
         self.assertEqual([item['symbol'] for item in items], ['CCCT', 'BBBT', 'DDDT'])
 
+    def test_a_theme_snapshot_without_scan_rows_still_reports(self):
+        # 장중 알림(kis_intraday)은 results 없이 테마 스냅샷만 넘긴다. 스캔 행이 없다고
+        # 대표주 이슈가 사라지면 안 된다.
+        snapshot = theme(leaders=[('NVDA', '엔비디아', 31.48, 'NVIDIA'),
+                                  ('PARA', '파라마운트', 9614.29, 'Paramount')],
+                         issue='이슈: US stocks surge, cheering return of Nvidia CEO and shrugging of…')
+        issues = select_urgent_issues(dict(theme_sectors=[snapshot]), now=NOW)
+        self.assertEqual([item['symbol'] for item in issues['US']], ['NVDA'])
+        self.assertEqual(issues['US'][0]['reason_labels'], ['매수 후보 미포함'])
+        self.assertAlmostEqual(issues['US'][0]['change_pct'], 31.5)
+
     def test_the_block_states_it_is_not_a_buy_signal(self):
         nvda, snapshot = self.nvda_case()
         issues = select_urgent_issues(report([nvda], [snapshot], {'US': {'above_ma20': False}}), now=NOW)

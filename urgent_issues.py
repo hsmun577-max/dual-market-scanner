@@ -195,8 +195,12 @@ def _is_buy_signal(row):
     return confirmed.get('confirmed') is True and confirmed.get('entry_limit') is not None
 
 
-def _price_rejection(row, market, change_pct, check_consistency=True):
-    """가격 오류·상품 구조·유동성으로 급등 알림에 올릴 수 없는 종목을 걸러 낸다."""
+def _price_rejection(row, market, change_pct, check_consistency=True, require_price=True):
+    """가격 오류·상품 구조·유동성으로 급등 알림에 올릴 수 없는 종목을 걸러 낸다.
+
+    ``require_price=False``는 테마 대표주처럼 스캔 행이 없어 가격 자료가 없는 경우다.
+    이름·상품 구조·비정상 등락은 그대로 검사하고, 가격 기반 검사만 건너뛴다.
+    """
     values = row.get('indicators') or {}
     name = row.get('name') or ''
     if is_fund(row):
@@ -209,11 +213,14 @@ def _price_rejection(row, market, change_pct, check_consistency=True):
     if market == 'KR' and change_pct > KR_PRICE_LIMIT_PCT + 0.5:
         return 'abnormal_price'
     price = _number(values.get('price'))
-    if price is None or price <= 0:
-        return 'missing_price'
-    if price < MIN_PRICE[market]:
+    if price is None:
+        if require_price:
+            return 'missing_price'
+    elif price <= 0:
+        return 'abnormal_price'
+    elif price < MIN_PRICE[market]:
         return 'low_price'
-    if check_consistency:
+    if check_consistency and price is not None:
         previous = _number(values.get('prev_close'))
         change = _number(values.get('return_1d'))
         if previous and change is not None and abs(price / previous - 1 - change) > 0.05:
@@ -332,7 +339,8 @@ def _collect(report, now):
                                             'name': leader.get('name'), 'indicators': {}}
                 if row.get('market') not in (market, None):
                     continue
-                if _price_rejection(row, market, change, check_consistency=False):
+                if _price_rejection(row, market, change, check_consistency=False,
+                                    require_price=bool(row.get('indicators'))):
                     continue
                 if _is_buy_signal(row):
                     continue
