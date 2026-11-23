@@ -27,6 +27,10 @@ def bars_for(symbol,day='2026-11-19'):
 def execution_diagnostic(row):
     plan=row.get('preopen_signal',{})
     if plan.get('status')!='conditional_buy':return dict(status='no_new_plan')
+    if plan.get('track')=='rebound':
+        # The 5-minute stop/target replay belongs to the momentum and catalyst plans; a
+        # rebound plan has no fixed stop and is held 5 sessions, so it is not replayed here.
+        return dict(status='rebound_track_not_replayed_by_5m_stop_diagnostic')
     df=bars_for(row['symbol'])
     if df is None or df.empty:return dict(status='intraday_data_unavailable')
     expected=datetime(2026,11,19,10,tzinfo=KST)

@@ -4,6 +4,7 @@ from collections import Counter
 import math
 from candidate_selection import (liquidity_rejection_reason,candidate_rejection_reason,
                                  market_headwind_reason)
+import rebound_track
 from advance_policy import advance_context,eligible_for_advance_research
 from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE,confirmed_catalyst,liftable_reason
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
@@ -99,7 +100,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
     """
     at=at or datetime.now(timezone.utc)
     if at.utcoffset() is None: raise ValueError('Timezone-aware decision time required')
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]; rebound_picks=[]
     for row in report.get('results',[]):
         if market is not None and row.get('market')!=market: continue
         row.pop('preopen_signal',None)
@@ -149,6 +150,13 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         ready_evidence=catalyst_evidence.get('eligible') is True
         entry_limit=price; entry_floor=None; strategy='trend'; plan=None
         reference_date=_expected_session(previous_session,row.get('market'))
+        # The reversal tracks read their own candle and are never lifted by the momentum
+        # gate; they are also refused by its safety blocks (liquidity, breakdown, an
+        # overheated or extended price). They sit after the confirmed-catalyst plan (a
+        # quantified disclosure is the stronger evidence) and before the regime branch, so
+        # a downtrend cannot hold them back and a name the screen would refuse as
+        # ``unconfirmed_uptrend`` can still be planned here.
+        rebound=rebound_track.setup(values)
         if reason: status=reason
         elif values['ma20']<=0: status='invalid_average_price'
         elif values.get('breakdown'): status='breakdown'
@@ -160,6 +168,12 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             status,plan=catalyst_plan(row,forecast,catalyst_evidence,at,reference_date,
                 report.get('preopen_session'),score,'earnings_catalyst')
             if plan: strategy='earnings_catalyst'
+        elif rebound:
+            status,plan=rebound_track.rebound_plan(rebound,values,reference_date,
+                report.get('preopen_session'),at,row.get('market') or market or 'KR',
+                next_open=rebound_track.observed_open(values),
+                caveats=forecast.get('caveats',[]))
+            if plan: strategy=plan['strategy']
         elif headwind and (event_support or not trend_reason):
             # Event support may soften the chart (it can plan a name before the 60-day
             # average turns up), but it may not walk a plan through a market headwind. The
@@ -186,6 +200,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             row['preopen_signal']=plan
             recommendations.append(row['symbol'])
             if plan.get('strategy')=='earnings_catalyst': catalyst_picks.append(row['symbol'])
+            elif plan.get('track')=='rebound': rebound_picks.append(row['symbol'])
         elif status=='conditional_buy':
             row['preopen_signal']=dict(status=status,confirmed=False,entry_limit=entry_limit,
                 entry_floor=entry_floor,strategy=strategy,
@@ -211,19 +226,28 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         recommendations=recommendations,
         advance_candidates=advance,
         catalyst_candidates=catalyst_picks,
+        rebound_candidates=rebound_picks,
         policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,stop_pct=2,take_profit_pct=6,
-                    take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot()),
+                    take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
+                    rebound=dict(gap_cancel_pct=rebound_track.GAP_CANCEL_PCT,
+                                 hold_sessions=rebound_track.HOLD_SESSIONS,
+                                 stop_policy=rebound_track.STOP_POLICY,
+                                 score_gate_applied=False,
+                                 trades={name:dict(entry_offset_pct=track['entry_offset_pct'])
+                                         for name,track in rebound_track.CONFIG.items()}),
+                    exit_policy=policy_snapshot()),
         live_execution_confirmed=False)
     return report['buy_evaluation']
 
 
 def _merge(parts):
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]; rebound=[]
     for part in parts.values():
         counts.update(part['counts']); missing.update(part['missing_dimensions'])
         caveats.update(part.get('caveats',{}))
         recommendations.extend(part['recommendations']); advance.extend(part['advance_candidates'])
         catalyst.extend(part.get('catalyst_candidates',[]))
+        rebound.extend(part.get('rebound_candidates',[]))
     evaluated=sum(counts.values()); excluded=sum(counts[s] for s in INCOMPLETE_REASONS)
     policy=next(iter(parts.values()))['policy'] if parts else {}
     return dict(completed=bool(evaluated) and not excluded,
@@ -233,7 +257,8 @@ def _merge(parts):
         markets=sorted(parts),generated_at=next(iter(parts.values()))['generated_at'] if parts else None,
         evaluated=evaluated,counts=dict(counts),missing_dimensions=dict(missing),
         caveats=dict(caveats),recommendations=recommendations,advance_candidates=advance,
-        catalyst_candidates=catalyst,policy=policy,live_execution_confirmed=False)
+        catalyst_candidates=catalyst,rebound_candidates=rebound,policy=policy,
+        live_execution_confirmed=False)
 
 
 def evaluate_preopen_markets(report, at=None):
@@ -256,10 +281,17 @@ def evaluate_preopen_markets(report, at=None):
             connected=True,mode='conditional_preopen',scope='analysed_candidates',
             previous_session={},markets=[],generated_at=at.isoformat(),evaluated=0,
             counts={},missing_dimensions={},caveats={},recommendations=[],advance_candidates=[],
-            catalyst_candidates=[],
+            catalyst_candidates=[],rebound_candidates=[],
             policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
                         stop_pct=2,take_profit_pct=6,
-                        take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot()),
+                        take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
+                        rebound=dict(gap_cancel_pct=rebound_track.GAP_CANCEL_PCT,
+                                     hold_sessions=rebound_track.HOLD_SESSIONS,
+                                     stop_policy=rebound_track.STOP_POLICY,
+                                     score_gate_applied=False,
+                                     trades={name:dict(entry_offset_pct=track['entry_offset_pct'])
+                                             for name,track in rebound_track.CONFIG.items()}),
+                        exit_policy=policy_snapshot()),
             live_execution_confirmed=False)
         return report['buy_evaluation'],{}
     merged=_merge(parts)

@@ -26,6 +26,38 @@ class SelectionRegressionTests(unittest.TestCase):
         self.assertIsNone(candidate_rejection_reason(stock(name="KODEX 반도체"),"KR"))
         self.assertIsNone(candidate_rejection_reason(stock("US","SPY","SPDR S&P 500 ETF"),"US"))
 
+    def test_inverse_and_leveraged_products_are_no_longer_refused_as_a_class(self):
+        # Owner's call (2026-11-23: "차단만 먼저 풀어") after SQQQ was screened out on a US
+        # down day only by this block. The trend, demand and market-regime rules that
+        # follow are unchanged, so a listed inverse fund now has to pass them like any
+        # other instrument.
+        for market,symbol,name,asset_type in [("US","SQQQ","프로셰어즈 나스닥100 인버스 3배 ETF","inverse_etf"),
+                                              ("US","TQQQ","프로셰어즈 나스닥100 3배 ETF","leveraged_etf"),
+                                              ("US","SOXL","디렉시온 반도체 3배 ETF","leveraged_etf"),
+                                              ("US","SOXS","디렉시온 반도체 인버스 3배 ETF","inverse_etf"),
+                                              ("KR","252670.KS","KODEX 200선물인버스2X","inverse_etf"),
+                                              ("KR","122630.KS","KODEX 레버리지","leveraged_etf")]:
+            item=stock(market,symbol,name);item["asset_type"]=asset_type
+            self.assertIsNone(candidate_rejection_reason(item,market),(symbol,name))
+
+    def test_dividend_style_structures_are_still_refused(self):
+        item=stock("US","COSW","ROUNDHILL COST WEEKLYPAY")
+        self.assertEqual(candidate_rejection_reason(item,"US"),"complex_product")
+        item=stock("US","COVX","Example COVERED CALL ETF")
+        self.assertEqual(candidate_rejection_reason(item,"US"),"complex_product")
+
+    def test_an_unblocked_inverse_fund_still_needs_the_trend_and_the_market(self):
+        # Only the class block was released: price below the 20-day average is still
+        # unconfirmed, and a market under its own 20-day average still holds the plan.
+        item=stock("US","SQQQ","프로셰어즈 나스닥100 인버스 3배 ETF")
+        item["asset_type"]="inverse_etf"
+        item["indicators"]["price"]=item["indicators"]["ma20"]*.98
+        self.assertEqual(candidate_rejection_reason(item,"US"),"unconfirmed_uptrend")
+        item=stock("US","SQQQ","프로셰어즈 나스닥100 인버스 3배 ETF")
+        item["asset_type"]="inverse_etf"
+        item["indicators"]["market_above_ma20"]=False
+        self.assertEqual(candidate_rejection_reason(item,"US"),"market_headwind")
+
     def test_volume_spike_cannot_replace_regular_liquidity(self):
         item=stock()
         item["indicators"]["volume_ratio"]=100

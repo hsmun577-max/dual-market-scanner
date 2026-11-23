@@ -5,6 +5,7 @@ from decimal import Decimal,ROUND_CEILING
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
 from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE, entry_gate
 from exit_policy import DEFAULT_EXIT_POLICY
+from rebound_track import entry_state as rebound_entry_state
 
 def krx_tick(price):
     for upper,tick in [(2000,1),(5000,5),(20000,10),(50000,50),(200000,100),(500000,500)]:
@@ -28,6 +29,43 @@ def number(value):
         return result if math.isfinite(result) else None
     except (ValueError,TypeError):return None
 
+def rebound_entry(plan,quote,at,result,seen,market='KR'):
+    """A rebound plan is priced from the observed open, never from the prior close.
+
+    The preopen plan carries a rule (open -2% for R2, -3% for R3) and the prior close its
+    1% gap-cancel is measured against; here the session's own open turns the rule into a
+    limit. An ask at or under that limit means the dip is here. A gap down of 1% or more
+    cancels the entry instead of buying a name the morning is selling, and a price already
+    well below the limit means the plan's premise is gone and needs a new analysis.
+    """
+    def reject(reason):return dict(result,reason=reason)
+    state=rebound_entry_state(plan.get('strategy'),plan.get('gap_reference_price'),
+                              (quote or {}).get('day_open'),market)
+    if state['status']=='reference_price_missing':return reject('rebound_reference_price_missing')
+    if state['status']=='awaiting_open':return reject('rebound_open_unverified')
+    if state['status']=='gap_down_cancelled':
+        return dict(reject('rebound_gap_down_cancelled'),gap_pct=state['gap_pct'],
+            detail=f"시가 {number(quote.get('day_open')):,.0f} · 전일 종가 대비 {state['gap_pct']:+.1%} · 갭하락 진입 취소")
+    limit=state['entry_limit'];ask=number(quote.get('ask'));bid=number(quote.get('bid'))
+    if ask is None or bid is None or not 0<bid<=ask:return reject('invalid_orderbook')
+    ask_size=number(quote.get('ask_size'));bid_size=number(quote.get('bid_size'))
+    if ask_size is None or bid_size is None or min(ask_size,bid_size)<1:
+        return reject('empty_or_unverified_orderbook_size')
+    if (ask-bid)/ask>.005:return reject('spread_too_wide')
+    if limit is None or limit<=0:return reject('entry_limit_missing')
+    if ask>limit:return reject('waiting_for_entry_price')
+    if ask<limit*.98:return reject('price_moved_requires_reanalysis')
+    return dict(result,trade_ready=True,reason='entry_conditions_met',track='rebound',
+        strategy=plan.get('strategy'),label=plan.get('label'),
+        hold_sessions=plan.get('hold_sessions'),stop_policy=plan.get('stop_policy'),
+        reference_price=plan.get('reference_price'),reference_date=plan.get('reference_date'),
+        indicative_entry=ask,entry_limit=limit,entry_floor=None,bid=bid,
+        day_open=number(quote.get('day_open')),gap_pct=state['gap_pct'],
+        stop_price=None,take_profit_price=None,quote_at=seen.isoformat(),
+        valid_until=(at+timedelta(seconds=30)).isoformat(),generated_at=at.isoformat(),
+        filled=False)
+
+
 def validate_entry(row,quote,at,session_open):
     """Validate a conditional plan at a fresh executable ask; never assume a fill."""
     result=dict(symbol=row.get('symbol'),name=row.get('name'),trade_ready=False)
@@ -39,6 +77,12 @@ def validate_entry(row,quote,at,session_open):
     if plan.get('expires_session')!=at.date().isoformat():return reject('wrong_plan_session')
     if forecast.get('assessment_status')!='complete' or forecast.get('missing_dimensions'):
         return reject('analysis_incomplete')
+    seen=stamp((quote or {}).get('observed_at'));trade=stamp((quote or {}).get('trade_at'))
+    if seen is None or not at-timedelta(seconds=10)<=seen<=at:return reject('quote_unverified_or_stale')
+    if trade is None or trade.date()!=at.date() or not at-timedelta(minutes=2)<=trade<=at:
+        return reject('last_trade_unverified_or_stale')
+    if plan.get('track')=='rebound':
+        return rebound_entry(plan,quote,at,result,seen,row.get('market') or 'KR')
     score=number(forecast.get('composite_score'));created=stamp(forecast.get('generated_at'))
     # The catalyst track's own floor is lower than the momentum gate (its evidence is the
     # disclosure), so the execution check must read the same floor the plan was made on.
@@ -46,10 +90,6 @@ def validate_entry(row,quote,at,session_open):
               else MIN_COMPOSITE_SCORE)
     if score is None or score<required:return reject('score_below_policy')
     if created is None or not at-timedelta(minutes=30)<=created<=at:return reject('stale_analysis')
-    seen=stamp((quote or {}).get('observed_at'));trade=stamp((quote or {}).get('trade_at'))
-    if seen is None or not at-timedelta(seconds=10)<=seen<=at:return reject('quote_unverified_or_stale')
-    if trade is None or trade.date()!=at.date() or not at-timedelta(minutes=2)<=trade<=at:
-        return reject('last_trade_unverified_or_stale')
     ask=number(quote.get('ask'));bid=number(quote.get('bid'))
     if ask is None or bid is None or not 0<bid<=ask:return reject('invalid_orderbook')
     ask_size=number(quote.get('ask_size'));bid_size=number(quote.get('bid_size'))
@@ -94,6 +134,14 @@ def format_requested_report(sector_lines,signals,evaluation,at):
     if ready:
         lines.append(f'매수 신호 · {at:%m/%d %H:%M:%S} KST')
         for row in ready[:5]:
+            if row.get('track')=='rebound':
+                # A rebound entry has no +6% target and no -2% stop on purpose: it is a
+                # 5-session hold bought on a dip from the open.
+                lines.extend(['',f"• {row['name']} ({row['symbol'].split('.')[0]}) · [{row.get('label')}] 반등 눌림 · 5일 보유",
+                    f"진입 확인가 {row['indicative_entry']:,.0f}원 · 눌림 지정가 {row['entry_limit']:,.0f}원 (시가 {row['day_open']:,.0f}원 대비)",
+                    f"{datetime.fromisoformat(row['valid_until']):%H:%M:%S}까지 가격 재확인 후 진입",
+                    '좁은 −2% 손절 비권장 · 5거래일 보유 후 청산 · 시가가 전일 종가 −1% 아래면 취소'])
+                continue
             evidence=row.get('catalyst') or {}
             track='[실적·호재 촉매] ' if evidence else ''
             lines.extend(['',f"• {row['name']} ({row['symbol'].split('.')[0]}) · {track}종합 {row['score']:.1f}/100",
