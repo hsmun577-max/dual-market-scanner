@@ -13,6 +13,19 @@
 
 후보가 없거나 자료가 부족하면 `no signal` 또는 `analysis incomplete`로 보류합니다. 데이터가 누락됐다고 중립/호재로 간주하지 않습니다. 부분 실패 시 스캔 리포트는 `partial`과 실패 원인을 기록합니다.
 
+## 거래량 상위 8개 ETF만 매수 후보로 (2026-11-23)
+
+혜선 님 지시 "거래량 상위8개 etf만 매수후보에넣자"에 따라, 시장별로 **거래량 상위 8개 ETF**를 `fund_screen_only` 강등에서 제외해 일반 매수 후보 경로(`company_analysis` → 조건부 매수 계획)로 넣었습니다. 9위 이하 ETF는 기존대로 `fund_screen_only`로 남고, 리서치도 평가도 하지 않습니다.
+
+- **순위 기준**: 각 시장(`KR`/`US`)의 스캔 결과 안에서 직전 완결 세션 `volume` 내림차순, 동률이면 심볼 순입니다. 시장끼리 섞지 않습니다(`research_asset.promoted_fund_symbols`, `FUND_CANDIDATE_LIMIT=8`).
+- **순위에서 빼는 ETF**: 이름만으로 이미 거절되는 상품(금리·채권형, 커버드콜·위클리페이, 스팩·우선주)은 8자리에서 제외했습니다. 이런 ETF는 승격해도 후보가 될 수 없고, 될 수 있는 ETF의 자리만 빼앗기 때문입니다. 이들은 그대로 `fund_screen_only`입니다.
+- **ETF 식별**: `asset_type`(`etf`·`inverse_etf`·`leveraged_etf`), 국내 브랜드 접두어(KODEX·TIGER 등), 프로필의 `quote_type`(`ETF`)을 모두 봅니다. 미국 ETF는 영문 이름이라 프로필을 읽기 전에는 알 수 없어서, 프로필이 도착한 뒤 시장별 8위를 다시 확정합니다. 그때 9위로 밀린 ETF는 `fund_demoted_after_profile`로 강등합니다.
+- **ETF 점수**: ETF에는 발행사 손익계산서·실적 공시가 없으므로 `company_forecast`에 ETF 전용 축(`FUND_WEIGHTS`: 가격·수요 0.50, 업종 수급 0.20, 이벤트 0.30)을 두고, 재무 축은 "빠진 자료"가 아니라 "해당 없음"으로 처리합니다. 이전에는 재무제표 부재가 `financial_statements` 차단 사유가 되어 어떤 ETF도 점수를 받지 못했습니다(`analysis_incomplete`).
+- **게이트는 그대로**: `market_headwind`, `unconfirmed_uptrend`, `breakdown`, `extended_price`, `volume_ratio`(1.2/1.8배), 유동성·최소가격, 커버드콜·위클리페이 `complex_product` 차단은 손대지 않았습니다. 8위 안에 든 ETF도 이 게이트를 통과해야 조건부 매수가 됩니다.
+- **장중 감시 목록**: 한국 장중 실행은 저장된 스캔에서 감시 종목을 고르므로, `fund_screen_only` ETF는 장중 목록에서도 제외됩니다. `fund_candidate` ETF만 주식과 함께 들어갑니다.
+- **리포트**: `research_scope`에 `funds_promoted`, `funds_screened`, `fund_candidate_limit`, `funds_demoted_after_profile`을 남기고, 승격된 ETF는 `analysis_kind=fund_candidate`·`fund_rank`를, 행에는 `fundamentals="ETF 상장상품 · 발행사 재무제표 없음"`을 기록합니다.
+- **검증**: `tests/test_fund_candidates.py` 11건 추가 — 8개 통과/9위 유지, 상품성 거절 ETF의 자리 미사용, 프로필 후 재순위, SQQQ 8위일 때 조건부 매수(시장·추세 게이트 통과 시)와 9위일 때 `fund_screen_only`, `market_headwind`·`breakdown`·`extended_price` 유지, 장중 목록 제외. 전체 `pytest` 345건 통과.
+
 ## 판정이 산출되지 않던 구조적 결함 수정 (2026-11-20)
 
 - 섹터 초과수익: 기준지수(`^KS11`·`^KQ11`)의 미완성 봉(NaN 종가)을 제거하고, 지수가 섹터 ETF보다 하루 늦을 때는 두 시계열의 마지막 공통 거래일로 비교합니다. 초과수익이 비면 `sector_pressure`가 빠져 종합점수가 아예 나오지 않던 문제를 없앱니다. `scanner.py`의 `benchmark_lag_sessions`가 정렬 결과를 알려 줍니다.
