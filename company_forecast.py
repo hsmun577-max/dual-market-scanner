@@ -6,6 +6,7 @@ These are uncalibrated scenarios. Data coverage is not a probability of profit.
 import math
 from datetime import datetime, timedelta
 from catalyst_policy import SECTOR_PROXIES,catalyst_context
+from research_asset import is_fund_company
 import re
 
 
@@ -33,6 +34,16 @@ MAX_VERIFIED_REVENUE_GROWTH_PCT = 300.0
 # This is the scenario calibration anchor, not the entry gate: it stays at 60 so lowering
 # MIN_COMPOSITE_SCORE does not inflate every candidate's base/bear/bull prices.
 SCENARIO_THRESHOLD_SCORE = 60.0
+# A listed fund has no issuer income statement: growth, earnings quality and balance sheet
+# are not missing evidence for it, they do not exist. What the instrument is priced from
+# is its own price and demand, the sector proxy it tracks and its event exposure, so those
+# three carry the whole fund score. Owner's decision 2026-11-23: the eight most traded ETFs
+# of each market are candidate-grade instruments; graded as operating companies they were
+# stopped at "analysis incomplete" for every ETF (QQQ, SPY, BIL...) and never planned.
+FUND_WEIGHTS = {"price_and_demand": .50, "sector_pressure": .20, "events": .30}
+COMPANY_WEIGHTS = {"growth": .24, "earnings_quality": .18, "balance_sheet": .12,
+                   "valuation_outlook": .10, "price_and_demand": .14,
+                   "sector_pressure": .10, "events": .12}
 # composite_score = 50 + 50 * after_pricing, so this is the bias at the threshold.
 SCENARIO_EVIDENCE_BIAS = (SCENARIO_THRESHOLD_SCORE - 50) / 50
 SCENARIO_SIGMA_CAP = 2.0
@@ -102,12 +113,17 @@ def financial_period_missing(company):
 
 
 def build_company_forecast(company, indicators, price, at, events=(), sectors=()):
-    """Combine available evidence without treating missing observations as neutral."""
+    """Combine available evidence without treating missing observations as neutral.
+
+    A listed fund is read on the fund model (:data:`FUND_WEIGHTS`) instead of the issuer
+    model: its score comes from its own price and demand, its sector proxy and its event
+    exposure, and the issuer dimensions are not applied to it at all rather than counted
+    as missing evidence that would withhold the score.
+    """
     if at.utcoffset() is None or not math.isfinite(price) or price <= 0:
         raise ValueError("Forecast requires a dated positive price")
-    weights = {"growth": .24, "earnings_quality": .18, "balance_sheet": .12,
-               "valuation_outlook": .10, "price_and_demand": .14,
-               "sector_pressure": .10, "events": .12}
+    fund = is_fund_company(company)
+    weights = dict(FUND_WEIGHTS) if fund else dict(COMPANY_WEIGHTS)
     components = {}
     evidence = {}
     margin = _number(company, "operating_margin_pct")
@@ -322,31 +338,37 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         missing.append("unread_event_bodies")
     if causal_valid and not any(row.get("status")=="checked" for row in causal.get("feed_coverage", [])):
         missing.append("world_event_coverage")
-    if financial_period_missing(company):
-        missing.append("latest_report_not_in_financials")
-    if growth_unverified or company.get("revenue_scale_check") == "mismatch_with_yfinance":
-        missing.append("growth_scale_unverified")
-    if (debt is None and company.get("leverage_status") == "rejected_out_of_range"):
-        missing.append("leverage_unverified")
-    if free_cash_margin is None and conversion is None and operating_cash_margin is None:
-        missing.append("cash_flow_quality")
-    quarter = company.get("quarter", "")[:7]
-    try:
-        quarter_at = datetime.fromisoformat(quarter+"-01").date()
-        if not 0 <= (at.date()-quarter_at).days <= 200:
+    if not fund:
+        # Statement completeness only means something for an issuer. A fund has no
+        # statement to be current, so these gaps are not attached to it.
+        if financial_period_missing(company):
+            missing.append("latest_report_not_in_financials")
+        if growth_unverified or company.get("revenue_scale_check") == "mismatch_with_yfinance":
+            missing.append("growth_scale_unverified")
+        if (debt is None and company.get("leverage_status") == "rejected_out_of_range"):
+            missing.append("leverage_unverified")
+        if free_cash_margin is None and conversion is None and operating_cash_margin is None:
+            missing.append("cash_flow_quality")
+        quarter = company.get("quarter", "")[:7]
+        try:
+            quarter_at = datetime.fromisoformat(quarter+"-01").date()
+            if not 0 <= (at.date()-quarter_at).days <= 200:
+                missing.append("current_financial_period")
+        except ValueError:
             missing.append("current_financial_period")
-    except ValueError:
-        missing.append("current_financial_period")
     available = company.get("available_at") or company.get("checked_at")
     if available and datetime.fromisoformat(available)>at:
         missing.append("future_company_evidence")
     blocking = [gap for gap in missing if gap in BLOCKING_GAPS]
-    if "growth" not in components and "earnings_quality" not in components:
+    if not fund and "growth" not in components and "earnings_quality" not in components:
         # No income statement at all would make the score a chart reading, not a company
-        # assessment; that case stays unscored whatever else was collected.
+        # assessment; that case stays unscored whatever else was collected. A fund is the
+        # one instrument whose score is meant to be a price reading of what it tracks.
         blocking.append("financial_statements")
     status = "incomplete" if blocking else "partial" if missing else "complete"
     return {"model":"uncalibrated_multifactor_scenarios_v1","generated_at":at.isoformat(),
+        "instrument":"listed_fund" if fund else "operating_company",
+        **({"assessment_basis":"fund_price_demand_sector_events"} if fund else {}),
         "horizon_sessions":5,"data_coverage":round(coverage,4),
         "components":components,"weights":weights,"evidence":evidence,"priced_in_fraction":round(priced_in,4),
         "catalyst_context":catalyst,

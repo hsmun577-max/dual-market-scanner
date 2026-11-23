@@ -1381,7 +1381,11 @@ def daily_candidates(previous_session, overseas=False):
             results = json.loads(report.read_text(encoding="utf-8"))["results"]
             fresh = [item for item in results if item["market"] == "KR"
                      and item["symbol"].endswith((".KS", ".KQ"))
-                     and item["indicators"]["data_date"] == previous_session.isoformat()]
+                     and item["indicators"]["data_date"] == previous_session.isoformat()
+                     # Only the funds the scan kept as candidates (the most traded eight per
+                     # market) may be watched intraday; a fund screened at fund level only is
+                     # never an entry candidate.
+                     and item.get("analysis_kind") != "fund_screen_only"]
             if fresh:
                 from economic_graph import select_analysis_candidates
                 event_symbols = [item["symbol"] for item in fresh

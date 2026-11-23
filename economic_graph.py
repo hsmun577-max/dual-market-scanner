@@ -227,7 +227,7 @@ def save_profiles(companies, path='reports/company-profiles.json'):
     temporary.replace(file)
 
 
-def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_slots=12):
+def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_slots=12, pinned=()):
     """Reserve research capacity for event links, then for the names the entries could use.
 
     On a scan of 13,000 instruments the event and mega-cap rows used to take the whole
@@ -235,6 +235,10 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_s
     looked at — so the only candidates an entry plan could be built for were dropped
     without a score. The entry-filtered names therefore come first, then event research,
     then the liquidity anchors that keep the report's context.
+
+    ``pinned`` rows are the market's most traded funds, which the selection reserves a
+    slot for before any other claim on the budget: a fund that the momentum screen does
+    not rank still has to be read before it can be refused with a reason.
     """
     from candidate_selection import (rank_market_candidates,rank_recovery_candidates,
                                       liquidity_rejection_reason,average_turnover)
@@ -257,14 +261,16 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_s
     # refuses; without a slot it would never be analysed and never planned.
     rebound=rebound_watch_candidates(eligible,market,limit=max(2,limit//8))
     neutral=sorted(eligible,key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:8]
+    pinned_symbols=[symbol for symbol in pinned if symbol in indexed]
+    pinned_rows=[indexed[symbol] for symbol in pinned_symbols]
     selected=[]; seen=set(); entries=set(); catalysts=set(); rebounds=set()
     from itertools import zip_longest
     entry=[row for group in zip_longest(trend,recovery) for row in group if row is not None]
-    for row in [*entry,*event_rows,*catalyst,*rebound,*neutral]:
+    for row in [*pinned_rows,*entry,*event_rows,*catalyst,*rebound,*neutral]:
         if row['symbol'] not in seen:
             selected.append(row); seen.add(row['symbol'])
     entries={row['symbol'] for row in entry}; catalysts={row['symbol'] for row in catalyst}
-    rebounds={row['symbol'] for row in rebound}
+    rebounds={row['symbol'] for row in rebound}; pinned_set=set(pinned_symbols)
     for row in selected[:limit]:
         # Only a name that arrived through its own budget is labelled with it; a reversal
         # setup is the more specific reason when both apply.
@@ -272,4 +278,6 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_s
             row['selection_reason']='rebound_watch'
         elif row['symbol'] in catalysts and row['symbol'] not in entries:
             row['selection_reason']='catalyst_watch'
+        elif row['symbol'] in pinned_set and row['symbol'] not in entries:
+            row['selection_reason']='fund_candidate'
     return selected[:limit]
