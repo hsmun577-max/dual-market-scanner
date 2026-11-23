@@ -2,7 +2,8 @@
 from datetime import datetime,timedelta,timezone
 from collections import Counter
 import math
-from candidate_selection import liquidity_rejection_reason,candidate_rejection_reason
+from candidate_selection import (liquidity_rejection_reason,candidate_rejection_reason,
+                                 market_headwind_reason)
 from advance_policy import advance_context,eligible_for_advance_research
 from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE,confirmed_catalyst,liftable_reason
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
@@ -135,6 +136,10 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             link.get('watch_bias')=='positive_policy_sympathy' and link.get('source_url')
             for link in graph.get('expectation_links',[]))
         trend_reason=candidate_rejection_reason(row,row['market'])
+        # Read the regime on its own, not as the last item of the trend check: the trend
+        # check reports the chart reason it finds first, so a name that is misaligned or
+        # thin still has to be held back by the market it trades in.
+        headwind=market_headwind_reason(values)
         catalyst=forecast.get('catalyst_context',{}).get('eligible') is True
         # A confirmed, quantified disclosure may override a soft chart rejection. The
         # safety blocks (liquidity, price, breakdown, extended, fund) are checked inside
@@ -155,6 +160,18 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             status,plan=catalyst_plan(row,forecast,catalyst_evidence,at,reference_date,
                 report.get('preopen_session'),score,'earnings_catalyst')
             if plan: strategy='earnings_catalyst'
+        elif headwind and (event_support or not trend_reason):
+            # Event support may soften the chart (it can plan a name before the 60-day
+            # average turns up), but it may not walk a plan through a market headwind. The
+            # 2026-11-23 run sent NHN/LG유플러스/NC while the index was below its 20-day
+            # average: their first rejection was a chart one, so the trend check never
+            # returned ``market_headwind`` and the event-support branch below skipped the
+            # regime gate. This branch sits before it, so no plan reaches it under a
+            # headwind. A name that the chart alone already refuses keeps that reason, so
+            # the rejection counts still say why it failed on its own. Only the
+            # confirmed-disclosure track above may lift a headwind
+            # (catalyst_track.LIFTABLE_REASONS).
+            status=headwind
         elif trend_reason and (trend_reason == 'market_headwind' or not event_support): status=trend_reason
         elif score<MIN_COMPOSITE_SCORE: status='composite_score_below_policy'
         elif catalyst:

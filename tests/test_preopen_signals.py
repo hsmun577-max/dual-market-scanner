@@ -127,4 +127,80 @@ class PreopenTests(unittest.TestCase):
         self.assertEqual(row['preopen_decision'],'insufficient_expected_reward')
         self.assertGreater(MIN_BASE_REWARD_PCT,3.0)
 
+
+class MarketHeadwindGateTests(unittest.TestCase):
+    """The market gate is read on its own, never skipped by event support.
+
+    On 2026-11-23 the preopen delivery sent NHN (181710.KS), LG유플러스 (032640.KS) and
+    NC (036570.KS) as conditional buys while the index was below its 20-day average. All
+    three had a chart rejection first (misaligned averages or a weak 20-day return) and a
+    scoped event in the economic graph, so ``candidate_rejection_reason`` never returned
+    ``market_headwind`` and the event-support branch skipped the regime gate altogether.
+    """
+    def row(self):
+        row=PreopenTests().row()
+        row['indicators']['market_above_ma20']=True
+        return row
+    def report(self,rows):return dict(results=rows,preopen_session='2026-11-19',sectors=[])
+    def event_support(self,row):
+        row['company_analysis']['event_analysis']['economic_graph']['expectation_links']=[
+            dict(watch_bias='positive_policy_sympathy',source_url='https://www.korea.kr/test')]
+        return row
+    def test_the_three_names_sent_in_a_2026_11_23_headwind_are_held_back(self):
+        # Real indicator values from github-artifacts/20261123/preopen-delivery-KRX.
+        cases=[('181710.KS','NHN',dict(price=61200.0,ma20=59175.0,ma60=58940.0,volume=282598.0,
+                   volume_ratio=0.7741,average_turnover_20d=24619222165.0,return_5d=-0.0783,
+                   return_20d=0.193,relative_strength=0.3156,atr14_pct=14.7642),61.4),
+               ('032640.KS','LG유플러스',dict(price=14970.0,ma20=15080.5,ma60=14885.8333,
+                   volume=634678.0,volume_ratio=0.5439,average_turnover_20d=17886982844.5,
+                   return_5d=-0.0373,return_20d=0.0572,relative_strength=0.1798,
+                   atr14_pct=5.1341),57.2),
+               ('036570.KS','NC',dict(price=179600.0,ma20=196040.0,ma60=209055.0,volume=82477.0,
+                   volume_ratio=0.8352,average_turnover_20d=19240693375.0,return_5d=0.0034,
+                   return_20d=-0.1239,relative_strength=-0.0013,atr14_pct=6.4707),68.7)]
+        rows=[]
+        for symbol,name,values,score in cases:
+            row=self.row();row['symbol']=symbol;row['name']=name
+            row['indicators'].update(values,market_above_ma20=False,obv_rising=False,
+                                     breakout=False,breakdown=False,rebound=False,overheated=False)
+            row['company_forecast'].update(composite_score=score,base_price=values['price']*1.08,
+                                           bull_price=values['price']*1.15)
+            rows.append(self.event_support(row))
+        result=evaluate_preopen(self.report(rows),'2026-11-18',AT)
+        self.assertEqual(result['recommendations'],[])
+        self.assertEqual(result['counts'].get('market_headwind'),3)
+        for row in rows:
+            self.assertEqual(row['preopen_decision'],'market_headwind',row['symbol'])
+            self.assertNotIn('preopen_signal',row)
+    def test_event_support_does_not_skip_the_regime_for_any_soft_chart_reason(self):
+        for chart in ['unconfirmed_uptrend','weak_relative_trend','insufficient_demand_expansion']:
+            row=self.row();ind=row['indicators'];ind['market_above_ma20']=False
+            if chart=='unconfirmed_uptrend':ind['ma60']=11000
+            if chart=='weak_relative_trend':ind['return_20d']=-.05
+            if chart=='insufficient_demand_expansion':ind['volume_ratio']=1.5
+            result=evaluate_preopen(self.report([self.event_support(row)]),'2026-11-18',AT)
+            self.assertEqual(result['recommendations'],[],chart)
+            self.assertEqual(row['preopen_decision'],'market_headwind',chart)
+            self.assertNotIn('preopen_signal',row)
+    def test_an_event_eligible_catalyst_is_not_sent_in_a_headwind(self):
+        row=self.row();row['indicators']['market_above_ma20']=False
+        row['company_analysis']['price_tick']=100
+        row['company_forecast']['catalyst_context']=dict(eligible=True)
+        self.event_support(row)
+        result=evaluate_preopen(self.report([row]),'2026-11-18',AT)
+        self.assertEqual(result['recommendations'],[])
+        self.assertEqual(row['preopen_decision'],'market_headwind')
+        # The same row outside a headwind is the event track the policy intends.
+        row=self.row();row['company_analysis']['price_tick']=100
+        row['company_forecast']['catalyst_context']=dict(eligible=True)
+        result=evaluate_preopen(self.report([self.event_support(row)]),'2026-11-18',AT)
+        self.assertEqual(result['recommendations'],['352820.KS'])
+        self.assertEqual(row['preopen_signal']['strategy'],'event_catalyst')
+        # An unobserved regime is not a headwind: an archived report stays as it was.
+        row=self.row();row['indicators']['ma60']=11000
+        row['indicators'].pop('market_above_ma20')
+        result=evaluate_preopen(self.report([self.event_support(row)]),'2026-11-18',AT)
+        self.assertEqual(result['recommendations'],['352820.KS'])
+        self.assertEqual(row['preopen_decision'],'conditional_buy')
+
 if __name__=='__main__':unittest.main()
