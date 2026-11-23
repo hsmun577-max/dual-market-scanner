@@ -324,6 +324,26 @@ def calculate_obv(close, volume):
     direction = np.sign(close.diff().fillna(0))
     return (direction * volume).cumsum()
 
+def calculate_rsi(close, period=14):
+    """Wilder's RSI over completed daily closes; None without enough history.
+
+    The rebound tracks read an oversold day from it (`rsi14 <= 35`). A partial window
+    would produce a number that looks like a level but is not the level, so the value is
+    left as None instead of being estimated.
+    """
+    values = close.astype(float).replace([np.inf, -np.inf], np.nan).dropna()
+    if len(values) < period + 1:
+        return None
+    delta = values.diff().dropna()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    average_gain = float(gain.ewm(alpha=1 / period, adjust=False).mean().iloc[-1])
+    average_loss = float(loss.ewm(alpha=1 / period, adjust=False).mean().iloc[-1])
+    if average_loss == 0:
+        return 100.0 if average_gain > 0 else 50.0
+    return float(100 - 100 / (1 + average_gain / average_loss))
+
+
 def calculate_indicators(data, benchmark=None):
     close = data["Close"].astype(float)
     high = data["High"].astype(float)
@@ -331,8 +351,21 @@ def calculate_indicators(data, benchmark=None):
     volume = data["Volume"].astype(float)
 
     price = float(close.iloc[-1])
+    ma5 = float(close.tail(5).mean())
     ma20 = float(close.tail(20).mean())
     ma60 = float(close.tail(60).mean())
+
+    # The bar's own open/high/low and one-day change: a rebound setup is read from the
+    # day's candle (a bullish close, a 5-day-MA break, a short upper wick) and not from
+    # the 5-day return alone. ``Open`` is optional so archived frames and test fixtures
+    # that only carry closes still calculate the momentum indicators.
+    opening = float(data["Open"].astype(float).iloc[-1]) if "Open" in data.columns else None
+    last_high = float(high.iloc[-1])
+    last_low = float(low.iloc[-1])
+    previous_close = float(close.iloc[-2]) if len(close) > 1 else None
+    return_1d = price / previous_close - 1 if previous_close else None
+    upper_wick_ratio = ((last_high - price) / (last_high - last_low)
+                        if last_high > last_low else 0.0)
 
     previous_volume = volume.iloc[-21:-1]
     avg_volume = float(previous_volume.mean())
@@ -425,8 +458,16 @@ def calculate_indicators(data, benchmark=None):
 
     return {
         "price": safe_float(price),
+        "open": safe_float(opening),
+        "high": safe_float(last_high),
+        "low": safe_float(last_low),
+        "prev_close": safe_float(previous_close),
+        "ma5": safe_float(ma5),
         "ma20": safe_float(ma20),
         "ma60": safe_float(ma60),
+        "return_1d": safe_float(return_1d),
+        "rsi14": safe_float(calculate_rsi(close)),
+        "upper_wick_ratio": safe_float(upper_wick_ratio),
         "volume": safe_float(volume.iloc[-1]),
         "volume_ratio": safe_float(volume_ratio),
         "volatility_20d": safe_float(volatility_20),
@@ -727,10 +768,55 @@ def prepare_selected_analysis(report):
     evaluate_preopen_markets(report, datetime.now(timezone.utc))
 
 
+def telegram_rebound_line(item):
+    """A rebound line: the dip limit, the gap cancel and the 5-session hold, per name.
+
+    The track is priced from the next session's open, which a preopen report does not
+    have yet. Until the open prints, the line shows the rule and the flat-open reference
+    level; once the open is observed the real limit is shown with it.
+    """
+    plan = item.get('preopen_signal') or {}
+    if plan.get('track') != 'rebound':
+        return ''
+    import rebound_track
+    overseas = item.get('market') == 'US'
+    symbol = item['symbol']
+    code = symbol if overseas else symbol.split('.')[0]
+    name = item.get('name') or symbol
+    values = plan.get('evidence') or item.get('indicators') or {}
+    limit = rebound_track.price_text(plan.get('entry_limit'), item.get('market'))
+    flat = rebound_track.price_text(plan.get('flat_open_entry_limit'), item.get('market'))
+    if limit:
+        limit_line = (f"눌림 지정가 {limit} ({rebound_track.offset_label(plan['strategy'])})"
+                      " · 시가 확인됨")
+    else:
+        limit_line = (f"눌림 지정가 {rebound_track.offset_label(plan['strategy'])}"
+                      + (f" · 갭 없이 열리면 {flat}" if flat else '')
+                      + " · 시가 확인 후 확정")
+    numbers = []
+    change = values.get('return_1d')
+    volume = values.get('volume_ratio')
+    rsi = values.get('rsi14')
+    if isinstance(change, (int, float)) and not isinstance(change, bool):
+        numbers.append(f"당일 {change:+.1%}")
+    if isinstance(volume, (int, float)) and not isinstance(volume, bool):
+        numbers.append(f"거래량 {volume:.1f}배")
+    if plan.get('strategy') == 'oversold_rebound' and isinstance(rsi, (int, float)):
+        numbers.append(f"RSI {rsi:.1f}")
+    basis = f"  기준 {plan.get('reference_date')} 종가" + (' · ' + ' · '.join(numbers) if numbers else '')
+    return (f"• {name} ({code}) · {plan.get('label')} · 5일 보유\n"
+            f"  {limit_line}\n"
+            "  장전 시가가 전일 종가보다 −1% 아래면 진입 취소\n"
+            f"{basis}\n"
+            "  좁은 −2% 손절 비권장 · 5거래일 보유 후 청산" + caveat_note(item))
+
+
 def telegram_candidate_line(item):
     forecast = item.get("company_forecast", {})
     signal = item.get("signal", {})
     preopen = item.get('preopen_signal', {})
+    if preopen.get('track') == 'rebound':
+        return telegram_rebound_line(item)
     conditional = preopen.get('status') == 'conditional_buy'
     entry = preopen.get('entry_limit') if conditional else signal.get("entry_limit")
     score = forecast.get("composite_score")
@@ -968,11 +1054,18 @@ def send_telegram_summary(report):
 
     lines = list(report.get('sector_header_override') or format_sector_header(report.get("sectors", [])))
     lines.extend(market_regime_note(report))
+    # The reversal tracks are delivered in their own section: they are exempt from the
+    # regime gate by design (they are the entries a downtrend leaves on the table), so
+    # they must never be read as momentum buys that passed it.
+    rebound = [item for item in report["results"]
+               if item.get('preopen_signal',{}).get('track')=='rebound']
+    rebound.sort(key=lambda item: (-(item['indicators'].get('volume_ratio') or 0), item['symbol']))
     confirmed = [item for item in report["results"]
                  if (item.get("signal", {}).get("confirmed") is True
                  and item.get("signal", {}).get("entry_limit") is not None
                  or item.get('preopen_signal',{}).get('status')=='conditional_buy'
                  or item.get('advance_signal',{}).get('status')=='advance_candidate')
+                 and item.get('preopen_signal',{}).get('track')!='rebound'
                  and item.get("company_forecast", {}).get("composite_score") is not None]
     confirmed.sort(key=lambda item: -item['company_forecast']['composite_score'])
     # A preopen price plan is not an executable live entry confirmation.
@@ -983,7 +1076,10 @@ def send_telegram_summary(report):
     lines.extend(["", heading])
     if not confirmed:
         evaluation=report.get('buy_evaluation',{})
-        if evaluation.get('decision_completed',0)>0:
+        if rebound:
+            # Not a silent zero: the momentum side has nothing, the reversal side does.
+            lines.append(f"정배열 추세 매수 조건 충족 없음 · 반등 눌림 후보 {len(rebound)}종목은 아래")
+        elif evaluation.get('decision_completed',0)>0:
             lines.append(f"판정 완료 {evaluation['decision_completed']}종목 · 현재 매수 조건 충족 없음")
             if evaluation.get('data_excluded'):
                 lines.append(f"자료 부족 {evaluation['data_excluded']}종목은 매수 판정에서 제외")
@@ -998,6 +1094,11 @@ def send_telegram_summary(report):
             lines.append("매수 판정 보류 · 분석 미완료")
     for item in confirmed[:5]:
         lines.append(telegram_candidate_line(item))
+    if rebound:
+        lines.extend(["", "[반등 눌림 후보]",
+                      "하락장에서도 시가 눌림에서만 진입 · 시장 국면 게이트 미적용"])
+        for item in rebound[:5]:
+            lines.append(telegram_rebound_line(item))
 
     messages = split_telegram_text("\n".join(lines))
     for message in messages:

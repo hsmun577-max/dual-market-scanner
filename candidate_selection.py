@@ -18,23 +18,26 @@ CASH_OR_BOND = re.compile(
     r"머니마켓|KOFR|CD(?:\d|금리)|단기금리|단기채|채권|국채|회사채|통안채|"
     r"\b(?:treasury|treasuries|bonds?|money market|ultrashort|floating rate|"
     r"variable rate|t-bills?|clo)\b|\b1-3M\b", re.I)
-COMPLEX_ETF = re.compile(
-    r"인버스|레버리지|커버드콜|위클리페이|-1[xX]|\b(?:inverse|leveraged|weeklypay|covered call|[23]x)\b", re.I)
-KNOWN_COMPLEX = {"SOXL", "SOXS", "TQQQ", "SQQQ", "SPXL", "SPXS"}
+# Inverse and leveraged products are no longer refused as a class (owner's call,
+# 2026-11-23: "차단만 먼저 풀어", after a US down day where SQQQ was screened out only by
+# this block). They now carry the same trend, demand and market-regime rules as any other
+# instrument. What stays refused is the dividend-style structure whose payoff is the
+# premium written, not the underlying's price.
+COMPLEX_ETF = re.compile(r"커버드콜|위클리페이|\b(?:weeklypay|covered call)\b", re.I)
 
 
 def instrument_rejection_reason(symbol, name, asset_type=""):
-    """Filter identifiable instruments with a different payoff or liquidity profile."""
+    """Filter identifiable instruments with a different payoff or liquidity profile.
+
+    ``asset_type`` is kept in the signature for the callers that carry it; inverse and
+    leveraged listings are no longer rejected on it.
+    """
     label = name or ""
-    ticker = symbol.removeprefix("DNAS").split(".")[0]
     if SPECIAL_SECURITY.search(label) or re.search(r"우[BC]?(?:\([^)]*\))?$", label):
         return "special_security"
     if CASH_OR_BOND.search(label):
         return "cash_or_bond_product"
-    if (COMPLEX_ETF.search(label) or ticker in KNOWN_COMPLEX
-            or asset_type in {"inverse_etf", "leveraged_etf"}
-            or (re.search(r"Direxion|디렉시온|ProShares|프로셰어즈", label, re.I)
-                and re.search(r"\bbear\b|베어", label, re.I))):
+    if COMPLEX_ETF.search(label):
         return "complex_product"
     return None
 
