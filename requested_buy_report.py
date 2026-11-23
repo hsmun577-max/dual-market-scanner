@@ -69,7 +69,11 @@ def main():
     # Every regular sender continues to use delivery_status unchanged.
     session_open=cal.session_open(args.session).to_pydatetime()<=sent_at<cal.session_close(args.session).to_pydatetime()
     entries=[validate_entry(row,quotes.get(row['symbol']),sent_at,session_open) for row in recommendations[:5]]
+    from theme_sectors import format_theme_block, theme_sector_snapshot
+    theme=theme_sector_snapshot('KR',datetime.now(KST))
+    report['theme_sectors']=[theme]
     sector_lines=(format_report(industry).splitlines() if industry.get('rows') else ['오늘의 주요 섹터','확인 불가'])
+    if theme.get('rows'):sector_lines=sector_lines+format_theme_block(theme,'KR')
     message=format_requested_report(sector_lines,entries,evaluation,sent_at)
     audit=dict(session=args.session,generated_at=sent_at.isoformat(),strategy_commit=os.getenv('GITHUB_SHA'),
         explicit_manual_request=True,scheduled_delivery_guards_unchanged=True,
