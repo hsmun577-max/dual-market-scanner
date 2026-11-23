@@ -8,7 +8,7 @@ import os
 import re
 from html import unescape
 from time import sleep
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -1871,9 +1871,14 @@ def research_label(evidence, market, symbol, decision_at):
     return ("우호" if supportive else "우호 의견 미확인") + f" · {latest.astimezone(KST):%m/%d}"
 
 
-def format_notification(market, candidates, closes, companies=None, sectors=None, themes=None):
+def format_notification(market, candidates, closes, companies=None, sectors=None, themes=None,
+                        urgent=None, premarket=None):
     companies = companies or {}
     overseas = market.startswith("US-")
+    # 매수 후보로 이미 나가는 종목은 긴급 참고 블록에 다시 넣지 않는다.
+    candidate_codes = {str(row[0]).split('.')[0] for row in candidates}
+    urgent = [item for item in (urgent or [])
+              if str(item.get('symbol') or '').split('.')[0] not in candidate_codes]
     confirmed = [row for row in candidates if row[4] is not None
                  and companies.get(row[0], {}).get("forecast", {}).get("composite_score") is not None]
     timestamp = f"{closes:%m/%d %H:%M} ET" if overseas else f"{closes:%m/%d %H:%M} KST"
@@ -1882,8 +1887,11 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
     incomplete=len(companies)-assessed
     heading='매수 신호' if confirmed else '분석 상태' if incomplete and not assessed else '분석 결과'
     # 대분류 ETF 한 단어 대신 세부 테마 블록을 붙인다. 테마 자료가 없으면 기존 머리줄 그대로다.
-    lines = (sector_section(sectors, themes, "US" if overseas else "KR")
-             + ["", f"{heading} · {timestamp}"])
+    header = sector_section(sectors, themes, "US" if overseas else "KR")
+    from premarket_signals import format_block as format_premarket_block
+    premarket_lines = format_premarket_block(premarket)
+    # 장전 사전 시그널은 매수 판정과 별개다. 매수 신호 머리줄보다 위에 둔다.
+    lines = header + (["", *premarket_lines] if premarket_lines else []) + ["", f"{heading} · {timestamp}"]
     if not confirmed:
         if assessed:
             lines.append(f"판정 완료 {assessed}종목 · 현재 매수 조건 충족 없음")
@@ -1906,10 +1914,15 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
                       f"손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
                       f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
                       "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"])
+    if urgent:
+        import urgent_issues
+        block = urgent_issues.format_urgent_block(urgent)
+        if block:
+            lines.extend(["", *block])
     return "\n".join(lines)
 
 def notify(market, candidates, closes, token, chat_id, companies=None, sectors=None,
-           mode="intraday", themes=None):
+           mode="intraday", themes=None, urgent=None, premarket=None):
     """Send a decision alert under the gate that belongs to its own stage.
 
     ``mode='preopen'`` keeps the plan window (ten minutes before an opening ±2 minutes).
@@ -1932,7 +1945,8 @@ def notify(market, candidates, closes, token, chat_id, companies=None, sectors=N
     if not allowed:
         print(f"Telegram suppressed_by_gate {market}: {reason}", flush=True)
         return result
-    message = format_notification(market, candidates, closes, companies, sectors, themes)
+    message = format_notification(market, candidates, closes, companies, sectors, themes,
+                                  urgent=urgent, premarket=premarket)
     for part in split_telegram_text(message):
         allowed, reason = (delivery_status(market, datetime.now(KST)) if mode == "preopen"
                            else intraday_delivery_status(market, datetime.now(KST), closes))
@@ -2112,8 +2126,35 @@ def main():
                 for symbol, *_ in candidates:
                     company = companies.setdefault(symbol, {})
                     company["research_label"] = research_label(evidence, market, symbol, decision_at)
+                # 게이트와 무관한 참고 블록: 장전 사전 시그널과 당일 급등 '긴급 이슈'. 둘 다
+                # 매수 판정·카운트와 분리되어 있고, 실패해도 알림 자체를 막지 않는다.
+                checked = datetime.now(timezone.utc)
+                urgent = []
+                try:
+                    import urgent_issues
+                    themes_snapshot = sector_snapshot.get("themes")
+                    urgent = urgent_issues.select_urgent_issues(
+                        {"results": [],
+                         "theme_sectors": [themes_snapshot] if themes_snapshot else []},
+                        now=checked).get("US" if overseas else "KR", [])
+                except Exception as exc:
+                    print(f"{market} 긴급 이슈 확인 실패 ({type(exc).__name__})")
+                premarket = []
+                if market == "US-early":
+                    try:
+                        from premarket_signals import collect as collect_premarket
+                        articles = {}
+                        for symbol, company in companies.items():
+                            ticker = symbol[4:] if symbol.startswith("DNAS") else symbol
+                            news = (company or {}).get("news") or []
+                            if news:
+                                articles[ticker] = news
+                        premarket = collect_premarket(now=checked, articles=articles).get("items") or []
+                    except Exception as exc:
+                        print(f"{market} 장전 사전 시그널 확인 실패 ({type(exc).__name__})")
                 delivery = notify(market, candidates, decision_at, token, chat_id, companies,
-                                  sectors=sector_snapshot["rows"], themes=sector_snapshot.get("themes"))
+                                  sectors=sector_snapshot["rows"], themes=sector_snapshot.get("themes"),
+                                  urgent=urgent, premarket=premarket)
                 dump(Path(f"{market}-delivery.json"), delivery)
             else:
                 print(f"{market} 장중 알림 조건 충족 없음")

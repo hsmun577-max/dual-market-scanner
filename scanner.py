@@ -1090,6 +1090,12 @@ def send_telegram_summary(report):
     # 대분류 ETF '1위 반도체' 아래에 실제 구성종목으로 계산한 세부 테마·대표주·이슈를 붙인다.
     lines.extend(theme_lines(report.get('theme_sectors')))
     lines.extend(market_regime_note(report))
+    # 미국 장전 요약에는 게이트와 무관한 장전 사전 시그널을 붙인다. 이 블록은 발송 전에
+    # preopen_delivery/premarket_signals가 준비해 두고, 발송 시점에는 다시 조회하지 않는다.
+    from premarket_signals import format_block as format_premarket_block
+    premarket_lines = format_premarket_block((report.get('premarket_watch') or {}).get('items'))
+    if premarket_lines:
+        lines.extend(['', *premarket_lines])
     # The reversal tracks are delivered in their own section: they are exempt from the
     # regime gate by design (they are the entries a downtrend leaves on the table), so
     # they must never be read as momentum buys that passed it.
@@ -1135,6 +1141,14 @@ def send_telegram_summary(report):
                       "하락장에서도 시가 눌림에서만 진입 · 시장 국면 게이트 미적용"])
         for item in rebound[:5]:
             lines.append(telegram_rebound_line(item))
+    # 당일 급등했지만 게이트에 막혀 매수 후보에서 빠진 종목은 별도 참고 블록으로만 나간다.
+    # 매수 후보 카운트·`preopen_signal`은 건드리지 않는다(urgent_issues는 읽기 전용).
+    import urgent_issues
+    urgent = urgent_issues.select_urgent_issues(report)
+    report['urgent_issues'] = urgent
+    urgent_lines = urgent_issues.format_urgent_block(urgent)
+    if urgent_lines:
+        lines.extend(['', *urgent_lines])
 
     messages = split_telegram_text("\n".join(lines))
     for message in messages:
