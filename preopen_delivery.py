@@ -46,6 +46,18 @@ def main():
     previous_session=cal.previous_session(window['session_date']).strftime('%Y-%m-%d')
     report['preopen_session']=window['session_date']
     evaluate_preopen(report,previous_session,datetime.now(timezone.utc))
+    # 미국 장전 요약: 차트 게이트와 무관한 장전 사전 시그널을 발송 전에 준비한다.
+    # 발송 창(개장 10분 전 ±2분) 안에서 외부 조회를 하지 않도록 미리 만들어 둔다.
+    if market=='US':
+        try:
+            from premarket_signals import attach as attach_premarket
+            watch=attach_premarket(report,datetime.now(timezone.utc))
+            print('PREMARKET_WATCH='+json.dumps(dict(
+                items=len(watch.get('items') or []),quotes_seen=watch.get('quotes_seen'),
+                news_seen=watch.get('news_seen'),error=watch.get('error')),ensure_ascii=False),flush=True)
+        except Exception as exc:  # 장전 감시 실패가 장전 알림 자체를 막지 않는다
+            report['premarket_watch']=dict(items=[],error=type(exc).__name__)
+            print('Premarket watch unavailable: '+type(exc).__name__,flush=True)
     dump('preopen-analysis.json',report)
     print('PREOPEN_BUY_EVALUATION='+json.dumps(report['buy_evaluation'],ensure_ascii=False),flush=True)
     if market=='KR':
@@ -71,7 +83,9 @@ def main():
     result=dict(**window,checked_at=datetime.now(timezone.utc).isoformat(),
                 sent=bool(delivery.get('sent')),parts_sent=delivery.get('parts_sent',0),
                 suppressed_by_gate=bool(delivery.get('suppressed_by_gate')),
-                reason=delivery.get('reason') or reason)
+                reason=delivery.get('reason') or reason,
+                premarket_signals=len((report.get('premarket_watch') or {}).get('items') or []),
+                urgent_issues=sum(len(rows) for rows in (report.get('urgent_issues') or {}).values()))
     dump('preopen-delivery.json',result)
     print('PREOPEN_DELIVERY='+json.dumps(result,ensure_ascii=False),flush=True)
 

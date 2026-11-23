@@ -75,11 +75,21 @@ def main():
     sector_lines=(format_report(industry).splitlines() if industry.get('rows') else ['오늘의 주요 섹터','확인 불가'])
     if theme.get('rows'):sector_lines=sector_lines+format_theme_block(theme,'KR')
     message=format_requested_report(sector_lines,entries,evaluation,sent_at)
+    # 요청 장전 리포트에도 매수 후보와 분리된 '긴급 이슈 참고'를 붙인다.
+    urgent={}
+    try:
+        import urgent_issues
+        urgent=urgent_issues.select_urgent_issues(report,now=datetime.now(timezone.utc))
+        block=urgent_issues.format_urgent_block(urgent)
+        if block:message='\n'.join([message,'',*block])
+    except Exception as exc:
+        print('Urgent issue check unavailable: '+type(exc).__name__,flush=True)
     audit=dict(session=args.session,generated_at=sent_at.isoformat(),strategy_commit=os.getenv('GITHUB_SHA'),
         explicit_manual_request=True,scheduled_delivery_guards_unchanged=True,
         evaluation=evaluation,entry_checks=entries,trade_ready_count=sum(e['trade_ready'] for e in entries),
         complete_forecasts=sum(r.get('company_forecast',{}).get('assessment_status')=='complete' for r in report['results']),
         research_scope=report.get('research_scope'),
+        urgent_issues=urgent,
         industry_rows=len(industry.get('rows',[])),industry_error=industry.get('error'),
         recommendations=[dict(symbol=r['symbol'],name=r.get('name'),
             score=r['company_forecast']['composite_score'],plan=r['preopen_signal'],quote=quotes.get(r['symbol'])) for r in recommendations],
