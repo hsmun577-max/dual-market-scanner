@@ -25,6 +25,7 @@ from delivery_policy import delivery_status
 from event_impact_analysis import article_text, world_events, analyze_events, company_news_events
 from candidate_selection import instrument_rejection_reason, rank_market_candidates
 from sector_flow import format_sector_header
+from theme_sectors import sector_section, theme_sector_snapshot
 from telegram_text import split_telegram_text
 from exit_policy import DEFAULT_EXIT_POLICY
 from provider_retry import call as provider_call, isolate_yfinance_cache, transient
@@ -1870,7 +1871,7 @@ def research_label(evidence, market, symbol, decision_at):
     return ("우호" if supportive else "우호 의견 미확인") + f" · {latest.astimezone(KST):%m/%d}"
 
 
-def format_notification(market, candidates, closes, companies=None, sectors=None):
+def format_notification(market, candidates, closes, companies=None, sectors=None, themes=None):
     companies = companies or {}
     overseas = market.startswith("US-")
     confirmed = [row for row in candidates if row[4] is not None
@@ -1880,7 +1881,9 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
                  and c.get('forecast',{}).get('composite_score') is not None for c in companies.values())
     incomplete=len(companies)-assessed
     heading='매수 신호' if confirmed else '분석 상태' if incomplete and not assessed else '분석 결과'
-    lines = format_sector_header(sectors, "US" if overseas else "KR") + ["", f"{heading} · {timestamp}"]
+    # 대분류 ETF 한 단어 대신 세부 테마 블록을 붙인다. 테마 자료가 없으면 기존 머리줄 그대로다.
+    lines = (sector_section(sectors, themes, "US" if overseas else "KR")
+             + ["", f"{heading} · {timestamp}"])
     if not confirmed:
         if assessed:
             lines.append(f"판정 완료 {assessed}종목 · 현재 매수 조건 충족 없음")
@@ -1906,7 +1909,7 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
     return "\n".join(lines)
 
 def notify(market, candidates, closes, token, chat_id, companies=None, sectors=None,
-           mode="intraday"):
+           mode="intraday", themes=None):
     """Send a decision alert under the gate that belongs to its own stage.
 
     ``mode='preopen'`` keeps the plan window (ten minutes before an opening ±2 minutes).
@@ -1929,7 +1932,7 @@ def notify(market, candidates, closes, token, chat_id, companies=None, sectors=N
     if not allowed:
         print(f"Telegram suppressed_by_gate {market}: {reason}", flush=True)
         return result
-    message = format_notification(market, candidates, closes, companies, sectors)
+    message = format_notification(market, candidates, closes, companies, sectors, themes)
     for part in split_telegram_text(message):
         allowed, reason = (delivery_status(market, datetime.now(KST)) if mode == "preopen"
                            else intraday_delivery_status(market, datetime.now(KST), closes))
@@ -2079,7 +2082,11 @@ def main():
         if symbols:
             opens = collection_open(opens, datetime.now(local_zone))
         companies = {}
-        sector_snapshot = {"rows": sector_flow_snapshot("US" if overseas else "KR", datetime.now(local_zone))}
+        sector_snapshot = {
+            "rows": sector_flow_snapshot("US" if overseas else "KR", datetime.now(local_zone)),
+            # 대분류 ETF 순위만으로는 하락장에서 '1위 은행' 한 단어가 남는다.
+            # 실제 구성종목으로 계산한 세부 테마를 같은 섹터 블록에 붙인다.
+            "themes": theme_sector_snapshot(market, datetime.now(local_zone))}
         if symbols:
             observed_market = market_evidence(market, previous_session, datetime.now(local_zone))
             evidence.extend(observed_market)
@@ -2106,7 +2113,7 @@ def main():
                     company = companies.setdefault(symbol, {})
                     company["research_label"] = research_label(evidence, market, symbol, decision_at)
                 delivery = notify(market, candidates, decision_at, token, chat_id, companies,
-                                  sectors=sector_snapshot["rows"])
+                                  sectors=sector_snapshot["rows"], themes=sector_snapshot.get("themes"))
                 dump(Path(f"{market}-delivery.json"), delivery)
             else:
                 print(f"{market} 장중 알림 조건 충족 없음")
@@ -2117,6 +2124,7 @@ def main():
             def refresh_companies():
                 checked_at = datetime.now(local_zone)
                 sector_snapshot["rows"] = sector_flow_snapshot("US" if overseas else "KR", checked_at)
+                sector_snapshot["themes"] = theme_sector_snapshot(market, checked_at)
                 refreshed, events = company_context(market, symbols, checked_at)
                 events.extend(confirmed_contract_events(refreshed, market, checked_at))
                 return refreshed, events

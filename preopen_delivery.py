@@ -34,6 +34,11 @@ def main():
     import scanner
     local=datetime.now(ZoneInfo('America/New_York' if market=='US' else 'Asia/Seoul'))
     report['sectors']=scanner.sector_flow_snapshot(market,local)
+    try:
+        from theme_sectors import theme_sector_snapshot
+        report['theme_sectors']=[theme_sector_snapshot(market,local)]
+    except Exception as exc:  # 테마 집계 실패가 장전 알림 자체를 막지 않는다
+        print('Theme sectors unavailable: '+type(exc).__name__,flush=True)
     scanner.prepare_selected_analysis(report)
     import exchange_calendars
     from preopen_signals import evaluate_preopen

@@ -14,6 +14,7 @@ import pandas as pd
 import requests
 from candidate_selection import candidate_rejection_reason, rank_market_candidates
 from sector_flow import fetch_intraday_sectors, format_sector_header
+from theme_sectors import theme_lines, theme_sector_snapshot
 from telegram_text import split_telegram_text
 from research_asset import is_fund
 from company_forecast import build_company_forecast
@@ -1086,6 +1087,8 @@ def send_telegram_summary(report):
         return result
 
     lines = list(report.get('sector_header_override') or format_sector_header(report.get("sectors", [])))
+    # 대분류 ETF '1위 반도체' 아래에 실제 구성종목으로 계산한 세부 테마·대표주·이슈를 붙인다.
+    lines.extend(theme_lines(report.get('theme_sectors')))
     lines.extend(market_regime_note(report))
     # The reversal tracks are delivered in their own section: they are exempt from the
     # regime gate by design (they are the entries a downtrend leaves on the table), so
@@ -1254,6 +1257,7 @@ def main():
         "market_regime": market_regime,
         "sectors": sectors,
         "sector_errors": sector_errors,
+        "theme_sectors": [],
         "market_summary": {
             market: {
                 "attempted": len(set(tickers)),
@@ -1289,6 +1293,13 @@ def main():
             row for market, zone in (("KR", "Asia/Seoul"), ("US", "America/New_York"))
             for row in sector_flow_snapshot(market, checked.astimezone(ZoneInfo(zone)))
         ]
+        report["theme_sectors"] = []
+        for market, zone in (("KR", "Asia/Seoul"), ("US", "America/New_York")):
+            try:
+                report["theme_sectors"].append(
+                    theme_sector_snapshot(market, checked.astimezone(ZoneInfo(zone))))
+            except Exception as exc:  # 테마 집계 실패가 전체 리포트를 막지 않는다
+                print(f"{market} theme sectors unavailable ({type(exc).__name__})")
         prepare_selected_analysis(report)
 
     output = REPORT_DIR / "latest.json"
