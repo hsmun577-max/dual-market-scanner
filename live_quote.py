@@ -205,8 +205,8 @@ def quote_line(quote, market=None):
 def _rewrite_limitations(report, summary):
     """Say what actually happened with quotes instead of a fixed '미포함' line."""
     limitations = [row for row in report.get("limitations") or []
-                   if not (isinstance(row, str) and ("실시간 호가" in row or "일봉 기준" in row
-                                                    or "일봉 기반" in row or "VWAP" in row))]
+                   if not (isinstance(row, str) and ("현재 호가" in row or "일봉" in row
+                                                    or "VWAP" in row))]
     if summary.get("observed"):
         limitations.append(f"후보 {summary['observed']}종목의 현재 호가는 KIS REST로 조회했고, "
                            "지표·점수·판정은 완료된 거래일 일봉 종가 기준이며 실시간 매수 확정은 아님")

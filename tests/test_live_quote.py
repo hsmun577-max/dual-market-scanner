@@ -100,6 +100,16 @@ class AttachTests(unittest.TestCase):
         self.assertIn("실시간 매수 확정은 아님", text)
         self.assertEqual(text.count("VWAP"), 1)
 
+    def test_a_second_pass_over_the_same_report_does_not_repeat_the_line(self):
+        # The requested report loads the scan's report (already rewritten once) and
+        # attaches quotes again; the limitation must stay a single line.
+        report = dict(results=[plan_row()], limitations=["백테스트 미구현"])
+        live_quote.attach(report, CLOSED_AT, client=object())
+        live_quote.attach(report, CLOSED_AT, client=object())
+        text = "\n".join(report["limitations"])
+        self.assertEqual(text.count("장 마감(또는 휴장)으로"), 1)
+        self.assertEqual(text.count("VWAP"), 1)
+
     def test_the_call_count_is_bounded_per_market(self):
         rows = [plan_row(symbol=f"{100000 + index}.KS", name=f"종목{index}") for index in range(20)]
         report = dict(results=rows, limitations=[])
