@@ -197,6 +197,7 @@ def plan_line(plan):
     """One line for a conditional plan that could not be confirmed at this moment."""
     code = str(plan.get('symbol') or '').split('.')[0]
     label = plan.get('label') or TRACK_LABELS.get(plan.get('strategy'), plan.get('strategy')) or '조건부'
+    label = str(label).strip('[]')
     band = []
     floor, limit = plan.get('entry_floor'), plan.get('entry_limit')
     text = lambda value: f"{value:,.0f}원" if plan.get('market') != 'US' else f"${value:,.2f}"
@@ -215,9 +216,11 @@ def plan_line(plan):
     lines = [head]
     if plan.get('catalyst_summary'):
         lines.append(f"  근거 {plan['catalyst_summary']}")
+    from live_quote import LABELS as QUOTE_LABELS
     from live_quote import quote_line
     quote = quote_line(plan.get('live_quote'), plan.get('market'))
-    if quote:
+    held_by_session = plan.get('hold_reason') in ('market_closed', 'wrong_plan_session')
+    if quote and not (held_by_session and quote == QUOTE_LABELS['market_closed']):
         lines.append(f"  {quote}")
     if plan.get('hold_reason'):
         lines.append(f"  {HOLD_REASON_LABELS.get(plan['hold_reason'], plan['hold_reason'])}")
