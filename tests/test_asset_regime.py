@@ -371,8 +371,9 @@ class HeaderWiringTests(unittest.TestCase):
         self.assertIn('오늘의 주요 섹터', text)
 
     def test_attach_stores_the_block_on_the_report(self):
+        # 실행 디렉터리에 상태 파일이 있어도 테스트가 흔들리지 않도록 직전 스캔을 비운다.
         report = dict(theme_sectors=[])
-        block = asset_regime.attach(report, now=NOW, save=False,
+        block = asset_regime.attach(report, now=NOW, previous={}, save=False,
                                     downloader=lambda symbols: market_series())
         self.assertIs(report['asset_regime'], block)
         self.assertEqual(len(block['header']), 2)
@@ -405,6 +406,12 @@ class HeaderWiringTests(unittest.TestCase):
             path = Path(folder) / 'nested' / 'asset-regime-state.json'
             self.assertIsNotNone(asset_regime.save_state(self.block(), path=path))
             self.assertTrue(path.is_file())
+            # 상태 파일은 블록을 그대로 담는다. 다음 실행이 이것을 '직전 스캔'으로 읽어야
+            # 흐름 변화가 나온다(래퍼 JSON만 읽던 시절 이 경로는 조용히 비어 있었다).
+            loaded = asset_regime.load_previous([path])
+            self.assertEqual(loaded['observed_at'], self.block()['observed_at'])
+            self.assertEqual([row['label'] for row in loaded['groups']],
+                             [row['label'] for row in self.block()['groups']])
 
 
 if __name__ == '__main__':

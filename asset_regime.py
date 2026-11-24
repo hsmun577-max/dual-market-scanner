@@ -596,7 +596,11 @@ def header_lines(block):
 
 
 def load_previous(paths=PREVIOUS_PATHS):
-    """직전 스캔이 저장해 둔 블록. 없거나 깨졌으면 None."""
+    """직전 스캔이 저장해 둔 블록. 없거나 깨졌으면 None.
+
+    리포트 JSON은 `asset_regime` 아래에 블록을 두고, 상태 파일(`save_state`)은 블록을
+    그대로 저장한다. 둘 다 읽는다.
+    """
     for path in paths:
         try:
             if not Path(path).is_file():
@@ -604,7 +608,11 @@ def load_previous(paths=PREVIOUS_PATHS):
             data = json.loads(Path(path).read_text(encoding='utf-8-sig'))
         except (OSError, ValueError):
             continue
-        block = data.get('asset_regime') if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            continue
+        if data.get('groups') and data.get('observed_at'):
+            return data
+        block = data.get('asset_regime')
         if isinstance(block, dict) and block.get('groups'):
             return block
     return None
