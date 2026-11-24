@@ -226,6 +226,32 @@ class QualityWatchResearchTests(unittest.TestCase):
         self.assertIn('매수 신호 아님', text)
 
 
+class ReuseSameSessionQualityWatchTests(unittest.TestCase):
+    """A same-session scan already read the 10억~50억 tier; a later report reuses it."""
+
+    def test_a_same_session_record_is_not_read_again(self):
+        report = dict(results=[], sectors=[], industry_snapshot=dict(rows=[]),
+                      quality_watch=[dict(market='KR', symbol='004000.KS',
+                                          name='롯데정밀화학', grade='supply_inflow_quality')],
+                      quality_watch_at=datetime.now(timezone.utc).isoformat())
+        with patch('kis_intraday.company_context') as context, \
+             patch('event_impact_analysis.world_events', return_value=([], [])), \
+             patch('economic_graph.load_profiles', return_value={}):
+            scanner.prepare_selected_analysis(report)
+        context.assert_not_called()
+        self.assertEqual(report['quality_watch'][0]['symbol'], '004000.KS')
+
+    def test_a_previous_session_record_is_read_again(self):
+        report = dict(results=[], sectors=[], industry_snapshot=dict(rows=[]),
+                      quality_watch=[dict(market='KR', symbol='004000.KS')],
+                      quality_watch_at='2026-11-20T10:00:00+09:00')
+        with patch('kis_intraday.company_context', return_value=({}, [])), \
+             patch('event_impact_analysis.world_events', return_value=([], [])), \
+             patch('economic_graph.load_profiles', return_value={}):
+            scanner.prepare_selected_analysis(report)
+        self.assertEqual(report['quality_watch'], [])
+
+
 class DailyReportWiringTests(unittest.TestCase):
     """The quality tier is read inside the daily preparation and reaches the message."""
 
