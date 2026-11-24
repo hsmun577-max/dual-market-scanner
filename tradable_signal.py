@@ -166,6 +166,7 @@ def validate_entry(row,quote,at,session_open):
         take_profit_mode=policy.take_profit_mode,exit_policy=policy.snapshot(),
         catalyst=plan.get('catalyst') if plan.get('strategy')=='earnings_catalyst' else None,
         market_regime_lifted=plan.get('market_regime_lifted') is True,
+        live_quote=row.get('live_quote'),
         quote_at=seen.isoformat(),valid_until=(at+timedelta(seconds=30)).isoformat(),
         generated_at=at.isoformat(),filled=False)
 
@@ -208,6 +209,10 @@ def plan_line(plan):
     lines = [head]
     if plan.get('catalyst_summary'):
         lines.append(f"  근거 {plan['catalyst_summary']}")
+    from live_quote import quote_line
+    quote = quote_line(plan.get('live_quote'), plan.get('market'))
+    if quote:
+        lines.append(f"  {quote}")
     if plan.get('hold_reason'):
         lines.append(f"  {HOLD_REASON_LABELS.get(plan['hold_reason'], plan['hold_reason'])}")
     return "\n".join(lines)
@@ -240,10 +245,13 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans
                 continue
             evidence=row.get('catalyst') or {}
             track='[실적·호재 촉매] ' if evidence else ''
+            from live_quote import quote_line
+            quote = quote_line(row.get('live_quote'), row.get('market') or 'KR')
             lines.extend(['',f"• {row['name']} ({row['symbol'].split('.')[0]}) · {track}종합 {row['score']:.1f}/100",
                 *([f"근거 {evidence['summary']}"] if evidence.get('summary') else []),
                 *(['지수 20일선 아래 · 확정 공시 근거로 예외 적용 (시가·거래량 게이트는 그대로)']
                   if row.get('market_regime_lifted') else []),
+                *([quote] if quote else []),
                 f"진입 확인가 {row['indicative_entry']:,.0f}원 · 매수 상한 {row['entry_limit']:,.0f}원",
                 f"{datetime.fromisoformat(row['valid_until']):%H:%M:%S}까지 가격 재확인 후 진입",
                 f"분석 목표 {row['base_target']:,.0f}원 / 상승 시나리오 {row['bull_target']:,.0f}원",

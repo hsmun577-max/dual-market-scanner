@@ -863,6 +863,15 @@ def prepare_selected_analysis(report):
         print('Mid-term fundamentals screen unavailable (' + type(exc).__name__ +
               '); list kept on the chart condition')
         mid_term_watch.attach(report, datetime.now(timezone.utc))
+    # The message names conditions plans and watch names, so read their live quote once
+    # here (bounded per market). A closed session or a missing credential is recorded, not
+    # raised: the scan and the alert go out either way.
+    try:
+        import live_quote
+        live_quote.attach(report, datetime.now(timezone.utc))
+    except Exception as exc:
+        print('Live quote lookup unavailable (' + type(exc).__name__ + ')')
+        report['live_quotes'] = {'status': 'error', 'reason': type(exc).__name__}
 
 
 QUALITY_WATCH_LIMIT = 8
@@ -975,6 +984,10 @@ def quality_watch_line(entry):
     supply_line = entry.get('supply_line')
     if supply_line:
         lines.append("  " + supply_line)
+    from live_quote import quote_line
+    quote = quote_line(entry.get('live_quote'), entry.get('market'))
+    if quote:
+        lines.append("  " + quote)
     if entry.get('grade') != 'supply_inflow_quality':
         # Only the unsent grade needs its own basis label; the inflow block's heading
         # already carries '매수 후보 검토 · 매수 신호 아님'.
@@ -1022,7 +1035,7 @@ def telegram_rebound_line(item):
             f"  {limit_line}\n"
             "  장전 시가가 전일 종가보다 −1% 아래면 진입 취소\n"
             f"{basis}\n"
-            "  좁은 −2% 손절 비권장 · 5거래일 보유 후 청산" + caveat_note(item))
+            "  좁은 −2% 손절 비권장 · 5거래일 보유 후 청산" + quote_note(item) + caveat_note(item))
 
 
 def telegram_early_entry_line(item):
@@ -1077,7 +1090,8 @@ def telegram_early_entry_line(item):
             f"  {limit_line}\n"
             f"{basis}\n"
             f"  손절 −{policy.stop_pct:.0%} · 기본 익절 +{policy.take_profit_pct:.0%} · 5거래일 보유 · "
-            "급등 시 트레일링 보유, 거래량 급감·고점 대비 하락 시 청산" + caveat_note(item))
+            "급등 시 트레일링 보유, 거래량 급감·고점 대비 하락 시 청산" + quote_note(item)
+            + caveat_note(item))
 
 
 def telegram_candidate_line(item):
@@ -1095,7 +1109,8 @@ def telegram_candidate_line(item):
     if advance.get('status')=='advance_candidate' and not conditional and score is not None:
         return (f"• {item.get('name') or item['symbol']} ({item['symbol'].split('.')[0]}) · 사전 매수 후보 · 종합 {score:.1f}/100\n"
                 f"  예정 재료 {advance['event_window_start']}~{advance['event_window_end']}\n"
-                "  정책 결과 발표 전 수혜 가능성 분석 · 매수 확정 대기" + caveat_note(item))
+                "  정책 결과 발표 전 수혜 가능성 분석 · 매수 확정 대기" + quote_note(item)
+                + caveat_note(item))
     if (signal.get("confirmed") is not True and not conditional) or score is None or entry is None:
         return ""
     symbol = item["symbol"]
@@ -1140,7 +1155,7 @@ def telegram_candidate_line(item):
                 f"  손절 −{exit_policy.stop_pct:.0%} · 기본 익절 +{exit_policy.take_profit_pct:.0%} · "
                 f"단기 급등 시 {exit_policy.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
                 "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"
-                f"{guard}" + caveat_note(item))
+                f"{guard}" + quote_note(item) + caveat_note(item))
     basis = f" · {preopen['reference_date']} 종가 기준" if conditional else ''
     caveat = caveat_note(item)
     return (f"• {name} ({code}) · {label}{kind} · 종합 {score:.1f}/100\n"
@@ -1148,7 +1163,8 @@ def telegram_candidate_line(item):
             f"  5거래일 분석 목표 · 기준/상승 {target_label}\n"
             f"  손절 −{exit_policy.stop_pct:.0%} · 기본 익절 +{exit_policy.take_profit_pct:.0%} · "
             f"단기 급등 시 {exit_policy.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
-            "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)" + caveat)
+            "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"
+            + quote_note(item) + caveat)
 
 
 CAVEAT_LABELS = {
@@ -1169,6 +1185,17 @@ def caveat_note(item):
         return ""
     labels = [CAVEAT_LABELS.get(key, key) for key in dict.fromkeys(caveats)][:3]
     return "\n  자료 일부 미확보: " + ", ".join(labels) + " (점수에 반영해 감점)"
+
+
+def quote_note(item):
+    """The observed live quote of this row, or why there is none (장 마감/자격증명).
+
+    The scan decides on completed sessions; this line is what the market is showing now.
+    It is never an entry confirmation — the quote carries its own time and says so.
+    """
+    from live_quote import quote_line
+    text = quote_line((item or {}).get('live_quote'), (item or {}).get('market'))
+    return "\n  " + text if text else ""
 
 def benchmark_daily_closes(benchmark):
     """Benchmark close series without an unfinished bar or a duplicated session.
@@ -1404,6 +1431,12 @@ def send_telegram_summary(report):
     # 매수 후보 카운트·`preopen_signal`은 건드리지 않는다(urgent_issues는 읽기 전용).
     import urgent_issues
     urgent = urgent_issues.select_urgent_issues(report)
+    # 이 블록도 종목을 이름으로 보여 주므로 같은 호가를 붙인다(시장당 3건으로 제한).
+    try:
+        from live_quote import attach_urgent
+        attach_urgent(urgent, datetime.now(timezone.utc))
+    except Exception as exc:
+        print('Urgent quote lookup unavailable (' + type(exc).__name__ + ')')
     report['urgent_issues'] = urgent
     urgent_lines = urgent_issues.format_urgent_block(urgent)
     if urgent_lines:

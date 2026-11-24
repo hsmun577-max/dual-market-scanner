@@ -93,7 +93,8 @@ def main():
             flat_open_entry_limit=plan.get('flat_open_entry_limit'),
             composite_score=(row.get('company_forecast') or {}).get('composite_score'),
             catalyst_summary=(plan.get('catalyst') or {}).get('summary'),
-            hold_reason=reason_by_symbol.get(row['symbol'])))
+            hold_reason=reason_by_symbol.get(row['symbol']),
+            live_quote=row.get('live_quote')))
     message=format_requested_report(sector_lines,entries,evaluation,sent_at,
                                     regime=asset_regime.cached_block(),plans=plans,
                                     market_note=scanner.market_regime_note(report))
@@ -102,6 +103,11 @@ def main():
     try:
         import urgent_issues
         urgent=urgent_issues.select_urgent_issues(report,now=datetime.now(timezone.utc))
+        try:
+            from live_quote import attach_urgent
+            attach_urgent(urgent,datetime.now(timezone.utc))
+        except Exception as exc:
+            print('Urgent quote lookup unavailable: '+type(exc).__name__,flush=True)
         block=urgent_issues.format_urgent_block(urgent)
         if block:message='\n'.join([message,'',*block])
     except Exception as exc:

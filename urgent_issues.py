@@ -439,5 +439,9 @@ def format_urgent_block(issues, limit=None):
             code = symbol.split('.')[0] if item.get('market') == 'KR' else symbol
             reasons = ' · '.join((item.get('reason_labels') or ['게이트 보류'])[:2])
             lines.append(f"• {item.get('name')} ({code}) {item.get('change_pct', 0):+.1f}% · 보류: {reasons}")
+            from live_quote import quote_line
+            quote = quote_line(item.get('live_quote'), item.get('market'))
+            if quote:
+                lines.append(f"  {quote}")
             lines.append(f"  이슈: {_clean(item.get('headline'), 110)}")
     return lines
