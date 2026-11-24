@@ -827,7 +827,8 @@ def quality_watch_research(report, at):
     measured foreign/institutional flow, then the two axes of ``company_forecast``.
     A name that is fundamentally sound and already bought by foreigners and institutions
     is a '수급 유입 우량주' candidate; one that is sound but not yet bought is a
-    '수급 대기 우량주' watch entry. Neither is a buy signal and neither is written back
+    '수급 대기 우량주' watch entry, kept here as a record only. Only the inflow grade is
+    printed in the Telegram message. Neither is a buy signal and neither is written back
     into the row's selection, so the momentum path stays exactly as it was.
     """
     from candidate_selection import quality_watch_reason, average_turnover
@@ -899,7 +900,11 @@ def quality_watch_research(report, at):
 
 
 def quality_watch_line(entry):
-    """One report line for a quality-watch name: the grade, the axes and why."""
+    """One message line for a quality name: the grade, the axes and why.
+
+    The message sends only '수급 유입 우량주' entries; a waiting entry still renders with
+    its own label, so a record kept in the report can be read as it was graded.
+    """
     name = entry.get('name') or entry.get('symbol')
     code = (entry.get('symbol') or '').split('.')[0]
     label = ('수급 유입 우량주' if entry.get('grade') == 'supply_inflow_quality'
@@ -1279,18 +1284,15 @@ def send_telegram_summary(report):
     urgent_lines = urgent_issues.format_urgent_block(urgent)
     if urgent_lines:
         lines.extend(['', *urgent_lines])
-    quality = report.get('quality_watch') or []
-    if quality:
-        inflow = [row for row in quality if row.get('grade') == 'supply_inflow_quality']
-        waiting = [row for row in quality if row.get('grade') != 'supply_inflow_quality']
-        if inflow:
-            lines.extend(['', '[수급 유입 우량주]',
-                          '외인·기관 순매수 확인 · 매수 후보 검토 대상'])
-            lines.extend(quality_watch_line(row) for row in inflow[:5])
-        if waiting:
-            lines.extend(['', '[수급 대기 우량주]',
-                          '펀더멘탈·목표가 우량 · 수급 미유입이라 관찰만'])
-            lines.extend(quality_watch_line(row) for row in waiting[:5])
+    # 외인·기관이 실제로 사고 있는 종목만 보낸다. 수급 미유입 대기 종목은 리포트 JSON에
+    # 기록으로만 남기고 메시지 본문에는 싣지 않는다
+    # (2026-11-24 지시: "수급대기우량주는 안띄워도될듯").
+    inflow = [row for row in report.get('quality_watch') or []
+              if row.get('grade') == 'supply_inflow_quality']
+    if inflow:
+        lines.extend(['', '[수급 유입 우량주]',
+                      '외인·기관 순매수 확인 · 매수 후보 검토 대상'])
+        lines.extend(quality_watch_line(row) for row in inflow[:5])
 
     messages = split_telegram_text("\n".join(lines))
     for message in messages:

@@ -201,33 +201,29 @@ class QualityWatchResearchTests(unittest.TestCase):
             entries = scanner.quality_watch_research(self.report([liquid, weak]), AT)
         self.assertEqual([entry['symbol'] for entry in entries], [])
 
-    def test_report_line_says_the_grade_and_that_it_is_not_a_buy(self):
-        entry = dict(name='롯데정밀화학', symbol='004000.KS', grade='supply_waiting_quality',
+    def test_report_line_says_the_inflow_grade_and_that_it_is_not_a_buy(self):
+        entry = dict(name='롯데정밀화학', symbol='004000.KS', grade='supply_inflow_quality',
                      fundamental_score=65.7, target_upside_pct=90.8,
                      analyst_target={'target_price': 57333.0},
-                     supply_line='외인·기관 -1.2억원 · 거래대금 대비 -0.42% · 5일 중 1일 순매수',
+                     supply_line='외인·기관 +1.2억원 · 거래대금 대비 +1.42% · 5일 중 4일 순매수',
                      average_turnover=18.4e8)
         text = scanner.quality_watch_line(entry)
-        self.assertIn('수급 대기 우량주', text)
+        self.assertIn('수급 유입 우량주', text)
         self.assertIn('펀더멘탈 66/100', text)
         self.assertIn('57,333원', text)
+        self.assertIn('매수 후보 검토', text)
         self.assertIn('매수 신호 아님', text)
-        entry['grade'] = 'supply_inflow_quality'
-        self.assertIn('수급 유입 우량주', scanner.quality_watch_line(entry))
-        self.assertIn('매수 후보 검토', scanner.quality_watch_line(entry))
-
-
-if __name__ == '__main__':
-    unittest.main()
+        self.assertNotIn('수급 대기 우량주', text)
 
 
 class DailyReportWiringTests(unittest.TestCase):
     """The quality tier is read inside the daily preparation and reaches the message."""
 
-    def prepare(self, report):
+    def prepare(self, report, supply=None):
         with patch("kis_intraday.company_context",
                    return_value=({'004000': lotte_company()}, [])), \
-             patch("supply_flow.evidence_for", return_value=flow('outflow', -.4)), \
+             patch("supply_flow.evidence_for",
+                   return_value=supply or flow('outflow', -.4)), \
              patch("supply_flow.share_line",
                    return_value="외인·기관 -1.2억원 · 거래대금 대비 -0.42%"), \
              patch("issuer_consensus.consensus_for", return_value=consensus(57333)), \
@@ -236,20 +232,12 @@ class DailyReportWiringTests(unittest.TestCase):
             scanner.prepare_selected_analysis(report)
         return report
 
-    def test_the_daily_preparation_carries_a_quality_watch_entry(self):
-        row = kr_row()
-        report = self.prepare(dict(results=[row], sectors=[], industry_snapshot=dict(rows=[]),
-                                   preopen_session='2026-11-24',
-                                   market_regime={'KR': {'above_ma20': False}}))
-        self.assertEqual(len(report['quality_watch']), 1)
-        self.assertEqual(report['quality_watch'][0]['grade'], 'supply_waiting_quality')
-        self.assertEqual(report['quality_watch_scope']['candidates'], 1)
-        self.assertNotIn('preopen_signal', row)
+    def daily_report(self, supply=None):
+        return self.prepare(dict(results=[kr_row()], sectors=[],
+                                 industry_snapshot=dict(rows=[]), preopen_session='2026-11-24',
+                                 market_regime={'KR': {'above_ma20': False}}), supply)
 
-    def test_the_message_carries_the_watch_block_and_not_a_buy(self):
-        report = self.prepare(dict(results=[kr_row()], sectors=[],
-                                   industry_snapshot=dict(rows=[]), preopen_session='2026-11-24',
-                                   market_regime={'KR': {'above_ma20': False}}))
+    def sent_text(self, report):
         sent = {}
 
         class Reply:
@@ -268,7 +256,48 @@ class DailyReportWiringTests(unittest.TestCase):
              patch("scanner.requests.post", side_effect=post):
             result = scanner.send_telegram_summary(report)
         self.assertTrue(result['sent'])
-        self.assertIn("[수급 대기 우량주]", sent['text'])
-        self.assertIn("롯데정밀화학 (004000)", sent['text'])
-        self.assertIn("매수 신호 아님", sent['text'])
-        self.assertNotIn("매수 확인", sent['text'])
+        return sent['text']
+
+    def test_the_daily_preparation_carries_a_quality_watch_entry(self):
+        row = kr_row()
+        report = self.prepare(dict(results=[row], sectors=[], industry_snapshot=dict(rows=[]),
+                                   preopen_session='2026-11-24',
+                                   market_regime={'KR': {'above_ma20': False}}))
+        self.assertEqual(len(report['quality_watch']), 1)
+        self.assertEqual(report['quality_watch'][0]['grade'], 'supply_waiting_quality')
+        self.assertEqual(report['quality_watch_scope']['candidates'], 1)
+        self.assertNotIn('preopen_signal', row)
+
+    def test_a_waiting_name_stays_in_the_report_but_out_of_the_message(self):
+        report = self.daily_report()  # outflow: fundamentally fine, not yet bought
+        self.assertEqual(report['quality_watch'][0]['grade'], 'supply_waiting_quality')
+        text = self.sent_text(report)
+        self.assertNotIn('[수급 대기 우량주]', text)
+        self.assertNotIn('[수급 유입 우량주]', text)
+        self.assertNotIn('롯데정밀화학', text)
+
+    def test_the_message_carries_the_inflow_block_and_not_a_buy(self):
+        text = self.sent_text(self.daily_report(flow('inflow', .35)))
+        self.assertIn("[수급 유입 우량주]", text)
+        self.assertIn("롯데정밀화학 (004000)", text)
+        self.assertIn("매수 후보 검토", text)
+        self.assertIn("매수 신호 아님", text)
+        self.assertNotIn("[수급 대기 우량주]", text)
+        # the live-confirmation label, not the "순매수 확인" of the block subtitle
+        self.assertNotIn("· 매수 확인", text)
+
+    def test_a_mixed_quality_watch_sends_only_the_inflow_names(self):
+        report = dict(results=[], sectors=[], quality_watch=[
+            dict(name='롯데정밀화학', symbol='004000.KS', grade='supply_inflow_quality',
+                 fundamental_score=66.0),
+            dict(name='관찰종목', symbol='000000.KS', grade='supply_waiting_quality',
+                 fundamental_score=64.0)])
+        text = self.sent_text(report)
+        self.assertIn("[수급 유입 우량주]", text)
+        self.assertIn("롯데정밀화학 (004000)", text)
+        self.assertNotIn("관찰종목", text)
+        self.assertNotIn("수급 대기 우량주", text)
+
+
+if __name__ == '__main__':
+    unittest.main()
