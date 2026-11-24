@@ -1096,6 +1096,13 @@ def send_telegram_summary(report):
     premarket_lines = format_premarket_block((report.get('premarket_watch') or {}).get('items'))
     if premarket_lines:
         lines.extend(['', *premarket_lines])
+    # 국내 핵심 대표주의 NXT 장전 움직임·촉매·간밤 미국 연동도 같은 참고 블록으로 붙인다.
+    if report.get('kr_premarket_watch'):
+        from kr_premarket import format_block as format_kr_premarket_block
+        kr_watch = report.get('kr_premarket_watch') or {}
+        kr_lines = format_kr_premarket_block(kr_watch.get('items'), kr_watch.get('session'))
+        if kr_lines:
+            lines.extend(['', *kr_lines])
     # The reversal tracks are delivered in their own section: they are exempt from the
     # regime gate by design (they are the entries a downtrend leaves on the table), so
     # they must never be read as momentum buys that passed it.
