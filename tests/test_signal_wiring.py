@@ -31,43 +31,43 @@ def row(market="KR", symbol="005930.KS", data_date="2026-11-19", score=70):
 
 class MultiMarketSessionTests(unittest.TestCase):
     def test_each_market_is_planned_from_its_own_completed_session(self):
-        report = dict(results=[row("KR", "005930.KS", "2026-11-19"),
-                               row("US", "AAPL", "2026-11-18")], sectors=[])
+        report = dict(results=[row("KR", "005930.KS", "2026-11-20"),
+                               row("US", "AAPL", "2026-11-19")], sectors=[])
         merged, parts = evaluate_preopen_markets(report, AT)
         self.assertEqual(sorted(parts), ["KR", "US"])
-        self.assertEqual(parts["KR"]["previous_session"], "2026-11-19")
-        self.assertEqual(parts["US"]["previous_session"], "2026-11-18")
+        self.assertEqual(parts["KR"]["previous_session"], "2026-11-20")
+        self.assertEqual(parts["US"]["previous_session"], "2026-11-19")
         self.assertEqual(merged["recommendations"], ["005930.KS", "AAPL"])
-        self.assertEqual(report["results"][0]["preopen_signal"]["reference_date"], "2026-11-19")
-        self.assertEqual(report["results"][1]["preopen_signal"]["reference_date"], "2026-11-18")
+        self.assertEqual(report["results"][0]["preopen_signal"]["reference_date"], "2026-11-20")
+        self.assertEqual(report["results"][1]["preopen_signal"]["reference_date"], "2026-11-19")
         self.assertEqual(merged["evaluated"], 2)
         self.assertFalse(merged["live_execution_confirmed"])
 
     def test_a_stale_row_cannot_borrow_the_other_markets_session(self):
-        report = dict(results=[row("KR", "005930.KS", "2026-11-19"),
+        report = dict(results=[row("KR", "005930.KS", "2026-11-20"),
                                row("KR", "000660.KS", "2026-11-14")], sectors=[])
         evaluate_preopen_markets(report, AT)
         self.assertEqual(report["results"][1]["preopen_decision"], "price_session_mismatch")
         self.assertNotIn("preopen_signal", report["results"][1])
 
-    def test_sessions_come_from_the_scanned_bars(self):
-        report = dict(results=[row("KR", "005930.KS", "2026-11-19")])
-        self.assertEqual(session_dates(report, AT), {"KR": "2026-11-19"})
+    def test_sessions_come_from_the_exchange_calendar(self):
+        report = dict(results=[row("KR", "005930.KS", "2026-11-20")])
+        self.assertEqual(session_dates(report, AT), {"KR": "2026-11-20"})
 
     def test_a_callers_session_is_not_replaced_by_the_per_market_map(self):
-        report = dict(results=[row("KR", "005930.KS", "2026-11-19")], sectors=[],
+        report = dict(results=[row("KR", "005930.KS", "2026-11-20")], sectors=[],
                       preopen_session="2026-11-19")
         evaluate_preopen_markets(report, AT)
         self.assertEqual(report["preopen_session"], "2026-11-19")
-        self.assertEqual(report["preopen_sessions"], {"KR": "2026-11-19"})
+        self.assertEqual(report["preopen_sessions"], {"KR": "2026-11-20"})
         self.assertEqual(report["results"][0]["preopen_signal"]["expires_session"], "2026-11-19")
 
     def test_a_plan_is_dated_to_the_session_it_applies_to(self):
-        report = dict(results=[row("KR", "005930.KS", "2026-11-19")], sectors=[])
+        report = dict(results=[row("KR", "005930.KS", "2026-11-20")], sectors=[])
         evaluate_preopen_markets(report, AT)
-        self.assertEqual(report["preopen_session"], "2026-11-20")
-        self.assertEqual(report["results"][0]["preopen_signal"]["reference_date"], "2026-11-19")
-        self.assertEqual(report["results"][0]["preopen_signal"]["expires_session"], "2026-11-20")
+        self.assertEqual(report["preopen_session"], "2026-11-23")
+        self.assertEqual(report["results"][0]["preopen_signal"]["reference_date"], "2026-11-20")
+        self.assertEqual(report["results"][0]["preopen_signal"]["expires_session"], "2026-11-23")
 
     def test_a_partial_score_is_planned_and_labelled(self):
         report = dict(results=[row("KR", "005930.KS")], sectors=[])
@@ -147,7 +147,7 @@ class Socket:
 
     def __init__(self, opens):
         self.pending = list(scanner.FEEDS["KRX"])
-        self.minutes = iter([5, 6, 15, 46])
+        self.minutes = iter([5, 6, 25, 56])
         self.opens = opens
 
     async def __aenter__(self):
@@ -227,9 +227,8 @@ class ReconnectTests(unittest.TestCase):
         def connect(*args, **kwargs):
             raise OSError("connection closed")
 
-        bars = {"005930": {0: dict(high=100.0, low=99.0, close=100.0, volume=10),
-                           1: dict(high=100.0, low=99.0, close=100.0, volume=10),
-                           2: dict(high=101.0, low=100.0, close=101.0, volume=30)}}
+        bars = {"005930": {slot: dict(high=101.0, low=99.0, close=100.0, volume=10)
+                           for slot in range(5)}}
         quotes = {"005930": dict(bid=100.9, ask=101.0, spread_pct=0.1,
                                  event_time=Clock.now(scanner.KST).isoformat())}
         published, samples = self.run_collect(connect, (bars, quotes))

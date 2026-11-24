@@ -474,7 +474,7 @@ class MarketMergeTests(unittest.TestCase):
                                   return_5d=0.02, return_20d=-0.01, relative_strength=-0.02,
                                   obv_rising=True, breakout=False, breakdown=False,
                                   rebound=True, overheated=False, market_above_ma20=False,
-                                  atr14_pct=3.0, data_date="2026-11-10"),
+                                  atr14_pct=3.0, data_date="2026-11-11"),
                   company_analysis=dict(market="US", quarter="2026-09",
                                         operating_income_amount=4.0e7,
                                         operating_income_yoy_pct=120.0, price_tick=0.01,

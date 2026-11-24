@@ -38,6 +38,8 @@ class SelectionRegressionTests(unittest.TestCase):
                                               ("KR","252670.KS","KODEX 200선물인버스2X","inverse_etf"),
                                               ("KR","122630.KS","KODEX 레버리지","leveraged_etf")]:
             item=stock(market,symbol,name);item["asset_type"]=asset_type
+            if asset_type == "inverse_etf":
+                item["indicators"]["inverse_underlying_below_ma20"] = True
             self.assertIsNone(candidate_rejection_reason(item,market),(symbol,name))
 
     def test_dividend_style_structures_are_still_refused(self):
@@ -47,15 +49,14 @@ class SelectionRegressionTests(unittest.TestCase):
         self.assertEqual(candidate_rejection_reason(item,"US"),"complex_product")
 
     def test_an_unblocked_inverse_fund_still_needs_the_trend_and_the_market(self):
-        # Only the class block was released: price below the 20-day average is still
-        # unconfirmed, and a market under its own 20-day average still holds the plan.
+        # The fund must be in an uptrend while its own underlying is below its average.
         item=stock("US","SQQQ","프로셰어즈 나스닥100 인버스 3배 ETF")
         item["asset_type"]="inverse_etf"
         item["indicators"]["price"]=item["indicators"]["ma20"]*.98
         self.assertEqual(candidate_rejection_reason(item,"US"),"unconfirmed_uptrend")
         item=stock("US","SQQQ","프로셰어즈 나스닥100 인버스 3배 ETF")
         item["asset_type"]="inverse_etf"
-        item["indicators"]["market_above_ma20"]=False
+        item["indicators"]["inverse_underlying_below_ma20"]=False
         self.assertEqual(candidate_rejection_reason(item,"US"),"market_headwind")
 
     def test_volume_spike_cannot_replace_regular_liquidity(self):

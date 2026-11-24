@@ -27,8 +27,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from exit_policy import DEFAULT_EXIT_POLICY, ExitTracker
-from kis_intraday import (BAR_SECONDS, breakout_v2, candidate_metrics, protective_stop,
-                          price_projection, volume_reference)
+from kis_intraday import (BAR_SECONDS, DECISION_MINUTES, breakout_v2, candidate_metrics,
+                          evaluate_first_pullback, protective_stop, price_projection, volume_reference)
 from signal_context import context_status
 
 # (strategy name, replay arguments, needs the context check)
@@ -39,6 +39,7 @@ STRATEGIES = (
     ("breakout_v2_policy", dict(strict=True, use_support_stop=False, exit_mode="policy"), False),
     ("breakout_with_context", dict(strict=True, use_support_stop=True, exit_mode="fixed"), True),
     ("breakout_with_context_policy", dict(strict=True, use_support_stop=True, exit_mode="policy"), True),
+    ("vwap_first_pullback_policy", dict(exit_mode="policy", confirm_pullback=True), False),
 )
 
 
@@ -99,16 +100,17 @@ def _policy_exit(row, entry, entry_at, quotes, horizon, fee_bps, policy):
 
 
 def replay(row, fee_bps, *, strict=False, use_support_stop=False, exit_mode="fixed",
-           policy=DEFAULT_EXIT_POLICY):
+           policy=DEFAULT_EXIT_POLICY, confirm_pullback=False):
     if exit_mode not in ("fixed", "policy"):
         raise ValueError("exit_mode must be 'fixed' or 'policy'")
     signal_at = datetime.fromisoformat(row["signal_at"])
     bars = row["bars"]
     quotes = row["quotes"]
     times = [datetime.fromisoformat(quote["at"]) for quote in quotes]
-    expected = [signal_at - timedelta(minutes=minutes) for minutes in (15, 10, 5)]
-    if len(bars) != 3 or [datetime.fromisoformat(bar["start"]) for bar in bars] != expected:
-        raise ValueError("Expected three consecutive five-minute bars before signal")
+    window = DECISION_MINUTES if confirm_pullback else 15
+    expected = [signal_at - timedelta(minutes=minutes) for minutes in range(window, 0, -5)]
+    if [datetime.fromisoformat(bar["start"]) for bar in bars] != expected:
+        raise ValueError("Expected consecutive five-minute bars before signal")
     if times != sorted(times):
         raise ValueError("Quotes must be sorted by timestamp")
     if not row["daily_eligible"]:
@@ -127,17 +129,25 @@ def replay(row, fee_bps, *, strict=False, use_support_stop=False, exit_mode="fix
         return {"status": "missing_signal_quote"}
     at, quote = before[-1]
     spread_pct = 200 * (quote["ask"] - quote["bid"]) / (quote["ask"] + quote["bid"])
-    signal_quote = {"event_time": at.isoformat(), "spread_pct": spread_pct, "ask": quote["ask"]}
+    signal_quote = {**quote, "event_time": at.isoformat(), "spread_pct": spread_pct}
     # Use the volume reference the live decision used. Rows recorded before the
     # baseline existed fall back to the opening-share rule, and the report says which.
     volume_baseline = row.get("volume_baseline")
     basis = volume_reference(dict(enumerate(bars)), volume_baseline)[1]
-    if not candidate_metrics(dict(enumerate(bars)), signal_quote, signal_at, volume_baseline):
-        return {"status": "no_signal", "volume_basis": basis}
-    limit = (breakout_v2(dict(enumerate(bars)), signal_quote, signal_at, volume_baseline)
-             if strict else None)
-    if strict and limit is None:
-        return {"status": "filtered_by_breakout_v2"}
+    indexed_bars = dict(enumerate(bars))
+    if confirm_pullback:
+        status, _, limit = evaluate_first_pullback(indexed_bars, signal_quote, signal_at, volume_baseline)
+        if limit is None:
+            return {"status": status, "volume_basis": basis}
+        decision = row.get("entry_decision")
+        if decision != "buy_signal":
+            return {"status": decision or "missing_live_decision", "volume_basis": basis}
+    else:
+        if not candidate_metrics(indexed_bars, signal_quote, signal_at, volume_baseline):
+            return {"status": "no_signal", "volume_basis": basis}
+        limit = breakout_v2(indexed_bars, signal_quote, signal_at, volume_baseline) if strict else None
+        if strict and limit is None:
+            return {"status": "filtered_by_breakout_v2"}
 
     stop = None
     if use_support_stop:
@@ -215,6 +225,8 @@ def main():
             row = json.loads(line)
             market = groups.setdefault(row["market"], {})
             for strategy, options, with_context in strategies:
+                if bool(options.get("confirm_pullback")) != (row.get("entry_rule") == "vwap_first_pullback"):
+                    continue
                 group = market.setdefault(strategy, {"counts": {}, "returns": [],
                                                      "unrealized": [], "exit_reasons": {},
                                                      "volume_basis": {}})

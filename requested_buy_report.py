@@ -26,7 +26,6 @@ def main():
     if at.date().isoformat()!=args.session:raise RuntimeError('Requested report session expired')
     cal=exchange_calendars.get_calendar('XKRX')
     if not cal.is_session(args.session):raise RuntimeError('Not a Korean trading session')
-    previous=cal.previous_session(args.session).strftime('%Y-%m-%d')
     if not args.reuse_analysis:restore_index()
     source=Path(args.reuse_analysis or 'opening-scan/latest.json')
     if not source.is_file():restore_prices()
@@ -48,18 +47,21 @@ def main():
         else:
             scanner.prepare_selected_analysis(report)
     decided=datetime.now(timezone.utc)
-    report['preopen_session']=args.session
-    evaluation=evaluate_preopen(report,previous,decided)
+    reference_session = scanner.last_completed_session('KR', decided).isoformat()
+    report['preopen_session'] = cal.next_session(reference_session).date().isoformat()
+    evaluation=evaluate_preopen(report,reference_session,decided)
+    session_open=cal.session_open(args.session).to_pydatetime()<=decided<cal.session_close(args.session).to_pydatetime()
     recommendations=sorted([r for r in report['results'] if r.get('preopen_signal',{}).get('status')=='conditional_buy'],
-        key=lambda r:(-r['company_forecast']['composite_score'],r['symbol']))
+        key=lambda r:(r['company_forecast'].get('assessment_status')!='complete',
+                      -r['company_forecast']['composite_score'],r['symbol']))
     # The production conditional plan uses the previous close. A current quote is
     # displayed separately and never relabelled as a model entry or an actual fill.
     quotes={};client=None
-    if recommendations:
+    if recommendations and session_open:
         try:client=Client()
         except Exception:pass
     for row in recommendations[:5]:
-        if client:
+        if client and row['company_forecast'].get('assessment_status')=='complete':
             try:
                 quotes[row['symbol']]=execution_quote(row['symbol'],datetime.now(KST),client)
             except (TypeError,ValueError,KeyError,RuntimeError,requests.RequestException):pass

@@ -45,6 +45,9 @@ def is_fund(row):
     # counts here.
     if kind in {'etf', 'etn', 'fund', 'inverse_etf', 'leveraged_etf'}:
         return True
+    from candidate_selection import is_inverse
+    if is_inverse(row.get('symbol'), row.get('name'), kind):
+        return True
     if is_fund_company(row.get('company_analysis')):
         return True
     return bool(re.match(r'^(?:KODEX|TIGER|ACE|RISE|KBSTAR|ARIRANG|HANARO|SOL|PLUS|KOSEF|KIWOOM|TIMEFOLIO|1Q|WON)\s',

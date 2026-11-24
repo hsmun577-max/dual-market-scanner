@@ -37,6 +37,27 @@ COMPLEX_ETF = re.compile(r"커버드콜|위클리페이|\b(?:weeklypay|covered c
 STRUCTURED_PAYOFF = re.compile(r"autocallable|tail risk|\bcollateral\b", re.I)
 
 
+# Use the index the fund actually shorts, including sector and small-cap funds.
+INVERSE_BENCHMARKS = {
+    # Listed funds are explicit proxies for the corresponding Korean cash indices.
+    "114800.KS": "069500.KS", "252670.KS": "069500.KS", "251340.KS": "229200.KS",
+    "SQQQ": "^NDX", "QID": "^NDX", "PSQ": "^NDX",
+    "SOXS": "SOXX", "SPXS": "^GSPC", "SPXU": "^GSPC", "SDS": "^GSPC",
+    "SH": "^GSPC", "TZA": "^RUT", "TWM": "^RUT", "RWM": "^RUT",
+    "DOG": "^DJI", "DXD": "^DJI", "SDOW": "^DJI",
+}
+INVERSE_NAME = re.compile(
+    r"인버스|곱버스|\b(?:inverse|ultrapro short)\b|(?<!\w)-[123]x\b"
+    r"|\b(?:bear|short)\b.*\b(?:[123]x|etf)\b",
+    re.I,
+)
+
+
+def is_inverse(symbol, name="", asset_type=""):
+    return (symbol in INVERSE_BENCHMARKS or asset_type == "inverse_etf"
+            or bool(INVERSE_NAME.search(name or "")))
+
+
 def instrument_rejection_reason(symbol, name, asset_type=""):
     """Filter identifiable instruments with a different payoff or liquidity profile.
 
@@ -80,7 +101,7 @@ def liquidity_rejection_reason(item, market):
     return None
 
 
-def market_headwind_reason(indicators):
+def market_headwind_reason(indicators, item=None):
     """The entries have no edge while the market index is below its 20-day average.
 
     Compared same-day (so market direction is already removed), individual-stock
@@ -88,6 +109,11 @@ def market_headwind_reason(indicators):
     other days. ``None`` means the regime was not observed: an archived report or a
     missing benchmark must not be read as a headwind.
     """
+    if item and is_inverse(item["symbol"], item.get("name"), item.get("asset_type")):
+        underlying = indicators.get("inverse_underlying_below_ma20")
+        if underlying is None:
+            return "inverse_underlying_unverified"
+        return "market_headwind" if not underlying else None
     return "market_headwind" if indicators.get("market_above_ma20") is False else None
 
 
@@ -109,7 +135,7 @@ def candidate_rejection_reason(item, market):
     if values["volume_ratio"] < MIN_EXPANSION_VOLUME_RATIO:
         return "insufficient_demand_expansion"
     # A stock that passes every own-signal test is still held back by its market.
-    return market_headwind_reason(values)
+    return market_headwind_reason(values, item)
 
 
 # The short-term early-entry track (``early_entry_track``) buys the first one-to-three
@@ -142,7 +168,7 @@ def early_entry_block_reason(item, market):
                                     and not isinstance(return_5d, bool)
                                     and return_5d > 0.12):
         return "extended_price"
-    return market_headwind_reason(values)
+    return market_headwind_reason(values, item)
 
 
 def rank_market_candidates(candidates, market, limit=5):

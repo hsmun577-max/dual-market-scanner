@@ -219,5 +219,5 @@ def _rewrite_limitations(report, summary):
     else:
         limitations.append("현재 호가를 확인하지 못했고, 지표·점수·판정은 완료된 거래일 일봉 종가 "
                            "기준이며 실시간 매수 확정은 아님")
-    limitations.append("실시간 VWAP 미구현")
+    limitations.append("VWAP는 별도 장중 감시에서 체결 기반으로 평가")
     report["limitations"] = limitations

@@ -16,7 +16,7 @@ def fund_row(market, symbol, name, volume, asset_type='etf', **overrides):
                   ma20=price * .95, ma60=price * .90, return_5d=.06, return_20d=.10,
                   relative_strength=.05, obv_rising=True, breakout=True, breakdown=False,
                   rebound=False, overheated=False, market_above_ma20=True,
-                  atr14_pct=4.0, volatility_20d=.04, data_date='2026-11-20')
+                  atr14_pct=4.0, volatility_20d=.04, data_date=scanner.last_completed_session(market, AT).isoformat())
     values.update(overrides.pop('indicators', {}))
     return dict(market=market, symbol=symbol, name=name, asset_type=asset_type,
                 signal=dict(score=6, stage='장중 조건부 진입 후보', reasons=['거래량 증가']),
@@ -41,7 +41,12 @@ def analyse(report):
         return {key: fund_snapshot(market) for key in keys}, []
     with patch('kis_intraday.company_context', side_effect=context), \
          patch('event_impact_analysis.world_events', return_value=([], [])), \
-         patch('economic_graph.load_profiles', return_value={}):
+         patch('economic_graph.load_profiles', return_value={}), \
+         patch('issuer_consensus.consensus_for', return_value={}), \
+         patch('supply_flow.evidence_for', return_value={}), \
+         patch('scanner.quality_watch_research'), \
+         patch('mid_term_watch.attach'), \
+         patch('live_quote.attach'):
         scanner.prepare_selected_analysis(report)
     return report
 
@@ -117,12 +122,13 @@ class FundCandidateGateTests(unittest.TestCase):
         above = [fund_row('US', f'ETF{index}', f'ISHARES TEST {index}', volume=70_000_000 + index * 1000,
                           asset_type='leveraged_etf') for index in range(7)]
         sqqq = fund_row('US', 'SQQQ', '프로셰어즈 나스닥100 인버스 3배 ETF', volume=sqqq_volume,
-                        asset_type='inverse_etf', indicators=values)
+                        asset_type='inverse_etf',
+                        indicators={'inverse_underlying_below_ma20': True, **values})
         tail = fund_row('US', 'ETFTAIL', 'ISHARES TAIL', volume=1_000, asset_type='etf')
         return above, sqqq, tail
 
-    def test_sqqq_in_eighth_place_is_planned_when_the_ordinary_gates_pass(self):
-        above, sqqq, tail = self.market()
+    def test_sqqq_in_eighth_place_is_planned_when_its_index_is_falling(self):
+        above, sqqq, tail = self.market(market_above_ma20=False)
         report = analyse(dict(results=[*above, sqqq, tail], sectors=[]))
         self.assertEqual(sqqq['analysis_kind'], 'fund_candidate')
         self.assertEqual(sqqq['fund_rank'], FUND_CANDIDATE_LIMIT)
@@ -143,8 +149,8 @@ class FundCandidateGateTests(unittest.TestCase):
         self.assertNotIn('preopen_signal', sqqq)
         self.assertNotIn('SQQQ', report['buy_evaluation']['recommendations'])
 
-    def test_sqqq_inside_the_eight_is_still_held_by_the_market_gate(self):
-        above, sqqq, tail = self.market(market_above_ma20=False)
+    def test_sqqq_inside_the_eight_is_held_if_its_own_index_is_not_falling(self):
+        above, sqqq, tail = self.market(market_above_ma20=False, inverse_underlying_below_ma20=False)
         analyse(dict(results=[*above, sqqq, tail], sectors=[]))
         self.assertEqual(sqqq['analysis_kind'], 'fund_candidate')
         self.assertEqual(sqqq['preopen_decision'], 'market_headwind')
@@ -185,7 +191,12 @@ class FundProfileWithoutQuoteTypeTests(unittest.TestCase):
                    side_effect=lambda label, keys, checked: (
                        {key: dict(snapshot) for key in keys}, [])), \
              patch('event_impact_analysis.world_events', return_value=([], [])), \
-             patch('economic_graph.load_profiles', return_value={}):
+             patch('economic_graph.load_profiles', return_value={}), \
+         patch('issuer_consensus.consensus_for', return_value={}), \
+         patch('supply_flow.evidence_for', return_value={}), \
+         patch('scanner.quality_watch_research'), \
+         patch('mid_term_watch.attach'), \
+         patch('live_quote.attach'):
             scanner.prepare_selected_analysis(dict(results=rows, sectors=[]))
         row = rows[0]
         forecast = row['company_forecast']
@@ -266,7 +277,7 @@ class IntradayWatchListTests(unittest.TestCase):
             here = os.getcwd()
             os.chdir(folder)
             try:
-                picked = kis_intraday.daily_candidates(date(2026, 11, 20))
+                picked = kis_intraday.daily_candidates(date.fromisoformat(promoted['indicators']['data_date']))
             finally:
                 os.chdir(here)
         self.assertIn('069500', picked)

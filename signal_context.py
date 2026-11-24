@@ -7,7 +7,7 @@ WINDOWS = {"research": timedelta(days=7), "market": timedelta(days=4),
            "event": timedelta(hours=24)}
 
 
-def context_status(records, market, symbol, decision_at):
+def context_status(records, market, symbol, decision_at, *, inverse_market_verified=False):
     """Use the latest applicable report and market reading and any active risk event.
 
     A dated research record counts inside its own seven-day window: a negative
@@ -36,11 +36,12 @@ def context_status(records, market, symbol, decision_at):
         return "event_risk"
     if any(value in {"risk", "caution"} for _, value in evidence["research"]):
         return "research_negative"
-    if not evidence["market"]:
-        return "missing_market"
-    latest = max(at for at, _ in evidence["market"])
-    if any(value != "supportive" for at, value in evidence["market"] if at == latest):
-        return "market_not_supportive"
+    if not inverse_market_verified:
+        if not evidence["market"]:
+            return "missing_market"
+        latest = max(at for at, _ in evidence["market"])
+        if any(value != "supportive" for at, value in evidence["market"] if at == latest):
+            return "market_not_supportive"
     # Require a positive coverage marker from the event feed as well.
     if not any(value == "clear" for _, value in evidence["event"]):
         return "missing_event"
