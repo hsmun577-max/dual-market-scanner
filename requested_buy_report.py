@@ -102,7 +102,13 @@ def main():
     # 중기 +30% 눌림 발굴은 당일 매수 판정과 다른 20~60일 관찰 목록이다. 리포트 메시지에
     # 별도 섹션으로만 붙고 ``recommendations``에는 들어가지 않는다.
     if report.get('mid_term_watch') is None:
-        mid_term_watch.attach(report, datetime.now(timezone.utc))
+        try:
+            import mid_term_evidence
+            mid_term_watch.attach(report, datetime.now(timezone.utc),
+                                  evidence=mid_term_evidence.collect)
+        except Exception as exc:
+            print('Mid-term fundamentals screen unavailable: '+type(exc).__name__,flush=True)
+            mid_term_watch.attach(report, datetime.now(timezone.utc))
     mid_term_lines=mid_term_watch.format_block(report.get('mid_term_watch') or [])
     if mid_term_lines:message='\n'.join([message,'',*mid_term_lines])
     audit=dict(session=args.session,generated_at=sent_at.isoformat(),strategy_commit=os.getenv('GITHUB_SHA'),

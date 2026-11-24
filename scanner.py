@@ -848,8 +848,16 @@ def prepare_selected_analysis(report):
     quality_watch_research(report, datetime.now(timezone.utc))
     # 중기 +30% 눌림 발굴은 20~60일 보유 전제의 관찰 목록이다. 당일 매수 판정과 분리한
     # 별도 필드(``mid_term_watch``)에만 쓰고 ``preopen_signal``·``buy_evaluation``은 건드리지 않는다.
+    # 후보군(30~50종목)만 최근 실적·공시를 읽어 적자·유증을 걸러내고 재료 1줄을 붙인다.
     import mid_term_watch
-    mid_term_watch.attach(report, datetime.now(timezone.utc))
+    try:
+        import mid_term_evidence
+        mid_term_watch.attach(report, datetime.now(timezone.utc),
+                              evidence=mid_term_evidence.collect)
+    except Exception as exc:
+        print('Mid-term fundamentals screen unavailable (' + type(exc).__name__ +
+              '); list kept on the chart condition')
+        mid_term_watch.attach(report, datetime.now(timezone.utc))
 
 
 QUALITY_WATCH_LIMIT = 8
