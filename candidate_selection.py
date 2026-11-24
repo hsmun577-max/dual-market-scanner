@@ -130,3 +130,48 @@ def rank_recovery_candidates(candidates, market, limit=5):
         -average_turnover(item["indicators"]),
         -min(item["indicators"]["volume_ratio"], 3), item["symbol"],
     ))[:max(0, limit)]
+
+
+# The owner's broker screen (Reuters focus, 2026-11-23, 롯데정밀화학 004000) showed an
+# issuer the momentum screen discards for turnover alone: it traded 18.4억원, so
+# ``insufficient_liquidity`` rejected it before its statements, its broker target or its
+# investor flows were ever read. These issuers are now read on a second tier instead of
+# being dropped, and the tier never promotes them into the momentum entry path.
+RESEARCH_MIN_AVERAGE_TURNOVER = {"KR": 1_000_000_000, "US": 2_000_000}
+# A falling knife is not a value entry: the price may sit below its 20-day average, but
+# not more than this far, and an extended price is left to the momentum path.
+QUALITY_WATCH_PRICE_BAND = (0.90, 1.15)
+
+
+def quality_watch_reason(item, market):
+    """Say why an issuer is read on the quality tier, or ``None`` when it is not.
+
+    The row has to be tradable and observable but under the momentum turnover floor: a
+    name that already clears that floor belongs to the momentum path, and one with no
+    turnover at all has no price to read. Nothing here is an entry signal.
+    """
+    reason = instrument_rejection_reason(item["symbol"], item.get("name"), item.get("asset_type", ""))
+    if reason:
+        return reason
+    values = item.get("indicators", {}) or {}
+    required = ("price", "volume", "ma20", "return_5d")
+    if any(not isinstance(values.get(key), (int, float)) or not math.isfinite(values[key])
+           for key in required):
+        return "missing_indicators"
+    if values["price"] < MIN_PRICE[market]:
+        return "low_price"
+    average = average_turnover(values)
+    floor = RESEARCH_MIN_AVERAGE_TURNOVER[market]
+    if (not math.isfinite(average) or average < floor
+            or values["price"] * values["volume"] < floor):
+        return "below_research_turnover"
+    if average >= MIN_AVERAGE_TURNOVER[market]:
+        return "above_momentum_turnover"
+    if values.get("breakdown"):
+        return "breakdown"
+    if values["ma20"] <= 0:
+        return "invalid_average_price"
+    low, high = QUALITY_WATCH_PRICE_BAND
+    if not low <= values["price"] / values["ma20"] <= high:
+        return "price_off_average"
+    return None

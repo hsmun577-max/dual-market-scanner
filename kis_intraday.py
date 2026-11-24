@@ -882,9 +882,21 @@ def company_quality_metrics(ticker, snapshot, now):
                 if target in ('trailing_pe','forward_pe','price_to_book'):
                     # Per-field source so a KIS trailing PE cannot be compared with this one.
                     result[target+'_source'] = 'Yahoo Finance observed multiples'
-        if any(key in result for key in ('trailing_pe','price_to_book')):
-            result['valuation_source'] = 'Yahoo Finance observed multiples'
-            result['valuation_observed_at'] = datetime.now(now.tzinfo).isoformat()
+        num_fin = None
+        for source, target, scale in (("heldPercentInstitutions", "institutional_holding_pct", 100),):
+            value = info.get(source)
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                result[target] = float(value) * scale
+                result[target + '_source'] = 'Yahoo Finance issuer profile'
+                result[target + '_observed_at'] = datetime.now(now.tzinfo).isoformat()
+        for source, target in (("targetMeanPrice", "target_mean_price"),
+                               ("recommendationMean", "recommendation_mean"),
+                               ("numberOfAnalystOpinions", "analyst_count")):
+            value = info.get(source)
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                result[target] = float(value)
+        if any(key in result for key in ('target_mean_price', 'institutional_holding_pct')):
+            result['issuer_consensus_source'] = 'Yahoo Finance issuer profile'
         for source,target in (("sector","sector"),("industry","industry"),
                               ("quoteType","quote_type"),("financialCurrency","financial_currency"),
                               ("longBusinessSummary","business_description"),("longName","company_name"),
