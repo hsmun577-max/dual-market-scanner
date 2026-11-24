@@ -67,12 +67,17 @@ class Client:
                 cache_file.write_text(json.dumps(dict(access_token=token,expires_at=time.time()+1800)),encoding='utf-8')
                 cache_file.chmod(0o600)
             except OSError:pass
-    def get(self,path,tr_id,params):
+    def get_body(self,path,tr_id,params):
+        """The whole response body. ``inquire-investor`` carries its rows in output2."""
         time.sleep(.15)
         r=requests.get(BASE+path,headers=dict(self.headers,tr_id=tr_id),params=params,timeout=5)
         if r.status_code!=200: return None
-        body=r.json()
-        return body.get('output') if body.get('rt_cd')=='0' else None
+        try: body=r.json()
+        except ValueError: return None
+        return body if isinstance(body,dict) and body.get('rt_cd')=='0' else None
+    def get(self,path,tr_id,params):
+        body=self.get_body(path,tr_id,params)
+        return body.get('output') if body else None
     def price(self,code):
         return self.get('/uapi/domestic-stock/v1/quotations/inquire-index-price','FHPUP02100000',
                         dict(FID_COND_MRKT_DIV_CODE='U',FID_INPUT_ISCD=code))

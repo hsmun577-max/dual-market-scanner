@@ -44,6 +44,27 @@ FUND_WEIGHTS = {"price_and_demand": .50, "sector_pressure": .20, "events": .30}
 COMPANY_WEIGHTS = {"growth": .24, "earnings_quality": .18, "balance_sheet": .12,
                    "valuation_outlook": .10, "price_and_demand": .14,
                    "sector_pressure": .10, "events": .12}
+# A broker screen (Reuters focus, 2026-11-23 on 롯데정밀화학) scores what the company is
+# worth apart from who is buying it, and the owner asked for that separation
+# ("수급확인도필요해"). The two axes below are reported beside the composite score, whose
+# own weights and entry gate are deliberately left untouched: the report now says which
+# half of the evidence is strong, it does not re-tune the buy threshold here. A dimension
+# missing from an axis is dropped from that axis's coverage rather than scored 0.
+FUNDAMENTAL_AXIS = {"growth": .20, "earnings_quality": .20, "balance_sheet": .12,
+                    "valuation_outlook": .18, "analyst_target": .30}
+DEMAND_AXIS = {"price_and_demand": .50, "sector_pressure": .20,
+               "institutional_demand": .20, "events": .10}
+# The gap between the broker mean target and the price saturates here: a +80% consensus
+# gap is as strong as this axis can read, so a data error on a tiny price cannot dominate.
+TARGET_UPSIDE_SATURATION_PCT = 80.0
+# A '수급 대기 우량주' must clear this on the fundamental axis alone. The 12-month
+# backtest of 2025-11-24~2026-11-09 (621 issuers, next-open entry, -2%/+6%, 5 sessions,
+# 0.28% cost) put the per-trade mean of the 10억↑ quality track at -0.06% at 61 points
+# against -0.11% at 58, and at +0.06% when the measured foreign/institution flow was
+# already an inflow. The floor is therefore 61.
+QUALITY_FUNDAMENTAL_SCORE = 61.0
+# ...and an axis built from fewer than this share of its weights is not called a grade.
+QUALITY_MIN_COVERAGE = .50
 # composite_score = 50 + 50 * after_pricing, so this is the bias at the threshold.
 SCENARIO_EVIDENCE_BIAS = (SCENARIO_THRESHOLD_SCORE - 50) / 50
 SCENARIO_SIGMA_CAP = 2.0
@@ -89,6 +110,69 @@ def valuation_outlook_component(company):
             None)
 
 
+def analyst_target_component(consensus):
+    """Score from the broker mean target gap, damped by the recommendation mean.
+
+    Returns ``(score, evidence)``; ``(None, None)`` when no target was observed. The
+    recommendation is only a small correction: on Naver's scale a higher number is a
+    better rating, on Yahoo's a lower one, so each is mapped to -1..1 before it is used.
+    """
+    if not consensus or consensus.get("status") != "measured":
+        return None, None
+    upside = _number(consensus, "upside_pct")
+    if upside is None:
+        return None, None
+    base = math.tanh(upside / TARGET_UPSIDE_SATURATION_PCT)
+    rating = _number(consensus, "recommendation_mean")
+    terms = [(.8, base)]
+    if rating is not None:
+        direction = 1 if consensus.get("market") == "KR" else -1
+        terms.append((.2, max(-1., min(1., direction * (rating - 3) / 2))))
+    score = sum(weight * value for weight, value in terms) / sum(weight for weight, _ in terms)
+    return score, {"target_price": consensus.get("target_price"),
+                   "price": consensus.get("price"), "upside_pct": upside,
+                   "recommendation_mean": rating, "analyst_count": consensus.get("analyst_count"),
+                   "as_of": consensus.get("as_of"), "source": consensus.get("source")}
+
+
+def institutional_demand_component(supply):
+    """Score from the measured per-issuer flow; a proxy counts at half strength."""
+    if not supply or supply.get("status") not in {"measured", "proxy"}:
+        return None
+    value = _number(supply, "score")
+    if value is None:
+        return None
+    return value if supply.get("status") == "measured" else .5 * value
+
+
+def axis_reading(components, weights):
+    """Weighted reading of one axis over the dimensions it actually holds."""
+    present = {key: value for key, value in components.items() if key in weights}
+    coverage = sum(weights[key] for key in present)
+    value = sum(weights[key] * present[key] for key in present)
+    return {"score": round(50 + 50 * max(-1., min(1., value)), 1) if coverage > 0 else None,
+            "direction": round(value, 6) if coverage > 0 else None,
+            "coverage": round(coverage, 4), "components": present}
+
+
+def quality_grade(fundamental, institutional_flow):
+    """'수급 유입 우량주' / '수급 대기 우량주' / None from the two axes.
+
+    A quality name needs the fundamental axis alone (no price, no flow) at or above
+    ``QUALITY_FUNDAMENTAL_SCORE`` over at least half its weights. What separates the two
+    grades is whether the measured flow is already an inflow or not yet.
+    """
+    score = fundamental.get("score") if fundamental else None
+    if score is None or fundamental.get("coverage", 0) < QUALITY_MIN_COVERAGE:
+        return None
+    if score < QUALITY_FUNDAMENTAL_SCORE:
+        return None
+    evidence = institutional_flow or {}
+    if evidence.get("status") == "measured" and evidence.get("direction") == "inflow":
+        return "supply_inflow_quality"
+    return "supply_waiting_quality"
+
+
 def financial_period_missing(company):
     """A newer periodic filing must not silently leave an older quarter scored."""
     try:
@@ -112,7 +196,8 @@ def financial_period_missing(company):
     return False
 
 
-def build_company_forecast(company, indicators, price, at, events=(), sectors=()):
+def build_company_forecast(company, indicators, price, at, events=(), sectors=(),
+                           supply=None, consensus=None):
     """Combine available evidence without treating missing observations as neutral.
 
     A listed fund is read on the fund model (:data:`FUND_WEIGHTS`) instead of the issuer
@@ -366,7 +451,27 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         # one instrument whose score is meant to be a price reading of what it tracks.
         blocking.append("financial_statements")
     status = "incomplete" if blocking else "partial" if missing else "complete"
+    # The two broker-screen axes: what the company is worth against what the brokers
+    # think it is worth, and who is buying it right now.
+    quality_components = {}
+    analyst_score, analyst_evidence = analyst_target_component(consensus)
+    if analyst_score is not None:
+        quality_components["analyst_target"] = analyst_score
+    demand_score = institutional_demand_component(supply)
+    if demand_score is not None:
+        quality_components["institutional_demand"] = demand_score
+    fundamental = axis_reading({**components, **quality_components}, FUNDAMENTAL_AXIS)
+    demand_axis = axis_reading({**components, **quality_components}, DEMAND_AXIS)
+    grade = None if fund else quality_grade(fundamental, supply)
     return {"model":"uncalibrated_multifactor_scenarios_v1","generated_at":at.isoformat(),
+        "fundamental_score":fundamental["score"],"fundamental_coverage":fundamental["coverage"],
+        "demand_score":demand_axis["score"],"demand_coverage":demand_axis["coverage"],
+        "axes":{"fundamental":fundamental,"demand":demand_axis},
+        "analyst_target":analyst_evidence,
+        "target_upside_pct":(analyst_evidence or {}).get("upside_pct"),
+        "analyst_consensus":consensus or {"status":"unavailable"},
+        "institutional_flow":supply or {"status":"unavailable"},
+        "quality_grade":grade, "quality_axis_min":QUALITY_FUNDAMENTAL_SCORE,
         "instrument":"listed_fund" if fund else "operating_company",
         **({"assessment_basis":"fund_price_demand_sector_events"} if fund else {}),
         "horizon_sessions":5,"data_coverage":round(coverage,4),

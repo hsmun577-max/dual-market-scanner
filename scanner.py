@@ -644,7 +644,10 @@ def scan_market(market, tickers, benchmark, names=None, prices=None):
                 ).isoformat(),
                 "fundamentals": "발송 후보 선정 후 조회",
                 "news_and_filings": "발송 후보 선정 후 조회",
-                "institutional_flows": "미검증"
+                # Not read yet: the issuer is only read once the screen keeps it. A row
+                # that reaches the analysis gets the measured flow in its place.
+                "institutional_flows": {"status": "not_observed",
+                                        "reason": "issuer_not_read_in_screen"}
             }
 
             result["selection_filter"] = candidate_rejection_reason(result, market) or "eligible"
@@ -764,9 +767,18 @@ def prepare_selected_analysis(report):
                                         "영업적자" if margin is not None and margin < 0 else
                                         "손익분기" if margin == 0 else "재무자료 조회 실패 또는 미제공")
             item["news_and_filings"] = f"기사 {len(company.get('news', []))}건 · 공시 {len(company.get('filings', []))}건"
+            # Who is actually buying the issuer, read per name instead of left as a
+            # placeholder. A name the screen already holds is read here, once.
+            from supply_flow import evidence_for, share_line
+            from issuer_consensus import consensus_for
+            supply = evidence_for(item, company, checked)
+            item["institutional_flows"] = supply
+            item["supply_line"] = share_line(supply)
+            consensus = consensus_for(item, company, at=checked, price=item["indicators"]["price"])
             item["company_forecast"] = build_company_forecast(company, {**item["indicators"], **company.get("price_indicators", {})},
                 item["indicators"]["price"], datetime.now(timezone.utc),
-                [row for row in risks if row.get("symbol") == symbol], report.get("sectors", []))
+                [row for row in risks if row.get("symbol") == symbol], report.get("sectors", []),
+                supply=supply, consensus=consensus)
             item["risk_headlines"] = list(dict.fromkeys(
                 row.get("headline", "") for row in risks if row.get("symbol") == symbol))[:2]
             item['risk_evidence']=[row for row in risks if row.get('symbol')==symbol]
@@ -800,6 +812,117 @@ def prepare_selected_analysis(report):
     # never a live execution confirmation.
     from preopen_signals import evaluate_preopen_markets
     evaluate_preopen_markets(report, datetime.now(timezone.utc))
+    # The momentum pass is done, so the names it dropped for turnover alone can be read
+    # without touching its decisions: they never enter ``preopen_signal``.
+    quality_watch_research(report, datetime.now(timezone.utc))
+
+
+QUALITY_WATCH_LIMIT = 8
+
+
+def quality_watch_research(report, at):
+    """Read the 10억~50억 turnover issuers the momentum screen drops, and grade them.
+
+    For each one: the statements and broker consensus the scan already fetches, plus the
+    measured foreign/institutional flow, then the two axes of ``company_forecast``.
+    A name that is fundamentally sound and already bought by foreigners and institutions
+    is a '수급 유입 우량주' candidate; one that is sound but not yet bought is a
+    '수급 대기 우량주' watch entry. Neither is a buy signal and neither is written back
+    into the row's selection, so the momentum path stays exactly as it was.
+    """
+    from candidate_selection import quality_watch_reason, average_turnover
+    from company_forecast import QUALITY_FUNDAMENTAL_SCORE
+    from issuer_consensus import consensus_for
+    from supply_flow import evidence_for, share_line
+    report['quality_watch'] = []
+    pool = []
+    for item in report.get('results', []):
+        if item.get('market') != 'KR' or is_fund(item):
+            continue
+        if item.get('selection_filter') != 'insufficient_liquidity':
+            continue
+        if quality_watch_reason(item, 'KR') is not None:
+            continue
+        pool.append(item)
+    if not pool:
+        return []
+    pool.sort(key=lambda item: (-average_turnover(item['indicators']), item['symbol']))
+    selected = pool[:QUALITY_WATCH_LIMIT]
+    try:
+        from kis_intraday import company_context
+        companies, _risks = company_context('KRX', [item['symbol'].split('.')[0] for item in selected], at)
+    except Exception as exc:
+        report['quality_watch_error'] = type(exc).__name__
+        return []
+    entries = []
+    for item in selected:
+        company = companies.get(item['symbol'].split('.')[0], {})
+        if not company:
+            continue
+        supply = evidence_for(item, company, at)
+        consensus = consensus_for(item, company, at=at, price=item['indicators']['price'])
+        try:
+            forecast = build_company_forecast(
+                company, {**item['indicators'], **company.get('price_indicators', {})},
+                item['indicators']['price'], at, [], report.get('sectors', []),
+                supply=supply, consensus=consensus)
+        except (ValueError, KeyError, TypeError) as exc:
+            report.setdefault('quality_watch_errors', []).append(
+                {"symbol": item['symbol'], "error": type(exc).__name__})
+            continue
+        grade = forecast.get('quality_grade')
+        fundamental = forecast.get('fundamental_score')
+        if grade is None and (fundamental is None or fundamental < QUALITY_FUNDAMENTAL_SCORE):
+            continue
+        entries.append({
+            "market": "KR", "symbol": item['symbol'], "name": item.get('name'),
+            "grade": grade or "supply_waiting_quality",
+            "fundamental_score": fundamental, "demand_score": forecast.get('demand_score'),
+            "fundamental_coverage": forecast.get('fundamental_coverage'),
+            "target_upside_pct": forecast.get('target_upside_pct'),
+            "analyst_target": forecast.get('analyst_target'),
+            "supply": supply, "supply_line": share_line(supply),
+            "supply_direction": supply.get('direction'), "supply_score": supply.get('score'),
+            "price": item['indicators']['price'],
+            "average_turnover": average_turnover(item['indicators']),
+            "indicators": item['indicators'],
+            "reason": "fundamentals_and_broker_target_with_supply_evidence",
+            "entry_signal": False})
+    entries.sort(key=lambda entry: (entry['grade'] != "supply_inflow_quality",
+                                    -(entry['fundamental_score'] or 0)))
+    report['quality_watch'] = entries
+    report['quality_watch_at'] = at.isoformat()
+    report['quality_watch_scope'] = dict(tier='10억~50억 20일 평균 거래대금',
+                                         candidates=len(pool), read=len(selected),
+                                         graded=len(entries))
+    return entries
+
+
+def quality_watch_line(entry):
+    """One report line for a quality-watch name: the grade, the axes and why."""
+    name = entry.get('name') or entry.get('symbol')
+    code = (entry.get('symbol') or '').split('.')[0]
+    label = ('수급 유입 우량주' if entry.get('grade') == 'supply_inflow_quality'
+             else '수급 대기 우량주')
+    fundamental = entry.get('fundamental_score')
+    target = entry.get('analyst_target') or {}
+    upside = entry.get('target_upside_pct')
+    turnover = entry.get('average_turnover')
+    lines = [f"• {name} ({code}) · {label} · 펀더멘탈 {fundamental:.0f}/100" if fundamental is not None
+             else f"• {name} ({code}) · {label}"]
+    detail = []
+    if turnover:
+        detail.append(f"20일 평균 거래대금 {turnover/1e8:.1f}억")
+    if target.get('target_price') and upside is not None:
+        detail.append(f"증권사 목표 {target['target_price']:,.0f}원 ({upside:+.0f}%)")
+    if detail:
+        lines.append("  " + " · ".join(detail))
+    supply_line = entry.get('supply_line')
+    if supply_line:
+        lines.append("  " + supply_line)
+    basis = '수급 유입 · 매수 후보 검토' if entry.get('grade') == 'supply_inflow_quality' else '수급 미유입 · 관찰 목록'
+    lines.append(f"  {basis} · 매수 신호 아님")
+    return "\n".join(lines)
 
 
 def telegram_rebound_line(item):
@@ -1156,6 +1279,18 @@ def send_telegram_summary(report):
     urgent_lines = urgent_issues.format_urgent_block(urgent)
     if urgent_lines:
         lines.extend(['', *urgent_lines])
+    quality = report.get('quality_watch') or []
+    if quality:
+        inflow = [row for row in quality if row.get('grade') == 'supply_inflow_quality']
+        waiting = [row for row in quality if row.get('grade') != 'supply_inflow_quality']
+        if inflow:
+            lines.extend(['', '[수급 유입 우량주]',
+                          '외인·기관 순매수 확인 · 매수 후보 검토 대상'])
+            lines.extend(quality_watch_line(row) for row in inflow[:5])
+        if waiting:
+            lines.extend(['', '[수급 대기 우량주]',
+                          '펀더멘탈·목표가 우량 · 수급 미유입이라 관찰만'])
+            lines.extend(quality_watch_line(row) for row in waiting[:5])
 
     messages = split_telegram_text("\n".join(lines))
     for message in messages:
