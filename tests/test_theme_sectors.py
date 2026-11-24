@@ -1,6 +1,7 @@
 """세부 테마·이슈 섹터 집계와 하락장 상대강세 포착, 그리고 메시지 계약 확인."""
 import unittest
 from datetime import datetime
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -182,22 +183,25 @@ class SectorSectionTests(unittest.TestCase):
         self.assertEqual(sector_section(etf, None, 'KR'), ['오늘의 주요 섹터', '1위 반도체'])
         self.assertEqual(sector_section([], None, 'KR'), ['오늘의 주요 섹터', '확인 불가'])
 
-    def test_theme_block_replaces_the_coarse_word_list_under_the_same_heading(self):
+    def test_theme_block_replaces_the_coarse_word_list_entirely(self):
+        # 세부 테마가 있으면 '오늘의 주요 섹터 / 1위 기계·장비' 대분류 목록은 싣지 않는다.
+        # 같은 내용을 두 번 말하는 것이고, 세부 테마가 더 구체적이다(2026-11-24 지시).
         snapshot = dict(market='KR', benchmark_return_pct=-3.31, data_date='2026-11-23', intraday=False,
                         rows=[dict(name='휴머노이드·로봇', return_pct=4.4, up=5, total=8, turnover_ratio=2.9,
                                    state='주도', issue='이슈: 로봇 공급 계약')])
         lines = sector_section([], snapshot, 'KR')
-        self.assertEqual(lines[0], '오늘의 주요 섹터')
+        self.assertTrue(lines[0].startswith('세부 테마'))
+        self.assertNotIn('오늘의 주요 섹터', lines)
         self.assertIn('휴머노이드·로봇', '\n'.join(lines[1:]))
         self.assertNotIn('확인 불가', lines)
 
-    def test_official_industry_override_keeps_its_line_and_gains_the_detail(self):
+    def test_official_industry_override_is_dropped_once_the_theme_block_exists(self):
         snapshot = dict(market='KR', benchmark_return_pct=-3.31, data_date='2026-11-23', intraday=False,
                         rows=[dict(name='휴머노이드·로봇', return_pct=4.4, up=5, total=8, turnover_ratio=2.9,
                                    state='주도', leaders=[])])
         lines = sector_section([], snapshot, 'KR', override=['오늘의 주요 섹터', '1위 은행'])
-        self.assertEqual(lines[:2], ['오늘의 주요 섹터', '1위 은행'])
-        self.assertIn('휴머노이드·로봇', '\n'.join(lines[2:]))
+        self.assertNotIn('1위 은행', lines)
+        self.assertIn('휴머노이드·로봇', '\n'.join(lines))
 
 
 class SnapshotTests(unittest.TestCase):
@@ -228,7 +232,10 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot['quoted'], 3)
         self.assertEqual(snapshot['rows'][0]['name'], '휴머노이드·로봇·액추에이터')
         self.assertGreater(snapshot['rows'][0]['market_excess_pct'], 6)
-        self.assertIn('이슈: 뉴스 미확인', format_theme_block(snapshot, 'KR')[3])
+        # 기사가 없을 때의 '뉴스 미확인 · 상승 3/3 · 거래대금' 요약은 위 테마 줄과 숫자가 겹쳐
+        # 메시지에는 싣지 않는다. 기록에는 남는다.
+        self.assertIn('뉴스 미확인', snapshot['rows'][0]['issue'])
+        self.assertFalse(any('뉴스 미확인' in line for line in format_theme_block(snapshot, 'KR')))
 
 
 class ThemeUniverseTests(unittest.TestCase):
@@ -254,18 +261,52 @@ class ThemeUniverseTests(unittest.TestCase):
 
 
 class MessageIntegrationTests(unittest.TestCase):
+    def snapshot(self):
+        return dict(market='KR', benchmark_return_pct=-3.31, data_date='2026-11-23', intraday=False,
+                    rows=[dict(name='휴머노이드·로봇·액추에이터', return_pct=4.4, up=5, total=8,
+                               turnover_ratio=2.9, state='주도', issue='이슈: 로봇 공급 계약 체결',
+                               leaders=[dict(symbol='090710.KQ', name='휴림로봇', return_pct=30.0)])])
+
+    def daily_message(self, report):
+        import scanner
+        with patch.dict('os.environ', {'TELEGRAM_BOT_TOKEN': 'fake', 'TELEGRAM_CHAT_ID': 'fake'}), \
+                patch.object(scanner.requests, 'post') as post, \
+                patch('scanner.delivery_status', return_value=(True, 'test')), \
+                patch('urgent_issues.select_urgent_issues', return_value={}):
+            post.return_value = Mock(status_code=200, json=lambda: {'ok': True})
+            scanner.send_telegram_summary(report)
+        return post.call_args.kwargs['json']['text']
+
+    def test_the_daily_message_drops_the_coarse_sector_list_when_themes_exist(self):
+        sectors = [dict(market='KR', name='기계·장비', return_pct=2.0, market_excess_pct=1.0,
+                        turnover_ratio=1.4)]
+        text = self.daily_message(dict(results=[], sectors=sectors, market_regime={},
+                                       theme_sectors=[self.snapshot()],
+                                       buy_evaluation=dict(completed=True, decision_completed=1)))
+        self.assertNotIn('오늘의 주요 섹터', text)
+        self.assertNotIn('1위 기계·장비', text)
+        self.assertIn('세부 테마', text)
+        self.assertIn('휴머노이드·로봇·액추에이터', text)
+
+    def test_without_theme_data_the_daily_message_keeps_the_sector_list(self):
+        sectors = [dict(market='KR', name='기계·장비', return_pct=2.0, market_excess_pct=1.0,
+                        turnover_ratio=1.4)]
+        text = self.daily_message(dict(results=[], sectors=sectors, market_regime={},
+                                       theme_sectors=[],
+                                       buy_evaluation=dict(completed=True, decision_completed=1)))
+        self.assertIn('오늘의 주요 섹터', text)
+        self.assertIn('1위 기계·장비', text)
+
     def test_live_message_keeps_the_sector_heading_first_and_shows_the_theme(self):
         from datetime import timezone
         from zoneinfo import ZoneInfo
 
         from kis_intraday import format_notification
-        snapshot = dict(market='KR', benchmark_return_pct=-3.31, data_date='2026-11-23', intraday=False,
-                        rows=[dict(name='휴머노이드·로봇·액추에이터', return_pct=4.4, up=5, total=8,
-                                   turnover_ratio=2.9, state='주도', issue='이슈: 로봇 공급 계약 체결',
-                                   leaders=[dict(symbol='090710.KQ', name='휴림로봇', return_pct=30.0)])])
+        snapshot = self.snapshot()
         text = format_notification('KRX', [], datetime(2026, 11, 23, 9, 15, tzinfo=ZoneInfo('Asia/Seoul')),
                                    None, sectors=[], themes=snapshot)
-        self.assertTrue(text.startswith('오늘의 주요 섹터'))
+        self.assertTrue(text.startswith('세부 테마'))
+        self.assertNotIn('오늘의 주요 섹터', text)
         self.assertIn('휴머노이드·로봇·액추에이터', text)
         self.assertIn('휴림로봇 +30.0%', text)
         self.assertLess(text.index('휴머노이드'), text.index('분석 결과'))

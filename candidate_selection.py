@@ -17,13 +17,24 @@ SPECIAL_SECURITY = re.compile(
 CASH_OR_BOND = re.compile(
     r"머니마켓|KOFR|CD(?:\d|금리)|단기금리|단기채|채권|국채|회사채|통안채|"
     r"\b(?:treasury|treasuries|bonds?|money market|ultrashort|floating rate|"
-    r"variable rate|t-bills?|clo)\b|\b1-3M\b", re.I)
+    r"variable rate|t-bills?|clo)\b|\b1-3M\b|"
+    # 표기 변형으로 빠져나간 미국 채권·만기매칭형 ETF. iShares iBonds는 'Bonds'가 단어 경계로
+    # 시작하지 않아 위 목록에 걸리지 않았고, 만기매칭형은 'TERM CORPORATE'·'TERM TIPS'로만
+    # 채권임을 밝힌다. 2026-11-24 스캔에서 IBDR·IBDW·CGSD·DFGX가 이 틈으로 주식처럼
+    # 시장 역풍 판정까지 올라갔다.
+    r"\bibonds?\b|\bterm (?:corporate|treasury|tips|high yield|municipal|muni|credit)\b|"
+    r"fixed income|\bduration\b|\bmunicipal\b|\bmuni\b|securitized|(?<!carbon )\bcredit\b|"
+    r"high yield(?! equity)|\btreasury bills?\b", re.I)
 # Inverse and leveraged products are no longer refused as a class (owner's call,
 # 2026-11-23: "차단만 먼저 풀어", after a US down day where SQQQ was screened out only by
 # this block). They now carry the same trend, demand and market-regime rules as any other
 # instrument. What stays refused is the dividend-style structure whose payoff is the
 # premium written, not the underlying's price.
 COMPLEX_ETF = re.compile(r"커버드콜|위클리페이|\b(?:weeklypay|covered call)\b", re.I)
+# 상환은 기초자산 가격이 아니라 옵션 구조에서 나온다: 자동조기상환(autocallable) 노트,
+# 담보(collateral)·테일리스크 헤지 상품. 이들은 20일 추세로 판정할 대상이 아니고 채권 대체재처럼
+# 움직인다(2026-11-24: CAOS·CBOX가 주식처럼 시장 국면 게이트까지 올라갔다).
+STRUCTURED_PAYOFF = re.compile(r"autocallable|tail risk|\bcollateral\b", re.I)
 
 
 def instrument_rejection_reason(symbol, name, asset_type=""):
@@ -37,7 +48,7 @@ def instrument_rejection_reason(symbol, name, asset_type=""):
         return "special_security"
     if CASH_OR_BOND.search(label):
         return "cash_or_bond_product"
-    if COMPLEX_ETF.search(label):
+    if COMPLEX_ETF.search(label) or STRUCTURED_PAYOFF.search(label):
         return "complex_product"
     return None
 

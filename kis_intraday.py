@@ -309,6 +309,11 @@ def market_evidence(market, previous_session, available_at):
              "snapshot": snapshot}]
 
 
+# 종목 뉴스 수집 창은 촉매 판정 창(`catalyst_track`, 72시간)보다 좁으면 안 된다. 24시간으로
+# 두면 이틀 전 공시 기사가 배열에 아예 없어서 `confirmed_news`가 볼 기회를 얻지 못한다.
+COMPANY_NEWS_WINDOW_HOURS = 72
+
+
 def recent_company_news(articles, now):
     records = {}
     for item in articles:
@@ -318,7 +323,7 @@ def recent_company_news(articles, now):
             published = datetime.fromisoformat(str(article.get("pubDate") or "").replace("Z", "+00:00"))
         except ValueError:
             continue
-        if not title or published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
+        if not title or published.utcoffset() is None or not now - timedelta(hours=COMPANY_NEWS_WINDOW_HOURS) <= published < now:
             continue
         link = (article.get("canonicalUrl") or {}).get("url")
         provider = (article.get("provider") or {}).get("displayName") or "Yahoo Finance"
@@ -340,7 +345,7 @@ def korean_company_news(symbol, now):
     direct = issuer_news_result(symbol,name,now)
     if direct['status']=='checked':return direct['articles']
     response = requests.get("https://news.google.com/rss/search", params={
-        "q": f'"{name}" (실적 OR 수주 OR 공시 OR 매출 OR 투자 OR 규제 OR 공연 OR 문화교류 OR 한한령) when:1d',
+        "q": f'"{name}" (실적 OR 수주 OR 공시 OR 매출 OR 투자 OR 규제 OR 공연 OR 문화교류 OR 한한령) when:3d',
         "hl": "ko", "gl": "KR", "ceid": "KR:ko",
     }, timeout=8)
     response.raise_for_status()
@@ -351,7 +356,7 @@ def korean_company_news(symbol, now):
             published = parsedate_to_datetime(item.findtext("pubDate", ""))
         except (ValueError, TypeError):
             continue
-        if not issuer_name_in_text(issuer_title_subject(title),name) or published.utcoffset() is None or not now - timedelta(hours=24) <= published < now:
+        if not issuer_name_in_text(issuer_title_subject(title),name) or published.utcoffset() is None or not now - timedelta(hours=COMPANY_NEWS_WINDOW_HOURS) <= published < now:
             continue
         if not re.search(r"실적|수주|공시|매출|영업|공급|계약|배당|증자|자사주|인수|합병|파산|회생|거래정지|상장폐지|규제|제재|관세|수출|가이던스|공연|문화교류|한한령|contract|earnings", title, re.IGNORECASE):
             continue
@@ -360,6 +365,22 @@ def korean_company_news(symbol, now):
                          "url": item.findtext("link", "")})
     return sorted({item["headline"]: item for item in articles}.values(),
                   key=lambda item: item["available_at"], reverse=True)
+
+
+def dart_receipt_date(receipt):
+    """DART 접수번호(`YYYYMMDD` + 일련번호)의 앞 8자리를 공시일로 복원한다.
+
+    주기보고서는 400일 창으로 따로 받아 오면서 접수일을 버리고 있었다. 그래서 재무제표(YoY)는
+    정확한데 그 공시 시점만은 증거로 쓸 수 없었고, 테스(+192.5%)처럼 가장 강한 실적 재료가
+    "공시 날짜 없음"으로 탈락했다. 접수번호는 그 날짜를 그대로 담고 있다.
+    """
+    digits = str(receipt or "")[:8]
+    if not re.fullmatch(r"\d{8}", digits):
+        return None
+    year, month, day = int(digits[:4]), int(digits[4:6]), int(digits[6:])
+    if not (1990 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
 
 
 def dart_financial_reports(api_key, corp_code, now):
@@ -373,9 +394,22 @@ def dart_financial_reports(api_key, corp_code, now):
     body = response.json()
     if body.get("status") not in {"000", "013"}:
         raise ValueError("DART financial report index unavailable")
-    return [{"form": row.get("report_nm", ""),
-             "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=" + row["rcept_no"]}
-            for row in body.get("list", []) if re.fullmatch(r"\d{14}", row.get("rcept_no", ""))]
+    reports = []
+    for row in body.get("list", []):
+        receipt = row.get("rcept_no", "")
+        if not re.fullmatch(r"\d{14}", receipt):
+            continue
+        filing = {"form": row.get("report_nm", ""),
+                  "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=" + receipt,
+                  "source": "DART"}
+        # The receipt date is the disclosure date; it is what the catalyst track dates the
+        # quarterly result by, so it is kept on every report rather than only used for the
+        # statement download.
+        filing_date = dart_receipt_date(receipt)
+        if filing_date:
+            filing["filing_date"] = filing_date
+        reports.append(filing)
+    return reports
 
 
 def trailing_eps(statement, today):
@@ -509,6 +543,13 @@ def us_company_filings(ticker, now):
 
 
 DART_RISK_TITLE = re.compile(r"회생절차개시신청|파산신청|횡령[ㆍ·및 ]*배임|상장폐지결정|감사의견거절|채무불이행")
+# 공시 목록 조회 창. 14일로 두면 45일 안에 낸 분기보고서가 창 밖으로 나가 존재 자체가 보이지
+# 않았다. 분기 주기(약 90일)를 덮도록 60일로 넓힌다.
+DART_DISCLOSURE_WINDOW_DAYS = 60
+# 목록 상한. 3건이면 IR·지분 공시가 자리를 다 차지해 주기보고서가 밀려난다.
+DART_MAX_FILINGS = 12
+# 주기보고서(분기·반기·사업). 이 공시의 날짜가 실적 재료의 신선도를 결정한다.
+DART_PERIODIC_REPORT_TITLE = re.compile(r"분기보고서|반기보고서|사업보고서|증권신고서")
 
 
 def dart_company_codes(api_key):
@@ -646,10 +687,33 @@ def dart_contract_candidates(api_key, ranked, now):
     return candidates
 
 
+def merge_periodic_filings(existing, reports):
+    """Keep the periodic reports, with their receipt dates, beside the recent disclosures.
+
+    The statements arrive from a 400-day query of their own, so the same quarter's filing
+    can be missing from the 60-day event list; without it a reported jump has no date and
+    the catalyst track cannot read it. A periodic report is kept whatever the event list
+    already holds, and the result stays newest-first.
+    """
+    merged = [dict(filing) for filing in existing or [] if isinstance(filing, dict)]
+    seen = {str(filing.get("url")) for filing in merged}
+    for filing in reports or []:
+        if not isinstance(filing, dict) or not filing.get("filing_date"):
+            continue
+        url = str(filing.get("url") or "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        merged.append(dict(filing))
+    merged.sort(key=lambda filing: str(filing.get("filing_date") or ""), reverse=True)
+    return merged
+
+
 def dart_disclosures(api_key, corp_code, now):
     response = requests.get(
         "https://opendart.fss.or.kr/api/list.json",
-        params={"crtfc_key": api_key, "corp_code": corp_code, "bgn_de": (now - timedelta(days=14)).strftime("%Y%m%d"),
+        params={"crtfc_key": api_key, "corp_code": corp_code,
+                "bgn_de": (now - timedelta(days=DART_DISCLOSURE_WINDOW_DAYS)).strftime("%Y%m%d"),
                 "end_de": now.strftime("%Y%m%d"), "page_count": "100"},
         timeout=6,
     )
@@ -671,7 +735,13 @@ def dart_disclosures(api_key, corp_code, now):
         if day == today and DART_RISK_TITLE.search(title):
             risks.append({**filing, "available_at": now.isoformat(), "headline": title})
     filings.sort(key=lambda record: record["filing_date"], reverse=True)
-    shown = filings[:3]
+    # IR·지분·수주 공시가 앞자리를 다 채우면 분기보고서가 목록에서 밀려나 실적 공시 날짜가
+    # 영구히 사라졌다(2026-11-24 테스). 상한은 넓히고, 주기보고서는 상한과 무관하게 유지한다.
+    shown = filings[:DART_MAX_FILINGS]
+    for filing in filings:
+        if filing not in shown and DART_PERIODIC_REPORT_TITLE.search(filing["form"]):
+            shown.append(filing)
+    shown.sort(key=lambda record: record["filing_date"], reverse=True)
     for filing in shown:
         if "단일판매" in filing["form"] and "공급계약" in filing["form"]:
             try:
@@ -1112,6 +1182,10 @@ def company_context(market, symbols, now):
                     snapshot.pop("revenue_yoy_pct", None)
                     snapshot.pop("operating_margin_yoy_pp", None)
                     snapshot.update(dart_financials)
+                # 주기보고서를 공시 목록에 합쳐, 재무제표가 말하는 그 공시 시점을 실적 재료의
+                # 날짜로 쓸 수 있게 한다. 목록은 접수번호에서 복원한 공시일을 갖는다.
+                snapshot["filings"] = merge_periodic_filings(
+                    snapshot.get("filings") or [], reports)
             except (requests.RequestException, ValueError, TypeError) as exc:
                 print(f"{market} {symbol} DART financials unavailable ({type(exc).__name__})")
         snapshot["market"] = "US" if overseas else "KR"

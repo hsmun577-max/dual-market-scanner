@@ -8,8 +8,10 @@ from kr_premarket import (
     PREMARKET_MOVE_PCT,
     WATCH_CODES,
     WATCH_NAMES,
+    catalyst_categories,
     collect,
     format_block,
+    include_block,
     quote_from_output,
     select_signals,
     session_of,
@@ -214,6 +216,81 @@ class CollectTests(unittest.TestCase):
         self.assertIsNone(watch['items'][0]['change_pct'])
 
 
+class BlockWindowTests(unittest.TestCase):
+    """장전에 모은 감시만 싣는다. 정규장 장중 스캔에는 지난 장전 창문을 다시 보여 주지 않는다."""
+
+    def watch(self, at, session=None):
+        return dict(items=[dict(code='005930', name='삼성전자')], checked_at=at, session=session)
+
+    def test_a_premarket_collection_is_sent(self):
+        self.assertTrue(include_block(self.watch(datetime(2026, 11, 24, 6, 0, tzinfo=KST).isoformat())))
+        self.assertTrue(include_block(self.watch(MORNING.isoformat())))
+
+    def test_an_intraday_scan_leaves_it_out(self):
+        # 2026-11-24 12:34 발소: 정규장 장중인데 '장전 시세 미확인'이 다섯 줄 실렸다.
+        for hour in (9, 12, 15):
+            stamp = datetime(2026, 11, 24, hour, 34, tzinfo=KST).isoformat()
+            self.assertFalse(include_block(self.watch(stamp)), hour)
+
+    def test_an_nxt_premarket_session_is_always_sent(self):
+        stamp = datetime(2026, 11, 24, 8, 15, tzinfo=KST).isoformat()
+        self.assertTrue(include_block(self.watch(stamp, 'nxt_premarket')))
+
+    def test_a_weekend_run_is_not_a_premarket_run(self):
+        self.assertFalse(include_block(self.watch(datetime(2026, 11, 21, 7, 0, tzinfo=KST).isoformat())))
+
+    def test_a_watch_without_a_time_is_left_alone(self):
+        self.assertTrue(include_block(dict(items=[dict(code='005930', name='삼성전자')])))
+
+    def test_the_daily_message_drops_the_intraday_watch(self):
+        import scanner
+        watch = collect(now=datetime(2026, 11, 24, 12, 34, tzinfo=KST), quotes={'005930': quote(6.4)},
+                        news_fetcher=lambda code, name, now: [])
+        report = dict(results=[], sectors=[], market_regime={}, kr_premarket_watch=watch,
+                      buy_evaluation=dict(completed=True, decision_completed=2, data_excluded=0))
+        with patch.dict('os.environ', {'TELEGRAM_BOT_TOKEN': 'fake', 'TELEGRAM_CHAT_ID': 'fake'}), \
+                patch.object(scanner.requests, 'post') as post, \
+                patch('scanner.delivery_status', return_value=(True, 'test')), \
+                patch('urgent_issues.select_urgent_issues', return_value={}):
+            post.return_value = Mock(status_code=200, json=lambda: {'ok': True})
+            scanner.send_telegram_summary(report)
+        message = post.call_args.kwargs['json']['text']
+        self.assertNotIn(HEADING, message)
+        self.assertNotIn('장전 시세 미확인', message)
+        # 감시 자체는 보고서에 남는다.
+        self.assertEqual([item['code'] for item in watch['items']], ['005930'])
+
+
+class PersonnelNoticeTests(unittest.TestCase):
+    """단순 임원 인사는 `CEO·경영진` 촉매가 아니다 (2026-11-24 지시)."""
+
+    def test_promotions_and_appointment_rounds_are_not_ceo_catalysts(self):
+        for headline in ('삼성SDI, 부사장 4명 등 11명 승진…품질·차세대 기술 중점',
+                         '삼성바이오로직스·에피스, 구영한·정병인 부사장 등 임원 승진 인사',
+                         'SK하이닉스, 정기 인사 발령…전보 20명'):
+            self.assertNotIn('ceo', catalyst_categories(headline), headline)
+
+    def test_a_real_change_at_the_top_stays(self):
+        for headline in ('A사, 대표이사 교체…신임 CEO 선임',
+                         'B사 대표이사 사임',
+                         '젠슨 황 복귀 하루 전 16억 매입…SK하닉 사장 \'절묘한 타이밍\''):
+            self.assertIn('ceo', catalyst_categories(headline), headline)
+
+    def test_other_catalysts_are_not_touched_by_the_personnel_filter(self):
+        self.assertIn('deal', catalyst_categories('C사, 1,200억 수주 계약 체결'))
+        self.assertIn('earnings', catalyst_categories('D사, 3분기 영업이익 253% 급증'))
+
+    def test_a_promotion_notice_alone_does_not_reach_the_block(self):
+        # 움직임도 없고 촉매도 승진 공지뿐이면 실을 이유가 없다(장전 +6.4%는 움직임 자체로 실린다).
+        items = select_signals({},
+                               {'006400': [article('삼성SDI, 부사장 4명 등 11명 승진…품질·차세대 기술 중점')]},
+                               MORNING)
+        self.assertEqual(items, [])
+        moved = select_signals({'006400': quote(6.4)},
+                               {'006400': [article('삼성SDI, 부사장 4명 등 11명 승진…')]}, MORNING)
+        self.assertEqual(moved[0]['catalyst_labels'], [])
+
+
 class MessageBlockTests(unittest.TestCase):
     def items(self):
         return select_signals({'005930': quote(6.4)},
@@ -223,18 +300,20 @@ class MessageBlockTests(unittest.TestCase):
     def test_block_heading_lines_and_no_buy_language(self):
         lines = format_block(self.items(), 'nxt_premarket')
         self.assertEqual(lines[0], HEADING)
-        self.assertIn('매수 신호 아님', lines[1])
-        self.assertTrue(lines[2].startswith('• 삼성전자 (005930) · NXT 장전 +6.4% (08:15)'))
-        self.assertIn('촉매: 수주·M&A', lines[2])
-        self.assertIn('간밤 미국 AI 반도체·GPU +15.0%', lines[2])
-        self.assertIn('HBM4 공급 계약', lines[3])
+        self.assertIn('매수 신호 아님', lines[0])  # 부제 대신 머리줄 한 줄에
+        self.assertTrue(lines[1].startswith('• 삼성전자 (005930) · NXT 장전 +6.4% (08:15)'))
+        self.assertIn('촉매: 수주·M&A', lines[1])
+        self.assertIn('간밤 미국 AI 반도체·GPU +15.0%', lines[1])
+        self.assertIn('HBM4 공급 계약', lines[2])
         self.assertEqual(format_block([]), [])
 
-    def test_without_a_session_print_the_line_says_so_instead_of_inventing_a_move(self):
-        # 07:20처럼 NXT 개장 전에는 체결가가 없다. 그때 0%나 전일 종가를 '장전'이라 쓰지 않는다.
+    def test_without_a_session_the_move_slot_is_left_empty(self):
+        # 07:20처럼 NXT 개장 전에는 체결가가 없다. 그때 0%나 전일 종가를 '장전'이라 쓰지도,
+        # '장전 시세 미확인'을 줄마다 붙이지도 않는다.
         items = select_signals({}, {'012450': [article('한화에어로스페이스, 폴란드와 계약 체결')]}, MORNING)
         text = '\n'.join(format_block(items, None))
-        self.assertIn('장전 시세 미확인', text)
+        self.assertNotIn('장전 시세 미확인', text)
+        self.assertIn('• 한화에어로스페이스', text)
         self.assertIn('촉매: 수주·M&A', text)
 
     def test_intraday_message_puts_the_block_before_the_buy_heading(self):

@@ -50,8 +50,21 @@ SAFETY_REASONS = frozenset({"insufficient_liquidity", "low_price", "missing_indi
 MIN_OPERATING_SURPRISE_PCT = 50.0
 # A supply contract matters to the income statement at this share of revenue.
 MIN_CONTRACT_REVENUE_RATIO_PCT = 5.0
-# The disclosure has to be recent relative to the decision it supports.
+# The disclosure has to be recent relative to the decision it supports, and "recent"
+# depends on how often that kind of evidence is published. A quarterly report comes four
+# times a year, so a 72-hour window left the strongest evidence readable for three days of
+# the quarter: on 2026-11-24 테스 (+192.5% operating profit YoY) and 이수페타시스 (+62.4%)
+# were both refused for age alone, eight days after the 3Q reports were filed. A contract
+# or a headline is a same-week event and keeps the short window.
 CATALYST_FRESH_HOURS = 72
+EARNINGS_CATALYST_FRESH_DAYS = 21
+EARNINGS_CATALYST_FRESH_HOURS = EARNINGS_CATALYST_FRESH_DAYS * 24
+# Keyed by the finder's ``kind`` so the window can never be read off the wrong evidence.
+CATALYST_FRESH_HOURS_BY_KIND = {
+    "earnings_surprise": EARNINGS_CATALYST_FRESH_HOURS,
+    "confirmed_contract": CATALYST_FRESH_HOURS,
+    "confirmed_news": CATALYST_FRESH_HOURS,
+}
 # A lifted name still needs a composite score that is not net negative: a catalyst cannot
 # carry an issuer whose own evidence points the other way.
 MIN_CATALYST_COMPOSITE_SCORE = 45.0
@@ -80,6 +93,19 @@ _SPECULATION = re.compile(r"추진|검토|기대|전망|가능성|관측|예상|
                           r"would\b|likely", re.I)
 _EARNINGS_FILING = re.compile(r"분기보고서|반기보고서|사업보고서|잠정\s*실적|실적\s*공시|"
                               r"\b(?:10-Q|10-K|20-F|6-K)\b", re.I)
+# 정기 임원 인사는 회사의 경영 변화가 아니다. "부사장 4명 등 11명 승진"처럼 승진·인사 발령을
+# 알리는 기사를 `CEO·경영진` 촉매로 올리면, 알림에는 회사와 무관한 인사 공지가 매일 실린다
+# (2026-11-24 장전 블록의 삼성SDI·삼성바이오로직스 두 줄). 실제 경영진 교체만 남긴다.
+_PERSONNEL_NOISE = re.compile(r"승진|인사\s*(?:발령|개편|이동|교류|단행)|정기\s*인사|임원\s*인사|"
+                              r"전보|보직|연임|퇴임식", re.I)
+_EXECUTIVE_CHANGE = re.compile(r"대표이사|\bCEO\b|chief executive|회장|최고경영자|취임|사임|해임|"
+                               r"유임|복귀|교체|선임|resign|step(?:s|ped|ping)? down|appoint", re.I)
+
+
+def personnel_only(headline):
+    """A routine promotion/appointment notice rather than a change at the top."""
+    text = str(headline or "")
+    return bool(_PERSONNEL_NOISE.search(text)) and not _EXECUTIVE_CHANGE.search(text)
 
 
 def _number(value):
@@ -94,6 +120,11 @@ def _number(value):
 
 def _finite(value):
     return _number(value) is not None
+
+
+def freshness_hours(kind):
+    """How long evidence of this kind stays usable, in hours."""
+    return CATALYST_FRESH_HOURS_BY_KIND.get(str(kind), CATALYST_FRESH_HOURS)
 
 
 def stamp(value):
@@ -183,7 +214,7 @@ def _is_earnings_filing(filing):
     return bool(_EARNINGS_FILING.search(form))
 
 
-def earnings_disclosure(company, at, market=None, hours=CATALYST_FRESH_HOURS):
+def earnings_disclosure(company, at, market=None, hours=EARNINGS_CATALYST_FRESH_HOURS):
     """The most recent results disclosure that was already public before ``at``."""
     best = None
     for filing in company.get("filings") or []:
@@ -216,7 +247,7 @@ def earnings_surprise(company, at, market=None):
     turnaround = company.get("operating_income_turnaround") is True
     if not turnaround and (yoy is None or yoy < MIN_OPERATING_SURPRISE_PCT):
         return None
-    disclosure = earnings_disclosure(company, at, market)
+    disclosure = earnings_disclosure(company, at, market, hours=freshness_hours("earnings_surprise"))
     if disclosure is None:
         return None
     observed, filing = disclosure
@@ -233,8 +264,9 @@ def earnings_surprise(company, at, market=None):
                 basis="reported income statement; not a forward estimate")
 
 
-def confirmed_contract(company, at, market=None):
+def confirmed_contract(company, at, market=None, hours=None):
     """A supply contract whose amount and revenue share were read from the document."""
+    hours = freshness_hours("confirmed_contract") if hours is None else hours
     for filing in company.get("filings") or []:
         contract = filing.get("contract") or {}
         ratio = _number(contract.get("revenue_ratio_pct"))
@@ -242,7 +274,7 @@ def confirmed_contract(company, at, market=None):
         if ratio is None or ratio < MIN_CONTRACT_REVENUE_RATIO_PCT or amount is None or amount <= 0:
             continue
         observed = filing_time(filing, market)
-        if observed is None or observed > at or at - observed > timedelta(hours=CATALYST_FRESH_HOURS):
+        if observed is None or observed > at or at - observed > timedelta(hours=hours):
             continue
         return dict(kind="confirmed_contract",
                     summary=f"단일판매·공급계약 {amount / 1e8:,.0f}억원 (매출대비 {ratio:.1f}%)",
@@ -266,8 +298,9 @@ def quantified_catalyst(text):
     return signed or bool(_POSITIVE_WORDS.search(headline))
 
 
-def confirmed_news(company, at, market=None):
+def confirmed_news(company, at, market=None, hours=None):
     """Fresh, issuer-scoped news whose own headline carries the confirmed figure."""
+    hours = freshness_hours("confirmed_news") if hours is None else hours
     urls = {str(row.get("url")) for row in company.get("news") or [] if row.get("url")}
     analysis = company.get("event_analysis") or {}
     for event in analysis.get("assessed_events") or []:
@@ -280,7 +313,7 @@ def confirmed_news(company, at, market=None):
         if not quantified_catalyst(headline):
             continue
         observed = stamp(event.get("available_at"))
-        if observed is None or observed > at or at - observed > timedelta(hours=CATALYST_FRESH_HOURS):
+        if observed is None or observed > at or at - observed > timedelta(hours=hours):
             continue
         return dict(kind="confirmed_news", summary=headline[:120],
                     observed_at=observed.isoformat(), source=url,

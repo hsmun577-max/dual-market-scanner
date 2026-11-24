@@ -1318,10 +1318,12 @@ def send_telegram_summary(report):
 
     # 알림 최상단: 지금 상승 흐름 · 시장 분위기 · (바뀌었으면) 흐름 변화.
     regime_lines = asset_regime.header_lines(report.get('asset_regime'))
-    lines = ((regime_lines + ['']) if regime_lines else []) + list(
+    # 세부 테마가 있으면 그것만 보낸다. 대분류 ETF 순위('1위 기계·장비')는 같은 내용을 두 번
+    # 말하는 것이고, 세부 테마는 그보다 구체적인 같은 정보다. 테마가 비었을 때만 예전 섹터 폴백.
+    theme_block = theme_lines(report.get('theme_sectors'))
+    sector_header = [] if theme_block else list(
         report.get('sector_header_override') or format_sector_header(report.get("sectors", [])))
-    # 대분류 ETF '1위 반도체' 아래에 실제 구성종목으로 계산한 세부 테마·대표주·이슈를 붙인다.
-    lines.extend(theme_lines(report.get('theme_sectors')))
+    lines = ((regime_lines + ['']) if regime_lines else []) + sector_header + theme_block
     lines.extend(market_regime_note(report))
     # 미국 장전 요약에는 게이트와 무관한 장전 사전 시그널을 붙인다. 이 블록은 발송 전에
     # preopen_delivery/premarket_signals가 준비해 두고, 발송 시점에는 다시 조회하지 않는다.
@@ -1330,10 +1332,13 @@ def send_telegram_summary(report):
     if premarket_lines:
         lines.extend(['', *premarket_lines])
     # 국내 핵심 대표주의 NXT 장전 움직임·촉매·간밤 미국 연동도 같은 참고 블록으로 붙인다.
-    if report.get('kr_premarket_watch'):
+    # 장전 실행에서 모은 감시만 싣는다(정규장 장중 스캔에는 이미 지난 창문이다).
+    kr_watch = report.get('kr_premarket_watch') or {}
+    if kr_watch.get('items'):
         from kr_premarket import format_block as format_kr_premarket_block
-        kr_watch = report.get('kr_premarket_watch') or {}
-        kr_lines = format_kr_premarket_block(kr_watch.get('items'), kr_watch.get('session'))
+        from kr_premarket import include_block as include_kr_premarket
+        kr_lines = (format_kr_premarket_block(kr_watch.get('items'), kr_watch.get('session'))
+                    if include_kr_premarket(kr_watch) else [])
         if kr_lines:
             lines.extend(['', *kr_lines])
     # The reversal tracks are delivered in their own section: they are exempt from the
@@ -1398,12 +1403,9 @@ def send_telegram_summary(report):
         lines.extend(['', '[수급 유입 우량주]',
                       '외인·기관 순매수 확인 · 매수 후보 검토 대상'])
         lines.extend(quality_watch_line(row) for row in inflow[:5])
-    # 중기 +30% 눌림 발굴은 20~60일 보유·−15% 손절 전제라서 당일 매수 신호와 섞지 않는다.
-    # 관찰 목록으로만 자기 섹션에 실린다(백테스트 3장: 60일 +9.54%·+30% 도달 58.4%).
-    import mid_term_watch
-    mid_term_lines = mid_term_watch.format_block(report.get('mid_term_watch') or [])
-    if mid_term_lines:
-        lines.extend(['', *mid_term_lines])
+    # 중기 +30% 눌림 발굴은 20~60일 보유·−15% 손절 전제의 관찰 목록이다. 알림 본문에는 싣지 않고
+    # 분석 자료(`mid_term_watch`·`mid_term_watch_scope`)에만 남긴다(2026-11-24 지시:
+    # "매수종목 뽑을 때 분석자료에 포함하라고 한건데").
 
     messages = split_telegram_text("\n".join(lines))
     for message in messages:

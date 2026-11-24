@@ -189,6 +189,9 @@ TELEGRAM_LIMIT = 3
 LEADERSHIP_WEIGHTS = {"market_excess_pct": 0.45, "breadth_pct": 0.30, "turnover_ratio": 0.25}
 NEWS_LOOKUPS_PER_RUN = 6
 NEWS_LOOKUPS_PER_THEME = 2
+# 기사가 없을 때 이슈 줄 대신 붙는 수급 요약의 머리표. 메시지에서는 위 테마 줄과 숫자가
+# 겹치므로 출력하지 않고, 기록에는 그대로 남긴다.
+ISSUE_UNCONFIRMED = "이슈: 뉴스 미확인"
 
 _HEADLINE_CACHE = {}
 
@@ -411,7 +414,7 @@ def issue_line(row, market, now, headlines=None, budget=None):
     supply = f"상승 {row.get('up', 0)}/{row.get('total', 0)}종목"
     if ratio:
         supply += f" · 거래대금 {ratio:.1f}배"
-    return f"이슈: 뉴스 미확인 · {supply} 수급"
+    return f"{ISSUE_UNCONFIRMED} · {supply} 수급"
 
 
 def _download(symbols, market, downloader):
@@ -505,7 +508,9 @@ def format_theme_block(snapshot, market=None, limit=4):
             lead = "주도" if row.get("up", 0) > (row.get("total") or 0) / 2 else "상대 선두"
             body = " · ".join(f"{leader['name']} {leader['return_pct']:+.1f}%" for leader in leaders[:3])
             lines.append(f"   {lead} {body}")
-        if row.get("issue"):
+        if row.get("issue") and ISSUE_UNCONFIRMED not in str(row["issue"]):
+            # 기사가 없을 때의 '상승 7/7종목 · 거래대금 0.6배' 요약은 바로 위 테마 줄과 같은
+            # 숫자를 두 번 쓰는 것이다. 기록(`row['issue']`)은 남기되 메시지에는 싣지 않는다.
             lines.append(f"   {row['issue']}")
     return lines
 
@@ -520,15 +525,14 @@ def theme_lines(snapshots, limit=TELEGRAM_LIMIT):
 
 
 def sector_section(etf_rows, snapshot, market=None, override=None, limit=4):
-    """`오늘의 주요 섹터` 머리줄은 유지하고, 그 아래를 세부 테마 블록으로 채운다.
+    """세부 테마가 있으면 그 블록만, 없으면 예전 `오늘의 주요 섹터`(1위/2위 ETF)를 돌려준다.
 
-    세부 테마 자료가 없으면 기존 `format_sector_header`(1위/2위 ETF 또는 확인 불가)를
-    그대로 돌려주므로 기존 호출부와 계약 테스트는 바뀌지 않는다.
+    대분류 ETF 순위('1위 기계·장비')와 세부 테마는 같은 내용을 두 번 말한다. 세부 테마가
+    계산되면 그것이 더 구체적인 같은 정보이므로, 대분류 머리줄은 자료가 없을 때의 폴백으로만
+    남긴다(2026-11-24 지시: "옛날 섹터 중복 제거").
     """
     from sector_flow import format_sector_header
-    base = list(override) if override else format_sector_header(etf_rows, market)
     detail = format_theme_block(snapshot, market, limit) if snapshot else []
-    if detail and base and base[-1] == '확인 불가':
-        # 세부 테마 자료가 있으면 대분류 ETF의 '확인 불가' 자리표시자를 남기지 않는다.
-        base = base[:-1]
-    return base + detail
+    if detail:
+        return detail
+    return list(override) if override else format_sector_header(etf_rows, market)

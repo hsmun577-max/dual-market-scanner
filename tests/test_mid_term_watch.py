@@ -131,30 +131,25 @@ class MessageTests(unittest.TestCase):
             send_telegram_summary(report_)
         return post.call_args.kwargs["json"]["text"]
 
-    def test_the_alert_has_its_own_section_with_the_hold_and_the_stop(self):
+    def test_the_alert_keeps_the_pullback_list_out_of_the_message(self):
+        # 2026-11-24 지시: "매수종목뽑을때 분석자료에 포함하라고 한건데". 목록은 분석 자료에만
+        # 남기고 알림 본문에는 빼다.
         report_ = report(row())
         attach(report_, AT)
         text = self.message(report_)
-        self.assertIn(LABEL, text)
-        self.assertIn("[중기 +30% 눌림 발굴 (20~60일 보유 · -15% 손절)]", text)
-        self.assertIn("당일 매수 신호 아님", text)
-        self.assertIn("더존비즈온 (012510)", text)
-        self.assertIn("20일 -15.0%", text)
-        self.assertIn("RSI 41.0", text)
-        self.assertIn("거래대금 30.0억", text)
-        self.assertIn("코스피 대비 +2.0%p", text)
-        self.assertIn("20~60일 보유 · -15% 손절 전제", text)
+        self.assertNotIn(LABEL, text)
+        self.assertNotIn("더존비즈온", text)
+        self.assertNotIn("20~60일 보유", text)
+        # 계산과 기록은 그대로 남는다.
+        self.assertEqual([entry["symbol"] for entry in report_["mid_term_watch"]], ["012510.KS"])
+        self.assertEqual(report_["mid_term_watch"][0]["return_20d"], -0.15)
 
-    def test_the_section_is_not_read_as_a_buy_signal(self):
+    def test_the_pullback_list_is_never_read_as_a_buy_signal(self):
         report_ = report(row())
         attach(report_, AT)
         text = self.message(report_)
-        before_section = text.split(LABEL)[0]
-        self.assertNotIn("더존비즈온", before_section)
-        # The momentum section keeps its own (here empty) verdict; the pullback list is
-        # only appended after it, under its own label.
-        self.assertIn("분석", before_section)
-        self.assertNotIn("매수 신호", before_section)
+        self.assertIn("분석", text)
+        self.assertNotIn("더존비즈온", text)
 
     def test_without_an_attached_list_the_message_has_no_section(self):
         text = self.message(report(row()))

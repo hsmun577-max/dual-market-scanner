@@ -381,7 +381,8 @@ class HeaderWiringTests(unittest.TestCase):
     def test_headline_from_the_theme_block_is_used_as_context(self):
         report = dict(theme_sectors=[dict(market='KR', rows=[
             dict(name='반도체', issue='이슈: 수출 규제 완화 기대')])])
-        self.assertEqual(asset_regime.headlines_from_report(report), '이슈: 수출 규제 완화 기대')
+        # 머리줄이 자기 라벨을 다시 붙이므로 앞의 '이슈:'는 벗겨서 돌려준다.
+        self.assertEqual(asset_regime.headlines_from_report(report), '수출 규제 완화 기대')
 
     def test_report_without_theme_news_has_no_context(self):
         report = dict(theme_sectors=[dict(market='KR', rows=[
