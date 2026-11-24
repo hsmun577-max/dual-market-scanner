@@ -105,6 +105,14 @@ class UsLinkTests(unittest.TestCase):
         self.assertEqual(us_links('105560', US_ROWS), [])
         self.assertEqual(us_links('035420', US_ROWS), [])
 
+    def test_a_stale_us_snapshot_is_not_called_overnight(self):
+        stale = [dict(market='US', data_date='2026-11-18',
+                      rows=[dict(name='AI 반도체·GPU', return_pct=15.0)])]
+        self.assertEqual(us_links('005930', stale, today=datetime(2026, 11, 24).date()), [])
+        fresh = [dict(market='US', data_date='2026-11-23',
+                      rows=[dict(name='AI 반도체·GPU', return_pct=15.0)])]
+        self.assertEqual(len(us_links('005930', fresh, today=datetime(2026, 11, 24).date())), 1)
+
 
 class SelectionTests(unittest.TestCase):
     def test_a_premarket_jump_is_a_signal_without_any_news(self):

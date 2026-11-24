@@ -42,6 +42,8 @@ WATCH_NAMES = {code: name for code, name in WATCH_UNIVERSE}
 PREMARKET_MOVE_PCT = 5.0
 # 간밤 미국 대응 테마가 이보다 오르면 '미국 연동' 맥락으로 붙인다.
 US_THEME_MOVE_PCT = 2.5
+# 이보다 오래된 미국 테마 스냅샷은 '간밤'이 아니다(금요일장~월요일 아침 3일은 허용).
+US_THEME_MAX_AGE_DAYS = 4
 NEWS_WINDOW_HOURS = 24
 MAX_SIGNALS = 5
 # 미국 테마 연동만으로 올린 종목은 소수만 둔다. 실제 장전 움직임·촉매 뉴스 자리를 빼앗지 않게.
@@ -128,8 +130,11 @@ def theme_membership():
     return mapping
 
 
-def _us_theme_rows(us_rows):
-    """미국 테마 행 목록을 이름 → 등락률로. 스냅샷 목록(리스트)과 행 목록을 모두 받는다."""
+def _us_theme_rows(us_rows, today=None):
+    """미국 테마 행 목록을 이름 → 등락률로. 스냅샷 목록(리스트)과 행 목록을 모두 받는다.
+
+    `today`를 주면 오래된 스냅샷은 버린다. 며칠 전 미국장 등락을 '간밤'이라 부르지 않기 위해서다.
+    """
     rows = {}
     for item in us_rows or []:
         if not isinstance(item, dict):
@@ -137,6 +142,13 @@ def _us_theme_rows(us_rows):
         if 'rows' in item:
             if str(item.get('market') or 'US').upper().startswith('KR'):
                 continue
+            data_date = item.get('data_date')
+            if today is not None and isinstance(data_date, str) and data_date:
+                try:
+                    if (today - datetime.fromisoformat(data_date).date()).days > US_THEME_MAX_AGE_DAYS:
+                        continue
+                except ValueError:
+                    pass
             for row in item.get('rows') or []:
                 if isinstance(row, dict) and row.get('name'):
                     rows[row['name']] = _number(row.get('return_pct'))
@@ -146,10 +158,10 @@ def _us_theme_rows(us_rows):
     return rows
 
 
-def us_links(code, us_rows, membership=None):
+def us_links(code, us_rows, membership=None, today=None):
     """이 종목이 속한 국내 테마의 미국 대응 테마가 간밤 얼마나 올랐는지."""
     membership = membership if membership is not None else theme_membership()
-    rows = _us_theme_rows(us_rows)
+    rows = _us_theme_rows(us_rows, today)
     links = []
     for kr_theme in membership.get(str(code).split('.')[0], []):
         us_theme = US_THEME_COUNTERPART.get(kr_theme)
@@ -292,13 +304,14 @@ def select_signals(quotes, articles, now, symbols=None, us_rows=None,
     if now.utcoffset() is None:
         raise ValueError('Timezone-aware premarket check time required')
     membership = theme_membership() if us_rows else {}
+    today = now.astimezone(KST).date()
     found = []
     for code in (symbols or WATCH_CODES):
         quote = (quotes or {}).get(code) or {}
         change = _number(quote.get('change_pct'))
         move = change if change is not None and abs(change) >= PREMARKET_MOVE_PCT else None
         catalyst = _catalyst((articles or {}).get(code), now)
-        links = us_links(code, us_rows, membership) if us_rows is not None else []
+        links = us_links(code, us_rows, membership, today) if us_rows is not None else []
         if move is None and catalyst is None and not links:
             continue
         categories = (catalyst or {}).get('categories') or []
