@@ -174,6 +174,44 @@ class FundCandidateGateTests(unittest.TestCase):
         self.assertEqual(sqqq['fundamentals'], 'ETF 상장상품 · 발행사 재무제표 없음')
 
 
+class FundProfileWithoutQuoteTypeTests(unittest.TestCase):
+    """A cached profile may predate the provider's quote_type; the scan still knows."""
+
+    def test_a_korean_fund_profile_without_quote_type_is_scored_on_the_fund_model(self):
+        rows = [fund_row('KR', '069500.KS', 'KODEX 200', volume=3_000_000)]
+        snapshot = fund_snapshot('KR')
+        snapshot.pop('quote_type')  # restored profile cache built before it was read
+        with patch('kis_intraday.company_context',
+                   side_effect=lambda label, keys, checked: (
+                       {key: dict(snapshot) for key in keys}, [])), \
+             patch('event_impact_analysis.world_events', return_value=([], [])), \
+             patch('economic_graph.load_profiles', return_value={}):
+            scanner.prepare_selected_analysis(dict(results=rows, sectors=[]))
+        row = rows[0]
+        forecast = row['company_forecast']
+        self.assertEqual(row['company_analysis']['instrument_class'], 'listed_fund')
+        self.assertEqual(forecast['instrument'], 'listed_fund')
+        self.assertIsNotNone(forecast['composite_score'])
+        self.assertNotIn('financial_statements', forecast['score_withheld_reasons'])
+        self.assertNotIn('current_financial_period', forecast['score_withheld_reasons'])
+
+    def test_a_fund_below_the_price_floor_does_not_take_a_candidate_slot(self):
+        # KODEX 200선물인버스2X was the most traded Korean fund on 2026-11-24 at 140원.
+        # The entry screen refuses it as low_price before any profile is read, so its slot
+        # belongs to the next fund that could actually be planned.
+        cheap = fund_row('KR', '252670.KS', 'KODEX 200선물인버스2X', volume=9_000_000,
+                         indicators=dict(price=140.0, average_turnover_20d=1.2e12))
+        others = [fund_row('KR', f'{100000 + index}.KS', f'KODEX 테스트{index}',
+                           volume=1_000_000 - index * 1000) for index in range(9)]
+        report = analyse(dict(results=[cheap, *others], sectors=[]))
+        self.assertEqual(cheap['analysis_kind'], 'fund_screen_only')
+        self.assertNotIn('company_analysis', cheap)
+        self.assertNotIn('fund_rank', cheap)
+        promoted = [row['symbol'] for row in others if row.get('analysis_kind') == 'fund_candidate']
+        self.assertEqual(promoted, [row['symbol'] for row in others[:FUND_CANDIDATE_LIMIT]])
+        self.assertEqual(report['research_scope']['funds_promoted'], FUND_CANDIDATE_LIMIT)
+
+
 class FundRankingTests(unittest.TestCase):
     def test_ranking_is_per_market_and_by_volume(self):
         rows = [fund_row('KR', f'{index}.KS', f'KODEX {index}', volume=volume)

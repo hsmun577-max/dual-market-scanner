@@ -70,14 +70,16 @@ def main():
     # Every regular sender continues to use delivery_status unchanged.
     session_open=cal.session_open(args.session).to_pydatetime()<=sent_at<cal.session_close(args.session).to_pydatetime()
     entries=[validate_entry(row,quotes.get(row['symbol']),sent_at,session_open) for row in recommendations[:5]]
-    from theme_sectors import format_theme_block, theme_sector_snapshot
+    from theme_sectors import sector_section, theme_sector_snapshot
     # 간밤 미국 세부 테마는 자기 시장(한국) 스냅샷으로 덮어쓰기 전에 붙잡아 둔다.
     overnight_us_themes=[row for row in report.get('theme_sectors') or []
                          if isinstance(row,dict) and str(row.get('market') or '').upper().startswith('US')]
     theme=theme_sector_snapshot('KR',datetime.now(KST))
     report['theme_sectors']=[theme]
-    sector_lines=(format_report(industry).splitlines() if industry.get('rows') else ['오늘의 주요 섹터','확인 불가'])
-    if theme.get('rows'):sector_lines=sector_lines+format_theme_block(theme,'KR')
+    # 세부 테마가 있으면 대분류 ETF 순위('오늘의 주요 섹터 · 1위 기계·장비')는 싣지 않는다:
+    # 두 블록은 같은 내용을 두 번 말한다(scanner·kis_intraday와 같은 규칙).
+    sector_lines=sector_section(report.get('sectors') or [], theme, 'KR',
+                                override=format_report(industry).splitlines() if industry.get('rows') else None)
     import mid_term_watch
     message=format_requested_report(sector_lines,entries,evaluation,sent_at,
                                     regime=asset_regime.cached_block())
@@ -91,16 +93,20 @@ def main():
     except Exception as exc:
         print('Urgent issue check unavailable: '+type(exc).__name__,flush=True)
     # 요청 장전 리포트에도 국내 핵심 대표주의 NXT 장전 움직임·촉매·간밤 미국 연동을 붙인다.
+    # 정규장 장중 요청에는 이미 지난 장전 창문이므로 싣지 않는다(kr_premarket.include_block).
     kr_premarket=dict(items=[])
     try:
         import kr_premarket as kr_module
         kr_premarket=kr_module.attach(report,datetime.now(timezone.utc),us_rows=overnight_us_themes)
-        block=kr_module.format_block(kr_premarket.get('items'),kr_premarket.get('session'))
-        if block:message='\n'.join([message,'',*block])
+        if kr_module.include_block(kr_premarket):
+            block=kr_module.format_block(kr_premarket.get('items'),kr_premarket.get('session'))
+            if block:message='\n'.join([message,'',*block])
     except Exception as exc:
         print('Domestic premarket watch unavailable: '+type(exc).__name__,flush=True)
-    # 중기 +30% 눌림 발굴은 당일 매수 판정과 다른 20~60일 관찰 목록이다. 리포트 메시지에
-    # 별도 섹션으로만 붙고 ``recommendations``에는 들어가지 않는다.
+    # 중기 +30% 눌림 발굴은 당일 매수 판정과 다른 20~60일 관찰 목록이다. 계산 결과는 분석
+    # 자료(`requested-buy-analysis.json`과 `requested-buy-audit.json`의 `mid_term_watch`)에만
+    # 남기고 메시지 본문에는 싣지 않는다(2026-11-24 지시: "매수종목 뽑을 때 분석자료에 포함
+    # 하라고 한건데" — "중기눌림발굴은 메세지에 왜있는거야").
     if report.get('mid_term_watch') is None:
         try:
             import mid_term_evidence
@@ -109,8 +115,6 @@ def main():
         except Exception as exc:
             print('Mid-term fundamentals screen unavailable: '+type(exc).__name__,flush=True)
             mid_term_watch.attach(report, datetime.now(timezone.utc))
-    mid_term_lines=mid_term_watch.format_block(report.get('mid_term_watch') or [])
-    if mid_term_lines:message='\n'.join([message,'',*mid_term_lines])
     audit=dict(session=args.session,generated_at=sent_at.isoformat(),strategy_commit=os.getenv('GITHUB_SHA'),
         explicit_manual_request=True,scheduled_delivery_guards_unchanged=True,
         evaluation=evaluation,entry_checks=entries,trade_ready_count=sum(e['trade_ready'] for e in entries),

@@ -77,6 +77,10 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
         caveats=list(forecast.get('caveats',[])),
         entry_basis='source_dated_catalyst_pullback_band',fresh_execution_quote_required=True,
         target_basis='upside_scenario_not_expected_return',expires_session=expires_session,
+        # The confirmed-disclosure track is the one path allowed past a market headwind.
+        # The fact is recorded on the plan so the alert can say why a plan exists while
+        # the index is under its 20-day average, instead of leaving the reader to wonder.
+        market_regime_lifted=values.get('market_above_ma20') is False,
         # The stop follows the instrument: −2% on a fund, −3% on a single stock.
         take_profit_pct=policy.take_profit_pct,
         take_profit_mode=policy.take_profit_mode,exit_policy=policy_snapshot(policy),

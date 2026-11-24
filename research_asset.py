@@ -9,16 +9,28 @@ FUND_CANDIDATE_LIMIT = 8
 
 
 def is_fund_company(company):
-    """A Yahoo profile of a listed fund, known only after the profile is fetched.
+    """A listed fund, read from the issuer profile the scan holds for it.
 
     ``quote_type`` is the provider's own instrument class (ETF, MUTUALFUND). It is the
     only field that identifies a US listing whose English name carries no Korean brand
     prefix, which is why the demotion is re-checked once the profile has arrived.
+
+    ``instrument_class`` is the scan's own classification, stamped on the profile when
+    the row is already known to be a fund (a KODEX/TIGER listing, an ``asset_type`` of
+    ``etf``). A restored profile cache can carry an entry built before ``quote_type`` was
+    read: on the 2026-11-24 12:03 scan the five promoted Korean funds had no
+    ``quote_type`` and were therefore graded as operating companies, which withheld
+    their composite score with ``financial_statements`` — a listed fund has no income
+    statement to be missing. The instrument class is what decides the model; the
+    provider's quote type is one way of learning it, not the only one.
     """
     if not isinstance(company, dict):
         return False
-    return str(company.get('quote_type') or '').strip().upper() in {'ETF', 'MUTUALFUND',
-                                                                    'EXCHANGE_TRADED_FUND'}
+    quote = str(company.get('quote_type') or '').strip().upper()
+    if quote in {'ETF', 'MUTUALFUND', 'EXCHANGE_TRADED_FUND'}:
+        return True
+    return str(company.get('instrument_class') or '').strip().lower() in {
+        'listed_fund', 'etf', 'etn'}
 
 
 def is_fund(row):
@@ -54,15 +66,25 @@ def promoted_fund_symbols(rows, limit=FUND_CANDIDATE_LIMIT):
     A fund that the instrument filter refuses on its name alone (cash or bond products,
     covered-call and weekly-pay structures, special securities) is left out of the
     ranking: promoting one could not produce a candidate, and it would take a slot from
-    a fund that could. The eighth and below are not promoted, so the existing liquidity,
-    trend, demand and market-regime gates decide the rest as before.
+    a fund that could. The price floor is read the same way — a decaying inverse fund
+    quoted at 140원 (KODEX 200선물인버스2X on 2026-11-24) is refused as ``low_price`` by
+    the entry screen before its profile is ever read, so promoting it reserved one of the
+    eight research slots for a listing that can never be planned. The eighth and below
+    are not promoted, so the existing liquidity, trend, demand and market-regime gates
+    decide the rest as before.
     """
-    from candidate_selection import instrument_rejection_reason
+    from candidate_selection import MIN_PRICE, instrument_rejection_reason
     grouped = {}
     for row in rows:
         if not is_fund(row):
             continue
         if instrument_rejection_reason(row.get('symbol'), row.get('name'), row.get('asset_type') or ''):
+            continue
+        price = (row.get('indicators') or {}).get('price')
+        floor = MIN_PRICE.get(row.get('market'))
+        if (not isinstance(price, (int, float)) or isinstance(price, bool)
+                or not math.isfinite(price) or price <= 0
+                or (floor is not None and price < floor)):
             continue
         grouped.setdefault(row.get('market'), []).append(row)
     return {market: [row['symbol'] for row in

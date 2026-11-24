@@ -96,6 +96,39 @@ class JinianceRegressionTests(unittest.TestCase):
         self.assertIn("시가 아래", text)
         self.assertIn("손절 −3%", text)
 
+    def test_a_catalyst_plan_under_a_market_headwind_says_so(self):
+        # The confirmed-disclosure track is the one path allowed past the market regime
+        # (the 지니언스 case was rejected by ``market_headwind`` as well). The plan records
+        # it and the alert states it, so a candidate under a '하락 국면' line is not a
+        # contradiction the reader has to resolve.
+        item = row()
+        evaluate_preopen(report(item), "2026-11-11", AT)
+        self.assertFalse(item["indicators"]["market_above_ma20"])
+        self.assertTrue(item["preopen_signal"]["market_regime_lifted"])
+        text = telegram_candidate_line(item)
+        self.assertIn("지수 20일선 아래", text)
+        self.assertIn("확정 공시 근거로 예외 적용", text)
+        # The execution gate is unchanged: the same line still carries the guard.
+        self.assertIn("장초반 시가 아래", text)
+
+    def test_a_plan_outside_a_headwind_does_not_claim_an_exception(self):
+        item = row()
+        item["indicators"]["market_above_ma20"] = True
+        evaluate_preopen(report(item), "2026-11-11", AT)
+        self.assertFalse(item["preopen_signal"]["market_regime_lifted"])
+        self.assertNotIn("예외 적용", telegram_candidate_line(item))
+
+    def test_an_ordinary_conditional_plan_is_still_held_by_the_headwind(self):
+        # Only a confirmed disclosure lifts it. A name with no catalyst keeps the regime
+        # refusal even when its chart is otherwise a pass.
+        item = row()
+        item["company_analysis"] = company(filings=[], financial_filing_url="")
+        item["indicators"].update(dict(price=26000.0, rebound=False, breakdown=False,
+                                       ma20=24500.0, ma60=23800.0))
+        result = evaluate_preopen(report(item), "2026-11-11", AT)
+        self.assertNotIn("preopen_signal", item)
+        self.assertNotIn("263860.KQ", result["recommendations"])
+
     def test_a_listed_fund_keeps_the_two_percent_stop_on_the_same_track(self):
         from preopen_signals import catalyst_plan
         item = row(asset_type="etf")
