@@ -205,17 +205,19 @@ def quote_line(quote, market=None):
 def _rewrite_limitations(report, summary):
     """Say what actually happened with quotes instead of a fixed '미포함' line."""
     limitations = [row for row in report.get("limitations") or []
-                   if not (isinstance(row, str) and ("실시간 호가" in row or "일봉 기준" in row))]
+                   if not (isinstance(row, str) and ("실시간 호가" in row or "일봉 기준" in row
+                                                    or "일봉 기반" in row or "VWAP" in row))]
     if summary.get("observed"):
         limitations.append(f"후보 {summary['observed']}종목의 현재 호가는 KIS REST로 조회했고, "
-                           "지표·점수·판정은 완료된 거래일 일봉 종가 기준")
+                           "지표·점수·판정은 완료된 거래일 일봉 종가 기준이며 실시간 매수 확정은 아님")
     elif summary.get("market_closed"):
         limitations.append("장 마감(또는 휴장)으로 현재 호가는 조회하지 않았고, "
-                           "지표·점수·판정은 완료된 거래일 일봉 종가 기준")
+                           "지표·점수·판정은 완료된 거래일 일봉 종가 기준이며 실시간 매수 확정은 아님")
     elif summary.get("credentials_missing"):
         limitations.append("KIS 자격증명이 없어 현재 호가는 조회하지 않았고, "
-                           "지표·점수·판정은 완료된 거래일 일봉 종가 기준")
+                           "지표·점수·판정은 완료된 거래일 일봉 종가 기준이며 실시간 매수 확정은 아님")
     else:
-        limitations.append("현재 호가를 확인하지 못했고, 지표·점수·판정은 완료된 거래일 일봉 종가 기준")
+        limitations.append("현재 호가를 확인하지 못했고, 지표·점수·판정은 완료된 거래일 일봉 종가 "
+                           "기준이며 실시간 매수 확정은 아님")
     limitations.append("실시간 VWAP 미구현")
     report["limitations"] = limitations
