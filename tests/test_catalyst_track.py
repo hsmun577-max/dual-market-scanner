@@ -76,8 +76,10 @@ class JinianceRegressionTests(unittest.TestCase):
         self.assertEqual(signal["catalyst"]["kind"], "earnings_surprise")
         self.assertIn("253", signal["catalyst"]["summary"])
         self.assertEqual(signal["catalyst"]["observed_at"], "2026-11-12T08:05:00+09:00")
-        # The owner's sell policy travels with the track unchanged.
-        self.assertEqual(signal["stop_pct"], 0.02)
+        # The owner's sell policy travels with the track: 지니언스 is a single stock, so the
+        # split stop gives it −3% (a fund would keep −2%).
+        self.assertEqual(signal["stop_pct"], 0.03)
+        self.assertEqual(signal["asset_class"], "stock")
         self.assertEqual(signal["take_profit_pct"], 0.06)
         self.assertEqual(signal["take_profit_mode"], "surge_trailing")
         # The entry is a prior-close band: no gap-up chase.
@@ -92,7 +94,16 @@ class JinianceRegressionTests(unittest.TestCase):
         self.assertIn("근거", text)
         self.assertIn("253", text)
         self.assertIn("시가 아래", text)
-        self.assertIn("손절 −2%", text)
+        self.assertIn("손절 −3%", text)
+
+    def test_a_listed_fund_keeps_the_two_percent_stop_on_the_same_track(self):
+        from preopen_signals import catalyst_plan
+        item = row(asset_type="etf")
+        status, plan = catalyst_plan(item, item["company_forecast"], dict(eligible=True),
+                                     AT, "2026-11-11", "2026-11-12", 51.5, "earnings_catalyst")
+        self.assertEqual(status, "conditional_buy")
+        self.assertEqual((plan["asset_class"], plan["stop_pct"]), ("fund", 0.02))
+        self.assertEqual(plan["exit_policy"]["stop_pct"], 0.02)
 
     def test_a_plan_without_an_atr_band_still_shows_the_single_entry_price(self):
         item = row()

@@ -11,9 +11,11 @@ Two exit modes are measured side by side:
 
 * ``fixed`` — the legacy comparison: +2% target, a 30-minute forced close, and
   the support stop when a strategy asks for one.
-* ``policy`` — the actual sell rule (``exit_policy.ExitPolicy``): −2% stop,
-  +6% default take profit that is held through a short-term surge, then closed
-  at the price seen when volume collapses and price rolls over from the peak.
+* ``policy`` — the actual sell rule (``exit_policy.ExitPolicy``): the instrument's stop
+  (−2% on a fund, −3% on a single stock), +6% default take profit that is held through a
+  short-term surge, then closed at the price seen when volume collapses and price rolls
+  over from the peak. A sample row carries no instrument class, so the comparison runs on
+  the fund policy unless a caller passes ``policy=exit_policy_for(row)``.
   A position still open at the quote horizon is reported as
   ``held_past_horizon`` with its mark-to-market, not forced closed.
 """

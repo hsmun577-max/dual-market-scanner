@@ -19,7 +19,8 @@ from telegram_text import split_telegram_text
 from research_asset import is_fund
 from company_forecast import build_company_forecast
 from delivery_policy import delivery_status
-from exit_policy import DEFAULT_EXIT_POLICY, policy_snapshot
+from exit_policy import (DEFAULT_EXIT_POLICY, FUND_STOP_PCT, STOCK_STOP_PCT,
+                         exit_policy_for, policy_snapshot)
 import yfinance as yf
 
 KR_SYMBOL_NAMES = {
@@ -554,16 +555,22 @@ def classify_signal(indicators, inverse=False):
         "direction": direction
     }
 
-def build_risk_plan(price, stop_pct=DEFAULT_EXIT_POLICY.stop_pct,
-                    target_pct=DEFAULT_EXIT_POLICY.take_profit_pct,
+def build_risk_plan(price, stop_pct=None,
+                    target_pct=None,
                     risk_budget=30000,
-                    policy=DEFAULT_EXIT_POLICY):
-    """Sell levels of the current policy: −2% stop, +6% take profit, surge hold.
+                    policy=None):
+    """Sell levels of the instrument's policy: −2% stop on a fund, −3% on a stock.
 
-    ``target_price`` is the default +6% level, not a hard sell when a
-    short-term surge carried the price through it: ``exit_policy`` carries the
-    trailing parameters used by ``exit_policy.ExitTracker``.
+    ``policy`` is the row's own policy (``exit_policy.exit_policy_for(row)``); without it
+    the fund policy applies. ``stop_pct`` and ``target_pct`` default to that policy, so the
+    stop price, the quantity the risk budget buys and the reward-to-risk ratio all follow
+    the same number. ``target_price`` is the default +6% level, not a hard sell when a
+    short-term surge carried the price through it: ``exit_policy`` carries the trailing
+    parameters used by ``exit_policy.ExitTracker``.
     """
+    policy = policy or DEFAULT_EXIT_POLICY
+    stop_pct = policy.stop_pct if stop_pct is None else stop_pct
+    target_pct = policy.take_profit_pct if target_pct is None else target_pct
     stop_price = price * (1 - stop_pct)
     target_price = price * (1 + target_pct)
 
@@ -579,6 +586,8 @@ def build_risk_plan(price, stop_pct=DEFAULT_EXIT_POLICY.stop_pct,
         "stop_price": safe_float(stop_price),
         "target_price": safe_float(target_price),
         "stop_pct": safe_float(stop_pct),
+        "asset_class": ("fund" if policy.stop_pct == FUND_STOP_PCT else
+                        "stock" if policy.stop_pct == STOCK_STOP_PCT else None),
         "take_profit_pct": safe_float(target_pct),
         "quantity_risk_only": quantity,
         "risk_reward_ratio": safe_float(
@@ -636,9 +645,6 @@ def scan_market(market, tickers, benchmark, names=None, prices=None):
                 ),
                 "indicators": indicators,
                 "signal": signal,
-                "risk_plan": build_risk_plan(
-                    indicators["price"]
-                ),
                 "data_checked_at": datetime.now(
                     timezone.utc
                 ).isoformat(),
@@ -650,6 +656,9 @@ def scan_market(market, tickers, benchmark, names=None, prices=None):
                                         "reason": "issuer_not_read_in_screen"}
             }
 
+            result["risk_plan"] = build_risk_plan(
+                indicators["price"], policy=exit_policy_for(result)
+            )
             result["selection_filter"] = candidate_rejection_reason(result, market) or "eligible"
             results.append(result)
             if prices is None:
@@ -992,7 +1001,9 @@ def telegram_candidate_line(item):
     symbol = item["symbol"]
     overseas = item["market"] == "US"
     name = item.get("name") or symbol
-    kind = " · ETF" if is_fund(item) else ""
+    # The alert names the stop of this instrument, not of the default policy.
+    exit_policy = exit_policy_for(item)
+    kind = " · ETF" if exit_policy.stop_pct == FUND_STOP_PCT else ""
     code = symbol if overseas else symbol.split(".")[0]
     entry_label = "$" + f"{entry:,.2f}" if overseas else f"{entry:,.0f}원"
     target, upside = forecast["base_price"], forecast["bull_price"]
@@ -1021,8 +1032,8 @@ def telegram_candidate_line(item):
         return (f"• {name} ({code}) · {heading} · 종합 {score:.1f}/100{basis_line}\n"
                 f"  매수 구간 {entry_zone} · 눌림 구간 진입 시\n"
                 f"  기준 종가 {preopen['reference_date']} · 상승 시나리오 목표 {upper_label}\n"
-                f"  손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
-                f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
+                f"  손절 −{exit_policy.stop_pct:.0%} · 기본 익절 +{exit_policy.take_profit_pct:.0%} · "
+                f"단기 급등 시 {exit_policy.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
                 "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"
                 f"{guard}" + caveat_note(item))
     basis = f" · {preopen['reference_date']} 종가 기준" if conditional else ''
@@ -1030,8 +1041,8 @@ def telegram_candidate_line(item):
     return (f"• {name} ({code}) · {label}{kind} · 종합 {score:.1f}/100\n"
             f"  매수 상한 {entry_label}{basis}\n"
             f"  5거래일 분석 목표 · 기준/상승 {target_label}\n"
-            f"  손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
-            f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
+            f"  손절 −{exit_policy.stop_pct:.0%} · 기본 익절 +{exit_policy.take_profit_pct:.0%} · "
+            f"단기 급등 시 {exit_policy.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
             "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)" + caveat)
 
 

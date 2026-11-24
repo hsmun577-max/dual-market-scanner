@@ -16,7 +16,9 @@ class TradableSignalTests(unittest.TestCase):
     def test_complete_contract_has_entry_targets_expiry_and_fixed_risk(self):
         r,q=fixture();s=validate_entry(r,q,AT,True)
         self.assertTrue(s['trade_ready']);self.assertFalse(s['filled'])
-        self.assertEqual(s['stop_price'],9800);self.assertEqual(s['take_profit_price'],10600)
+        # A single stock is stopped at −3% since the 2026-11-24 instrument split.
+        self.assertEqual(s['stop_price'],9700);self.assertEqual(s['take_profit_price'],10600)
+        self.assertEqual(s['stop_pct'],0.03);self.assertEqual(s['asset_class'],'stock')
         self.assertEqual(s['valid_until'],(AT+timedelta(seconds=30)).isoformat())
 
     def test_unavailable_stale_future_and_previous_day_quotes_cannot_be_signals(self):
@@ -70,8 +72,23 @@ class TradableSignalTests(unittest.TestCase):
         r['company_forecast'].update(base_price=21000,bull_price=22000)
         q.update(ask=19950,bid=19940)
         signal=validate_entry(r,q,AT,True)
-        self.assertEqual(signal['stop_price'],19560)
+        self.assertEqual(signal['stop_price'],19360)
         self.assertEqual(signal['take_profit_price'],21150)
+
+    def test_a_fund_keeps_the_two_percent_stop_and_a_stock_gets_three(self):
+        for fund in (dict(asset_type='etf'),dict(name='KODEX 200'),
+                     dict(name='SPDR S&P 500 ETF'),
+                     dict(company_analysis=dict(quote_type='ETF'))):
+            r,q=fixture();r.update(fund);signal=validate_entry(r,q,AT,True)
+            self.assertTrue(signal['trade_ready'])
+            self.assertEqual((signal['asset_class'],signal['stop_pct']),('fund',0.02))
+            self.assertEqual(signal['stop_price'],9800)
+
+    def test_the_report_names_the_stop_of_each_instrument(self):
+        r,q=fixture();s=validate_entry(r,q,AT,True)
+        self.assertIn('손절 −3%·익절 +6%',format_requested_report([],[s],dict(completed=True),AT))
+        r,q=fixture();r['asset_type']='etf';s=validate_entry(r,q,AT,True)
+        self.assertIn('손절 −2%·익절 +6%',format_requested_report([],[s],dict(completed=True),AT))
 
     def test_execution_check_preserves_verified_catalyst_policy(self):
         r,q=fixture();r['preopen_signal'].update(strategy='event_catalyst',entry_floor=9900)

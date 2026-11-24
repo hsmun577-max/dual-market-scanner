@@ -1,4 +1,5 @@
-"""Sell rules: −2% stop, +6% default take profit, and a surge trailing hold.
+"""Sell rules: a split stop (−2% on a fund, −3% on a single stock), +6% default take
+profit, and a surge trailing hold.
 
 The owner's rule, in their words:
 
@@ -6,10 +7,19 @@ The owner's rule, in their words:
   팔지 말고 기다린다. 그러다 거래량이 확 빠지면서 고점에서 급락하는 신호가
   나오면, 급락하기 전 가격에 팔아 버린다.
 
+  손절은 이분화로 반영해 (2026-11-24)
+
+The stop is split by the instrument, as the two-month validation found: a listed fund
+(ETF/ETN) is stopped at −2% and a single stock at −3%. The +6% take profit and the surge
+trailing hold are the same for both, so the reward-to-risk ratio follows the stop — 3.0
+on a fund, 2.0 on a stock. ``exit_policy_for(row)`` reads the instrument class off the
+row (the scan's own class, the provider's ``quote_type``, or the listing name), so every
+plan, alert and sell decision of that row carries the stop that belongs to it.
+
 So a position has two modes:
 
 * ``fixed`` — the default. Take profit at +6% (a resting +6% limit sell), stop
-  at −2%.
+  at the instrument's own level (−2% fund / −3% stock).
 * ``trailing`` — entered only when the +6% level was crossed by a short-term
   surge (within ``surge_window`` of entry and on expanded volume). While in this
   mode the +6% target is not sold into; instead the position keeps riding, and
@@ -28,8 +38,16 @@ decisions are marked in the returned dict so a replay can report them.
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import math
+import re
 
-DEFAULT_STOP_PCT = 0.02
+from research_asset import is_fund, is_fund_company
+
+# The owner's decision of 2026-11-24: "손절은 이분화로 반영해". The stop is the only
+# number that changes with the instrument; the +6% take profit and the trailing hold are
+# shared, so the ratio is 6/2 = 3.0 on a fund and 6/3 = 2.0 on a single stock.
+FUND_STOP_PCT = 0.02
+STOCK_STOP_PCT = 0.03
+DEFAULT_STOP_PCT = FUND_STOP_PCT
 DEFAULT_TAKE_PROFIT_PCT = 0.06
 DEFAULT_SURGE_WINDOW = timedelta(minutes=30)
 DEFAULT_SURGE_VOLUME_RATIO = 1.5
@@ -93,6 +111,55 @@ class ExitPolicy:
 
 
 DEFAULT_EXIT_POLICY = ExitPolicy()
+# The two instrument policies. ``DEFAULT_EXIT_POLICY`` stays the fund one for the callers
+# that hold no instrument (an archived replay), never as a substitute for a known row.
+FUND_EXIT_POLICY = ExitPolicy(stop_pct=FUND_STOP_PCT)
+STOCK_EXIT_POLICY = ExitPolicy(stop_pct=STOCK_STOP_PCT)
+ASSET_CLASS_POLICIES = {"fund": FUND_EXIT_POLICY, "stock": STOCK_EXIT_POLICY}
+
+# A fund is known from the scan's explicit class, the provider's quote_type, or the name.
+FUND_ASSET_TYPES = frozenset({"etf", "etn", "fund", "inverse_etf", "leveraged_etf"})
+# A US listing's English name says so where no Korean brand prefix exists ("SPY" is
+# "SPDR S&P 500 ETF" in the provider's master); the profile's quote_type then confirms it.
+FUND_NAME_TOKEN = re.compile(r"\bETF\b|\bETN\b|\bEXCHANGE[- ]TRADED\b|인버스|레버리지", re.I)
+
+
+def classify_asset(row):
+    """``('fund' | 'stock', evidence)`` for the instrument a row describes.
+
+    Evidence is read in order of how directly it names the instrument: the class the scan
+    recorded (``asset_type``), the provider's own ``quote_type`` on the issuer profile,
+    then the listing name (a Korean fund brand such as KODEX/TIGER, or an ETF/ETN token).
+    A row that carries none of them is read as a single stock: the wider −3% stop is the
+    one that cannot end a position the tighter rule would have held.
+    """
+    row = row or {}
+    kind = str(row.get("asset_type") or "").strip().lower()
+    if kind in FUND_ASSET_TYPES:
+        return "fund", "asset_type"
+    if is_fund_company(row.get("company_analysis")):
+        return "fund", "quote_type"
+    name = str(row.get("name") or "")
+    if is_fund(row) or FUND_NAME_TOKEN.search(name):
+        return "fund", "listing_name"
+    return "stock", "unclassified"
+
+
+def exit_policy_for(row):
+    """The sell policy of the row's own instrument (fund −2%, single stock −3%)."""
+    return ASSET_CLASS_POLICIES[classify_asset(row)[0]]
+
+
+def stop_basis(row):
+    """The stop a plan applied, and what made the instrument a fund or a stock.
+
+    Carried on every plan beside ``stop_pct`` so a later reader can tell which of the two
+    rules priced the position and why the instrument counted as a fund.
+    """
+    asset_class, evidence = classify_asset(row)
+    policy = ASSET_CLASS_POLICIES[asset_class]
+    return dict(asset_class=asset_class, stop_pct=policy.stop_pct,
+                stop_pct_label=f"−{policy.stop_pct:.0%}", stop_evidence=evidence)
 
 
 def policy_snapshot(policy=DEFAULT_EXIT_POLICY):
@@ -106,7 +173,8 @@ class ExitTracker:
     ``exit``. ``exit`` carries ``exit_price`` (the price the rule sells at) and
     a ``reason``:
 
-    * ``stop_loss`` — bid fell to the −2% stop; filled at the observed price.
+    * ``stop_loss`` — bid fell to the policy's stop (−2% on a fund, −3% on a stock);
+      filled at the observed price.
     * ``take_profit`` — slow rise to +6%; a resting +6% limit fills at +6%.
     * ``surge_trailing_exit`` — collapse signal after a surge; filled at the
       price observed at the signal, which is the price before the plunge.
