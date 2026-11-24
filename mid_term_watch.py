@@ -25,6 +25,14 @@ the momentum buy path keeps its own 50억 floor untouched. And the hold is 20~60
 with a −15% stop, so **nothing here is a same-day buy signal**: entries carry
 ``entry_signal: False`` and live in their own report field (``mid_term_watch``) and their
 own message section, never in ``recommendations`` or ``preopen_signal``.
+
+The chart condition alone is not enough to be worth a 20~60 session hold. The 2026-11-24
+scan put ``상지건설(042940)`` on the list while it carried a third-quarter operating loss
+and an 82억 rights offering, so the owner asked for a fundamentals screen and a one-line
+reason per name: "적자·유증 종목은 제외하고, 종목마다 최근 실적·재료 1줄 요약이 같이
+뜨도록". :mod:`mid_term_evidence` supplies both; the screen runs only for the pinned
+candidates (the pool is 30~50 rows, not the universe) and a provider failure keeps a name
+in the list as ``unverified`` rather than dropping it.
 """
 
 import math
@@ -95,10 +103,10 @@ def reason(item, market="KR"):
     return None
 
 
-def entry(item, at=None):
+def entry(item, at=None, evidence=None):
     """The observation record for a qualifying row (never an entry signal)."""
     values = item.get("indicators") or {}
-    return {
+    record = {
         "market": item.get("market") or "KR",
         "symbol": item.get("symbol"),
         "name": item.get("name"),
@@ -115,17 +123,36 @@ def entry(item, at=None):
         "reference": REFERENCE,
         "observed_at": at.isoformat() if at is not None else None,
     }
+    if evidence is not None:
+        import mid_term_evidence
+        record["catalyst_summary"] = mid_term_evidence.summary(evidence, at)
+        record["financial"] = evidence.get("financial")
+        record["recent_material"] = mid_term_evidence.material(
+            evidence, at, financial=evidence.get("financial"))
+        record["evidence_status"] = {
+            "status": evidence.get("status"),
+            "financial": evidence.get("financial_status"),
+            "filings": evidence.get("filing_status"),
+            "news": evidence.get("news_status"),
+            "verified": evidence.get("verified"),
+        }
+    return record
 
 
-def attach(report, at=None, limit=DEFAULT_LIMIT):
+def attach(report, at=None, limit=DEFAULT_LIMIT, evidence=None):
     """Build ``report['mid_term_watch']`` from the rows the scan already holds.
 
-    Every scanned row carries its own price, volume and relative strength, so this list
-    needs no company analysis and touches neither ``preopen_signal`` nor
+    Every scanned row carries its own price, volume and relative strength, so the chart
+    condition needs no company analysis and touches neither ``preopen_signal`` nor
     ``buy_evaluation``. Rows excluded on the way are counted by reason so a short list is
     not a silent one.
+
+    ``evidence`` is the fundamentals reader (:func:`mid_term_evidence.collect` in the scan).
+    When it is supplied, the strongest candidates are screened for a recent operating/net
+    loss and for a rights offering before the list is cut to ``limit``, and each kept entry
+    carries its ``catalyst_summary`` line. Without it — as in the unit tests and in any
+    offline replay — the list is exactly the chart result it was before.
     """
-    entries = []
     counts = {}
     pool = []
     from research_asset import is_fund
@@ -142,16 +169,36 @@ def attach(report, at=None, limit=DEFAULT_LIMIT):
         pool.append(item)
     pool.sort(key=lambda item: (-(_number((item.get("indicators") or {}).get("relative_strength"))
                                   or 0), item.get("symbol") or ""))
-    entries = [entry(item, at) for item in pool[:max(0, limit)]]
+    screen = None
+    if evidence is not None and pool:
+        import mid_term_evidence
+        screen = mid_term_evidence.screen(pool, at, evidence)
+        for rejected, count in screen["excluded"].items():
+            counts[rejected] = counts.get(rejected, 0) + count
+        chosen = [(row["item"], row["evidence"]) for row in screen["kept"]]
+    else:
+        chosen = [(item, None) for item in pool]
+    entries = [entry(item, at, evidence) for item, evidence in chosen[:max(0, limit)]]
     report["mid_term_watch"] = entries
-    report["mid_term_watch_scope"] = dict(
+    scope = dict(
         evaluated=len(report.get("results") or []),
-        qualified=len(pool), listed=len(entries),
+        qualified=len(pool),
+        listed=len(entries),
         turnover_band=[MIN_TURNOVER, MAX_TURNOVER],
         conditions=dict(max_return_20d=MIN_RETURN_20D, max_rsi=MAX_RSI,
                         min_relative_strength=MIN_RELATIVE_STRENGTH),
         hold_sessions=list(HOLD_SESSIONS), stop_pct=STOP_PCT,
         entry_signal=False, excluded=counts)
+    if screen is not None:
+        # How many of the listed names were checked against real earnings, how many went in
+        # unverified, and what the fundamentals screen threw out.
+        scope["fundamentals_screen"] = dict(
+            screened=screen["screened"],
+            excluded=screen["excluded"],
+            unverified=screen["unverified"],
+            rules=["operating_or_net_loss", "recent_rights_offering"],
+            window_days=mid_term_evidence.LOOKBACK_DAYS)
+    report["mid_term_watch_scope"] = scope
     if at is not None:
         report["mid_term_watch_at"] = at.isoformat()
     return entries
@@ -179,7 +226,13 @@ def line(entry_row):
     head = f"• {name} ({code})"
     if numbers:
         head += " · " + " · ".join(numbers)
-    return "\n".join([head, "  20~60일 보유 · -15% 손절 전제 · 매수 신호 아님"])
+    lines = [head]
+    if "catalyst_summary" in entry_row:
+        # Every listed name carries the line, including the ones no filing or article was
+        # found for, so the shape of the section never changes with the news day.
+        lines.append("   재료: " + (entry_row.get("catalyst_summary") or "최근 공시·뉴스 없음"))
+    lines.append("  20~60일 보유 · -15% 손절 전제 · 매수 신호 아님")
+    return "\n".join(lines)
 
 
 def format_block(entries):
