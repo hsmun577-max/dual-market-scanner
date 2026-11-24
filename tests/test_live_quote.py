@@ -95,7 +95,10 @@ class AttachTests(unittest.TestCase):
         summary = live_quote.attach(report, CLOSED_AT, client=object())
         self.assertEqual(summary["market_closed"], 1)
         self.assertEqual(report["results"][0]["live_quote"]["status"], "market_closed")
-        self.assertIn("장 마감(또는 휴장)으로 현재 호가는 조회하지 않았고", "\n".join(report["limitations"]))
+        text = "\n".join(report["limitations"])
+        self.assertIn("장 마감(또는 휴장)으로 현재 호가는 조회하지 않았고", text)
+        self.assertIn("실시간 매수 확정은 아님", text)
+        self.assertEqual(text.count("VWAP"), 1)
 
     def test_the_call_count_is_bounded_per_market(self):
         rows = [plan_row(symbol=f"{100000 + index}.KS", name=f"종목{index}") for index in range(20)]
