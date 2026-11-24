@@ -70,6 +70,9 @@ def main():
     session_open=cal.session_open(args.session).to_pydatetime()<=sent_at<cal.session_close(args.session).to_pydatetime()
     entries=[validate_entry(row,quotes.get(row['symbol']),sent_at,session_open) for row in recommendations[:5]]
     from theme_sectors import format_theme_block, theme_sector_snapshot
+    # 간밤 미국 세부 테마는 자기 시장(한국) 스냅샷으로 덮어쓰기 전에 붙잡아 둔다.
+    overnight_us_themes=[row for row in report.get('theme_sectors') or []
+                         if isinstance(row,dict) and str(row.get('market') or '').upper().startswith('US')]
     theme=theme_sector_snapshot('KR',datetime.now(KST))
     report['theme_sectors']=[theme]
     sector_lines=(format_report(industry).splitlines() if industry.get('rows') else ['오늘의 주요 섹터','확인 불가'])
@@ -84,12 +87,21 @@ def main():
         if block:message='\n'.join([message,'',*block])
     except Exception as exc:
         print('Urgent issue check unavailable: '+type(exc).__name__,flush=True)
+    # 요청 장전 리포트에도 국내 핵심 대표주의 NXT 장전 움직임·촉매·간밤 미국 연동을 붙인다.
+    kr_premarket=dict(items=[])
+    try:
+        import kr_premarket as kr_module
+        kr_premarket=kr_module.attach(report,datetime.now(timezone.utc),us_rows=overnight_us_themes)
+        block=kr_module.format_block(kr_premarket.get('items'),kr_premarket.get('session'))
+        if block:message='\n'.join([message,'',*block])
+    except Exception as exc:
+        print('Domestic premarket watch unavailable: '+type(exc).__name__,flush=True)
     audit=dict(session=args.session,generated_at=sent_at.isoformat(),strategy_commit=os.getenv('GITHUB_SHA'),
         explicit_manual_request=True,scheduled_delivery_guards_unchanged=True,
         evaluation=evaluation,entry_checks=entries,trade_ready_count=sum(e['trade_ready'] for e in entries),
         complete_forecasts=sum(r.get('company_forecast',{}).get('assessment_status')=='complete' for r in report['results']),
         research_scope=report.get('research_scope'),
-        urgent_issues=urgent,
+        urgent_issues=urgent,kr_premarket_watch=kr_premarket,
         industry_rows=len(industry.get('rows',[])),industry_error=industry.get('error'),
         recommendations=[dict(symbol=r['symbol'],name=r.get('name'),
             score=r['company_forecast']['composite_score'],plan=r['preopen_signal'],quote=quotes.get(r['symbol'])) for r in recommendations],

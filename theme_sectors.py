@@ -16,11 +16,17 @@
 각 상위 테마에는 대표 상승주 2~3개와 그 등락률, 그리고 기존 뉴스 수집기
 (`issuer_news.issuer_news_result` - 국내 종목 뉴스, `yfinance` - 미국 종목 뉴스)에서 가져온
 당일 헤드라인 한 줄을 붙인다. 뉴스가 없으면 수급·상승 요약으로 대체하며 이유를 지어내지 않는다.
+
+집계에 넣기 전에 시세 자체를 검사한다(`price_sanity`). PARA +9,614%처럼 하루 등락이 가격제한을
+넘는 값은 티커가 바뀐 종목의 가격이 섞인 데이터 오류라서, 그 행을 빼지 않으면 테마 등락률·
+대표주·상승 비율이 전부 오염된다. 뺀 행은 `excluded`에 사유와 함께 남긴다.
 """
 
 import re
 from datetime import datetime, time, timedelta, timezone
 from html import unescape
+
+import price_sanity
 
 # 테마 구성종목은 상장 종목코드(한국)와 티커(미국)로 고정한다. 이름은 종목 뉴스 수집기의
 # 엔티티 매칭에 그대로 쓰이므로 상장명과 같아야 한다.
@@ -187,11 +193,14 @@ NEWS_LOOKUPS_PER_THEME = 2
 _HEADLINE_CACHE = {}
 
 
-def member_metric(frame, today=None):
+def member_metric(frame, today=None, market=None):
     """구성종목 하나의 마지막 봉 등락률·거래량 배수·거래대금 배수를 계산한다.
 
     마지막 봉이 `today`와 같은 날이면 장중 미완성 봉이며 `intraday=True`로 표시한다.
     값이 모자라면(기준 20일 미만) ValueError로 알리고 테마 집계에서 뺀다.
+
+    등락이 가격제한을 넘거나 종가가 극저가면 `price_sanity.PriceError`로 알린다. `market`을
+    주지 않으면 시장별 가격제한·최저가 검사 없이 150% 상한만 본다(시장을 모르는 호출부).
     """
     if frame is None:
         raise ValueError("구성종목 시세 없음")
@@ -206,13 +215,20 @@ def member_metric(frame, today=None):
     previous = float(close.iloc[-2])
     if previous <= 0:
         raise ValueError("직전 종가 0")
+    last = float(close.iloc[-1])
+    return_pct = round((last / previous - 1) * 100, 2)
+    reason = price_sanity.rejection_reason(market if market else "US", return_pct,
+                                           last if market else None)
+    if reason:
+        raise price_sanity.PriceError(reason)
     last_date = data.index[-1]
     data_date = (last_date.date() if hasattr(last_date, "date") else last_date).isoformat()
     baseline_volume = float(volume.iloc[-21:-1].mean())
     turnover = close * volume
     baseline_turnover = float(turnover.iloc[-21:-1].mean())
     return {
-        "return_pct": round((float(close.iloc[-1]) / previous - 1) * 100, 2),
+        "return_pct": return_pct,
+        "price": round(last, 4),
         "volume_ratio": round(float(volume.iloc[-1]) / baseline_volume, 2) if baseline_volume > 0 else None,
         "turnover": float(turnover.iloc[-1]),
         "turnover_ratio": round(float(turnover.iloc[-1]) / baseline_turnover, 2) if baseline_turnover > 0 else None,
@@ -232,11 +248,24 @@ def _frame(prices, symbol):
 
 
 def theme_rows(market, themes, metrics, benchmark_return_pct=None):
-    """테마별 집계. 등락률은 구성종목 동일가중, 거래대금 배수는 금액가중(합계/합계기준)이다."""
+    """테마별 집계. 등락률은 구성종목 동일가중, 거래대금 배수는 금액가중(합계/합계기준)이다.
+
+    `metrics`를 직접 만들어 넘기는 호출부(과거 리포트 재계산 등)도 있으므로 시세 오류 행은
+    여기서 한 번 더 거른다. 뺀 종목 수는 `excluded`로 남겨 조용히 사라지지 않게 한다.
+    """
     rows = []
     for name, members in themes:
         aliases = {member[0]: (member[2] if len(member) > 2 else None) for member in members}
-        present = [(symbol, label, metrics[symbol]) for symbol, label, *_ in members if symbol in metrics]
+        present = []
+        excluded = 0
+        for symbol, label, *_ in members:
+            metric = metrics.get(symbol)
+            if metric is None:
+                continue
+            if price_sanity.rejection_reason(market, metric.get("return_pct"), metric.get("price")):
+                excluded += 1
+                continue
+            present.append((symbol, label, metric))
         if not present:
             continue
         returns = [metric["return_pct"] for _, _, metric in present]
@@ -256,6 +285,7 @@ def theme_rows(market, themes, metrics, benchmark_return_pct=None):
             "market_excess_pct": None if excess is None else round(excess, 2),
             "benchmark_return_pct": benchmark_return_pct,
             "up": up, "total": len(present), "declared": len(members),
+            "excluded": excluded,
             "breadth_pct": round(100 * up / len(present), 1),
             "turnover": turnover or None,
             "turnover_ratio": None if ratio is None else round(ratio, 2),
@@ -403,7 +433,7 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
     snapshot = dict(market=market, benchmark=benchmark, benchmark_return_pct=None,
                     data_date=None, intraday=False, rows=[], quoted=0,
                     members=len(set(symbols)), source="theme_member_daily_aggregate",
-                    error=None, checked_at=now.isoformat())
+                    excluded=[], error=None, checked_at=now.isoformat())
     try:
         prices = _download(list(dict.fromkeys([*symbols, benchmark])), market, downloader)
     except Exception as exc:  # 테마 집계 실패가 알림 자체를 막지 않는다
@@ -416,13 +446,19 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
     metrics = {}
     for symbol in dict.fromkeys(symbols):
         try:
-            metric = member_metric(_frame(prices, symbol), today)
+            metric = member_metric(_frame(prices, symbol), today, market)
+        except price_sanity.PriceError as exc:
+            # 티커 혼동·액면병합·극저가: 테마 등락률·대표주·상승 비율에 넣지 않는다.
+            snapshot["excluded"].append(dict(symbol=symbol, reason=exc.reason,
+                                             label=price_sanity.REASON_LABELS.get(exc.reason)))
+            print(f"{market} theme price error excluded: {symbol} ({exc.reason})", flush=True)
+            continue
         except (ValueError, TypeError, KeyError):
             continue
         metrics[symbol] = metric
     snapshot["quoted"] = len(metrics)
     try:
-        snapshot["benchmark_return_pct"] = member_metric(_frame(prices, benchmark), today)["return_pct"]
+        snapshot["benchmark_return_pct"] = member_metric(_frame(prices, benchmark), today, market)["return_pct"]
     except (ValueError, TypeError, KeyError):
         snapshot["benchmark_return_pct"] = None
     ranked = rank_theme_sectors(theme_rows(market, themes, metrics, snapshot["benchmark_return_pct"]), limit)

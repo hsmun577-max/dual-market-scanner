@@ -34,6 +34,10 @@ def main():
     import scanner
     local=datetime.now(ZoneInfo('America/New_York' if market=='US' else 'Asia/Seoul'))
     report['sectors']=scanner.sector_flow_snapshot(market,local)
+    # 직전 전 종목 스캔이 계산해 둔 미국 세부 테마(간밤 미국장)는 아래에서 자기 시장 것만
+    # 다시 만들기 전에 붙잡아 둔다. 국내 장전 블록의 '미국 연동' 맥락이 이 값이다.
+    overnight_us_themes=[row for row in report.get('theme_sectors') or []
+                         if isinstance(row,dict) and str(row.get('market') or '').upper().startswith('US')]
     try:
         from theme_sectors import theme_sector_snapshot
         report['theme_sectors']=[theme_sector_snapshot(market,local)]
@@ -58,6 +62,20 @@ def main():
         except Exception as exc:  # 장전 감시 실패가 장전 알림 자체를 막지 않는다
             report['premarket_watch']=dict(items=[],error=type(exc).__name__)
             print('Premarket watch unavailable: '+type(exc).__name__,flush=True)
+    else:
+        # 국내 장전 사전 시그널: NXT 장전(08:00~09:00)·시간외 시세와 촉매·간밤 미국 연동을
+        # 매수 판정과 분리해 미리 만든다. NXT 단계(07:50 발송)는 개장 전이라 시세가 없고,
+        # KRX 단계(08:50 발송)는 08:00부터 쌓인 NXT 체결가를 본다.
+        try:
+            from kr_premarket import attach as attach_kr_premarket
+            kr_watch=attach_kr_premarket(report,datetime.now(timezone.utc),us_rows=overnight_us_themes)
+            print('KR_PREMARKET_WATCH='+json.dumps(dict(
+                items=len(kr_watch.get('items') or []),session=kr_watch.get('session'),
+                quotes_seen=kr_watch.get('quotes_seen'),news_seen=kr_watch.get('news_seen'),
+                rejected=kr_watch.get('rejected'),error=kr_watch.get('error')),ensure_ascii=False),flush=True)
+        except Exception as exc:  # 장전 감시 실패가 장전 알림 자체를 막지 않는다
+            report['kr_premarket_watch']=dict(items=[],error=type(exc).__name__)
+            print('Domestic premarket watch unavailable: '+type(exc).__name__,flush=True)
     dump('preopen-analysis.json',report)
     print('PREOPEN_BUY_EVALUATION='+json.dumps(report['buy_evaluation'],ensure_ascii=False),flush=True)
     if market=='KR':
@@ -85,6 +103,7 @@ def main():
                 suppressed_by_gate=bool(delivery.get('suppressed_by_gate')),
                 reason=delivery.get('reason') or reason,
                 premarket_signals=len((report.get('premarket_watch') or {}).get('items') or []),
+                kr_premarket_signals=len((report.get('kr_premarket_watch') or {}).get('items') or []),
                 urgent_issues=sum(len(rows) for rows in (report.get('urgent_issues') or {}).values()))
     dump('preopen-delivery.json',result)
     print('PREOPEN_DELIVERY='+json.dumps(result,ensure_ascii=False),flush=True)

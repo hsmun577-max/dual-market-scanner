@@ -215,11 +215,12 @@ class SnapshotTests(unittest.TestCase):
 
     def test_real_member_frames_flow_into_a_ranked_theme(self):
         robots = dict(THEME_UNIVERSE['KR'])['휴머노이드·로봇·액추에이터']
+        # 한국 종목은 원 단위다. 1,000원 미만 종가는 가격 오류로 걸러지므로 실제 눈금으로 둔다.
         rendered = {
-            robots[0][0]: frame([100.0] * 21 + [130.0], [100.0] * 21 + [400.0]),
-            robots[1][0]: frame([100.0] * 21 + [105.0]),
-            robots[2][0]: frame([100.0] * 21 + [98.0]),
-            '^KS11': frame([100.0] * 21 + [96.69]),
+            robots[0][0]: frame([50000.0] * 21 + [62000.0], [100.0] * 21 + [400.0]),
+            robots[1][0]: frame([50000.0] * 21 + [52500.0]),
+            robots[2][0]: frame([50000.0] * 21 + [49000.0]),
+            '^KS11': frame([2500.0] * 21 + [2417.25]),
         }
         snapshot = theme_sector_snapshot('KR', NOW, downloader=lambda symbols, market: rendered,
                                          headlines=lambda *args: [])

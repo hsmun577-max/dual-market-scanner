@@ -15,6 +15,7 @@ import math
 import re
 from datetime import datetime, timedelta, timezone
 
+import price_sanity
 from candidate_selection import (MIN_AVERAGE_TURNOVER, MIN_PRICE, average_turnover,
                                  instrument_rejection_reason)
 from research_asset import is_fund
@@ -24,9 +25,10 @@ SUBTITLE = '게이트에 막혀 매수 후보에서 빠진 당일 급등 · 뉴�
 # 당일 급등 기준. 8%로 두면 잡주 급등이 섞여서, 실제 대형 이슈 급등만 남도록 10%로 잡았다.
 MIN_CHANGE_PCT = 10.0
 # 이보다 큰 '하루 등락'은 뉴스가 아니라 가격 데이터 오류다(예: PARA +9,614%).
-MAX_CHANGE_PCT = 150.0
+# 테마 집계(`theme_sectors`)와 같은 기준을 쓰도록 `price_sanity`에서 가져온다.
+MAX_CHANGE_PCT = price_sanity.MAX_DAILY_CHANGE_PCT
 # 한국 거래소 일일 가격제한. 이를 넘는 값은 시세 오류로 본다(신규 상장 첫날 포함).
-KR_PRICE_LIMIT_PCT = 30.0
+KR_PRICE_LIMIT_PCT = price_sanity.KR_PRICE_LIMIT_PCT
 # 급등 당일 실제로 돈이 오갔는지: 당일 거래대금 또는 20일 평균 거래대금.
 MIN_TODAY_VALUE = {'KR': 5_000_000_000, 'US': 10_000_000}
 MAX_ISSUES_PER_MARKET = 3
@@ -210,7 +212,7 @@ def _price_rejection(row, market, change_pct, check_consistency=True, require_pr
         return reason
     if DERIVATIVE_PRODUCT.search(name):
         return 'derivative_product'
-    if market == 'KR' and change_pct > KR_PRICE_LIMIT_PCT + 0.5:
+    if price_sanity.rejection_reason(market, change_pct) in ('abnormal_change', 'price_limit_exceeded'):
         return 'abnormal_price'
     price = _number(values.get('price'))
     if price is None:

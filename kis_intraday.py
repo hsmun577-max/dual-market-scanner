@@ -1872,7 +1872,7 @@ def research_label(evidence, market, symbol, decision_at):
 
 
 def format_notification(market, candidates, closes, companies=None, sectors=None, themes=None,
-                        urgent=None, premarket=None):
+                        urgent=None, premarket=None, kr_premarket=None):
     companies = companies or {}
     overseas = market.startswith("US-")
     # 매수 후보로 이미 나가는 종목은 긴급 참고 블록에 다시 넣지 않는다.
@@ -1890,8 +1890,13 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
     header = sector_section(sectors, themes, "US" if overseas else "KR")
     from premarket_signals import format_block as format_premarket_block
     premarket_lines = format_premarket_block(premarket)
+    # 국내 핵심 대표주의 NXT 장전 움직임·촉매·간밤 미국 연동. 미국 블록과 같은 자리(매수 신호 위)에 둔다.
+    from kr_premarket import format_block as format_kr_premarket_block
+    kr_premarket_lines = format_kr_premarket_block(kr_premarket)
     # 장전 사전 시그널은 매수 판정과 별개다. 매수 신호 머리줄보다 위에 둔다.
-    lines = header + (["", *premarket_lines] if premarket_lines else []) + ["", f"{heading} · {timestamp}"]
+    lines = (header + (["", *premarket_lines] if premarket_lines else [])
+             + (["", *kr_premarket_lines] if kr_premarket_lines else [])
+             + ["", f"{heading} · {timestamp}"])
     if not confirmed:
         if assessed:
             lines.append(f"판정 완료 {assessed}종목 · 현재 매수 조건 충족 없음")
@@ -1922,7 +1927,7 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
     return "\n".join(lines)
 
 def notify(market, candidates, closes, token, chat_id, companies=None, sectors=None,
-           mode="intraday", themes=None, urgent=None, premarket=None):
+           mode="intraday", themes=None, urgent=None, premarket=None, kr_premarket=None):
     """Send a decision alert under the gate that belongs to its own stage.
 
     ``mode='preopen'`` keeps the plan window (ten minutes before an opening ±2 minutes).
@@ -1946,7 +1951,7 @@ def notify(market, candidates, closes, token, chat_id, companies=None, sectors=N
         print(f"Telegram suppressed_by_gate {market}: {reason}", flush=True)
         return result
     message = format_notification(market, candidates, closes, companies, sectors, themes,
-                                  urgent=urgent, premarket=premarket)
+                                  urgent=urgent, premarket=premarket, kr_premarket=kr_premarket)
     for part in split_telegram_text(message):
         allowed, reason = (delivery_status(market, datetime.now(KST)) if mode == "preopen"
                            else intraday_delivery_status(market, datetime.now(KST), closes))
@@ -2139,6 +2144,16 @@ def main():
                         now=checked).get("US" if overseas else "KR", [])
                 except Exception as exc:
                     print(f"{market} 긴급 이슈 확인 실패 ({type(exc).__name__})")
+                kr_premarket = []
+                if market == "NXT":
+                    # NXT 장전(08:00~09:00)에 맞춰 핵심 대표주의 장전 움직임·촉매를 모은다.
+                    # 여기서는 직전 정규장 종가를 붙이지 않고 KIS가 주는 NXT 전일 대비율을 쓴다
+                    # (장전 시세 기준을 지어내지 않는다).
+                    try:
+                        from kr_premarket import collect as collect_kr_premarket
+                        kr_premarket = collect_kr_premarket(now=checked).get("items") or []
+                    except Exception as exc:
+                        print(f"{market} 국내 장전 사전 시그널 확인 실패 ({type(exc).__name__})")
                 premarket = []
                 if market == "US-early":
                     try:
@@ -2154,7 +2169,7 @@ def main():
                         print(f"{market} 장전 사전 시그널 확인 실패 ({type(exc).__name__})")
                 delivery = notify(market, candidates, decision_at, token, chat_id, companies,
                                   sectors=sector_snapshot["rows"], themes=sector_snapshot.get("themes"),
-                                  urgent=urgent, premarket=premarket)
+                                  urgent=urgent, premarket=premarket, kr_premarket=kr_premarket)
                 dump(Path(f"{market}-delivery.json"), delivery)
             else:
                 print(f"{market} 장중 알림 조건 충족 없음")
