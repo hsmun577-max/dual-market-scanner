@@ -19,6 +19,8 @@ from websockets.exceptions import WebSocketException
 
 import asset_regime
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
+# One DART corporate-code download per run and day (see dart_company_codes).
+_DART_CODE_CACHE = {}
 from json_utils import dump, dumps
 from signal_context import context_status
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE, build_company_forecast
@@ -557,6 +559,13 @@ def dart_company_codes(api_key):
     from xml.etree import ElementTree
     from zipfile import BadZipFile, ZipFile
 
+    # The corporate-code file is a few megabytes and changes once a day. A report reads it
+    # more than once (the selected candidates, then the 10억~50억 quality tier), so it is
+    # kept for the day instead of downloaded again — the same issuer must not get two
+    # different corporate codes inside one run.
+    cached = _DART_CODE_CACHE.get(api_key)
+    if cached and cached[0] == datetime.now(KST).date().isoformat():
+        return cached[1]
     response = requests.get("https://opendart.fss.or.kr/api/corpCode.xml",
                             params={"crtfc_key": api_key}, timeout=10)
     response.raise_for_status()
@@ -565,8 +574,10 @@ def dart_company_codes(api_key):
             root = ElementTree.fromstring(archive.read("CORPCODE.xml"))
     except (BadZipFile, KeyError, ElementTree.ParseError) as exc:
         raise ValueError("DART corporate code file unavailable") from exc
-    return {row.findtext("stock_code", "").strip(): row.findtext("corp_code", "")
-            for row in root.findall("list") if row.findtext("stock_code", "").strip()}
+    codes = {row.findtext("stock_code", "").strip(): row.findtext("corp_code", "")
+             for row in root.findall("list") if row.findtext("stock_code", "").strip()}
+    _DART_CODE_CACHE[api_key] = (datetime.now(KST).date().isoformat(), codes)
+    return codes
 
 
 class DartTableParser:

@@ -850,7 +850,13 @@ def prepare_selected_analysis(report):
     evaluate_preopen_markets(report, datetime.now(timezone.utc))
     # The momentum pass is done, so the names it dropped for turnover alone can be read
     # without touching its decisions: they never enter ``preopen_signal``.
-    quality_watch_research(report, datetime.now(timezone.utc))
+    # The quality block is a record of what the same session's scan already read. Reading
+    # it again costs a second issuer pass (DART map, quotes, price history) and, on the
+    # requested report, that pass alone can push the run past its budget.
+    if report.get('quality_watch') and _same_session(report.get('quality_watch_at'), checked):
+        print('Quality watch reused from this session; no second issuer read')
+    else:
+        quality_watch_research(report, datetime.now(timezone.utc))
     # 중기 +30% 눌림 발굴은 20~60일 보유 전제의 관찰 목록이다. 당일 매수 판정과 분리한
     # 별도 필드(``mid_term_watch``)에만 쓰고 ``preopen_signal``·``buy_evaluation``은 건드리지 않는다.
     # 후보군(30~50종목)만 최근 실적·공시를 읽어 적자·유증을 걸러내고 재료 1줄을 붙인다.
@@ -875,6 +881,18 @@ def prepare_selected_analysis(report):
 
 
 QUALITY_WATCH_LIMIT = 8
+
+
+def _same_session(stamp, at):
+    """Whether ``stamp`` falls on the Korean trading day of ``at``."""
+    try:
+        observed = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return False
+    if observed.utcoffset() is None or at is None:
+        return False
+    return (observed.astimezone(ZoneInfo('Asia/Seoul')).date()
+            == at.astimezone(ZoneInfo('Asia/Seoul')).date())
 
 
 def quality_watch_research(report, at):
