@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import requests
+import asset_regime
 from candidate_selection import candidate_rejection_reason, rank_market_candidates
 from sector_flow import fetch_intraday_sectors, format_sector_header
 from theme_sectors import theme_lines, theme_sector_snapshot
@@ -1307,7 +1308,10 @@ def send_telegram_summary(report):
         result["suppressed_by_gate"]=True
         return result
 
-    lines = list(report.get('sector_header_override') or format_sector_header(report.get("sectors", [])))
+    # 알림 최상단: 지금 상승 흐름 · 시장 분위기 · (바뀌었으면) 흐름 변화.
+    regime_lines = asset_regime.header_lines(report.get('asset_regime'))
+    lines = ((regime_lines + ['']) if regime_lines else []) + list(
+        report.get('sector_header_override') or format_sector_header(report.get("sectors", [])))
     # 대분류 ETF '1위 반도체' 아래에 실제 구성종목으로 계산한 세부 테마·대표주·이슈를 붙인다.
     lines.extend(theme_lines(report.get('theme_sectors')))
     lines.extend(market_regime_note(report))
@@ -1558,6 +1562,14 @@ def main():
             except Exception as exc:  # 테마 집계 실패가 전체 리포트를 막지 않는다
                 print(f"{market} theme sectors unavailable ({type(exc).__name__})")
         prepare_selected_analysis(report)
+
+    # 자산군 상승 흐름·시장 분위기는 리포트 JSON(`asset_regime`)과 텔레그램 최상단에 함께
+    # 남긴다. 조회 실패가 스캔·발송을 막지 않는다.
+    try:
+        asset_regime.attach(report)
+    except Exception as exc:
+        print(f"Asset regime unavailable ({type(exc).__name__})")
+        report["asset_regime_error"] = type(exc).__name__
 
     output = REPORT_DIR / "latest.json"
 

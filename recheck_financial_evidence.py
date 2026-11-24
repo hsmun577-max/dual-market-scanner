@@ -11,6 +11,7 @@ from preopen_signals import evaluate_preopen
 from execution_quotes import execution_quote
 from tradable_signal import validate_entry,format_requested_report
 from telegram_text import split_telegram_text
+import asset_regime
 import exchange_calendars
 
 def main():
@@ -63,7 +64,8 @@ def main():
     entries=[validate_entry(r,quotes.get(r['symbol']),at,opened) for r in candidates]
     previously_sent={r['symbol'] for r in parent.get('entry_checks',[]) if r.get('trade_ready')}
     fresh_entries=[r for r in entries if r.get('trade_ready') and r['symbol'] not in previously_sent]
-    message=format_requested_report(report.get('sector_header_override',['오늘의 주요 섹터','확인 불가']),fresh_entries,evaluation,at)
+    message=format_requested_report(report.get('sector_header_override',['오늘의 주요 섹터','확인 불가']),fresh_entries,evaluation,at,
+                                    regime=asset_regime.cached_block())
     receipts=[]
     if fresh_entries:
         expires=min(datetime.fromisoformat(r['valid_until']) for r in fresh_entries)

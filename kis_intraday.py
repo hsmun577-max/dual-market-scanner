@@ -17,6 +17,7 @@ import requests
 import yfinance as yf
 from websockets.exceptions import WebSocketException
 
+import asset_regime
 from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request_approval, subscription
 from json_utils import dump, dumps
 from signal_context import context_status
@@ -1834,11 +1835,13 @@ def exit_watch(candidates, bars, after_bars, closes):
     return decisions
 
 
-def format_exit_watch(market, decisions, closes):
+def format_exit_watch(market, decisions, closes, regime=None):
     """One message that says what the sell rule says now, and that no fill was observed."""
     overseas = market.startswith("US-")
-    lines = [f"매도 규칙 점검 · {closes:%m/%d %H:%M} {'ET' if overseas else 'KST'} 신호 기준",
-             "실제 체결은 확인되지 않았습니다. 신호가 기준가로 계산한 참고 판정입니다."]
+    regime_lines = asset_regime.header_lines(regime)
+    lines = ([*regime_lines, ""] if regime_lines else []) + [
+        f"매도 규칙 점검 · {closes:%m/%d %H:%M} {'ET' if overseas else 'KST'} 신호 기준",
+        "실제 체결은 확인되지 않았습니다. 신호가 기준가로 계산한 참고 판정입니다."]
     for row in decisions:
         symbol = row["symbol"]
         ticker = symbol[4:] if overseas else symbol
@@ -1903,7 +1906,7 @@ def research_label(evidence, market, symbol, decision_at):
 
 
 def format_notification(market, candidates, closes, companies=None, sectors=None, themes=None,
-                        urgent=None, premarket=None, kr_premarket=None):
+                        urgent=None, premarket=None, kr_premarket=None, regime=None):
     companies = companies or {}
     overseas = market.startswith("US-")
     # 매수 후보로 이미 나가는 종목은 긴급 참고 블록에 다시 넣지 않는다.
@@ -1924,8 +1927,12 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
     # 국내 핵심 대표주의 NXT 장전 움직임·촉매·간밤 미국 연동. 미국 블록과 같은 자리(매수 신호 위)에 둔다.
     from kr_premarket import format_block as format_kr_premarket_block
     kr_premarket_lines = format_kr_premarket_block(kr_premarket)
+    # 알림 최상단: 지금 상승 흐름 · 시장 분위기 · (바뀌었으면) 흐름 변화.
+    # `regime`은 호출부가 한 번 조회해 넘긴다(테스트·발송 경로가 시세를 다시 받지 않는다).
+    regime_lines = asset_regime.header_lines(regime)
     # 장전 사전 시그널은 매수 판정과 별개다. 매수 신호 머리줄보다 위에 둔다.
-    lines = (header + (["", *premarket_lines] if premarket_lines else [])
+    lines = ((regime_lines + [""] if regime_lines else [])
+             + header + (["", *premarket_lines] if premarket_lines else [])
              + (["", *kr_premarket_lines] if kr_premarket_lines else [])
              + ["", f"{heading} · {timestamp}"])
     if not confirmed:
@@ -1961,7 +1968,8 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
     return "\n".join(lines)
 
 def notify(market, candidates, closes, token, chat_id, companies=None, sectors=None,
-           mode="intraday", themes=None, urgent=None, premarket=None, kr_premarket=None):
+           mode="intraday", themes=None, urgent=None, premarket=None, kr_premarket=None,
+           regime=None):
     """Send a decision alert under the gate that belongs to its own stage.
 
     ``mode='preopen'`` keeps the plan window (ten minutes before an opening ±2 minutes).
@@ -1985,7 +1993,8 @@ def notify(market, candidates, closes, token, chat_id, companies=None, sectors=N
         print(f"Telegram suppressed_by_gate {market}: {reason}", flush=True)
         return result
     message = format_notification(market, candidates, closes, companies, sectors, themes,
-                                  urgent=urgent, premarket=premarket, kr_premarket=kr_premarket)
+                                  urgent=urgent, premarket=premarket, kr_premarket=kr_premarket,
+                                  regime=regime)
     for part in split_telegram_text(message):
         allowed, reason = (delivery_status(market, datetime.now(KST)) if mode == "preopen"
                            else intraday_delivery_status(market, datetime.now(KST), closes))
@@ -2012,7 +2021,7 @@ def notify(market, candidates, closes, token, chat_id, companies=None, sectors=N
     return result
 
 
-def notify_exit(market, decisions, closes, token, chat_id):
+def notify_exit(market, decisions, closes, token, chat_id, regime=None):
     """Deliver the sell-rule check for the signals of this session.
 
     It is a separate message type from the buy alert: the buy gate refuses a repeated or
@@ -2026,7 +2035,7 @@ def notify_exit(market, decisions, closes, token, chat_id):
     if not token or not chat_id:
         result.update(suppressed_by_gate=True, reason="configuration_not_set")
         return result
-    message = format_exit_watch(market, decisions, closes)
+    message = format_exit_watch(market, decisions, closes, regime=regime)
     parts = split_telegram_text(message)
     for part in parts:
         try:
@@ -2203,7 +2212,8 @@ def main():
                         print(f"{market} 장전 사전 시그널 확인 실패 ({type(exc).__name__})")
                 delivery = notify(market, candidates, decision_at, token, chat_id, companies,
                                   sectors=sector_snapshot["rows"], themes=sector_snapshot.get("themes"),
-                                  urgent=urgent, premarket=premarket, kr_premarket=kr_premarket)
+                                  urgent=urgent, premarket=premarket, kr_premarket=kr_premarket,
+                                  regime=asset_regime.cached_block(checked))
                 dump(Path(f"{market}-delivery.json"), delivery)
             else:
                 print(f"{market} 장중 알림 조건 충족 없음")
@@ -2225,7 +2235,8 @@ def main():
             if opens != scheduled_open:
                 print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=15):%H:%M}")
             def publish_exit(decisions):
-                delivery = notify_exit(market, decisions, opens + timedelta(minutes=15), token, chat_id)
+                delivery = notify_exit(market, decisions, opens + timedelta(minutes=15), token, chat_id,
+                                       regime=asset_regime.cached_block())
                 dump(Path(f"{market}-exit-watch.json"), delivery)
                 if not delivery.get("sent"):
                     print("EXIT_WATCH=" + json.dumps(delivery, ensure_ascii=False), flush=True)
