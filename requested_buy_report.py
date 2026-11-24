@@ -15,6 +15,7 @@ from industry_flow import snapshot,format_report,Client
 from telegram_text import split_telegram_text
 from execution_quotes import execution_quote
 from tradable_signal import validate_entry,format_requested_report
+import asset_regime
 
 KST=ZoneInfo('Asia/Seoul')
 
@@ -78,7 +79,8 @@ def main():
     sector_lines=(format_report(industry).splitlines() if industry.get('rows') else ['오늘의 주요 섹터','확인 불가'])
     if theme.get('rows'):sector_lines=sector_lines+format_theme_block(theme,'KR')
     import mid_term_watch
-    message=format_requested_report(sector_lines,entries,evaluation,sent_at)
+    message=format_requested_report(sector_lines,entries,evaluation,sent_at,
+                                    regime=asset_regime.cached_block())
     # 요청 장전 리포트에도 매수 후보와 분리된 '긴급 이슈 참고'를 붙인다.
     urgent={}
     try:

@@ -95,6 +95,13 @@ def main():
     os.environ['DELIVERY_MARKET']=args.market
     delivery=dict(sent=False,parts_sent=0,suppressed_by_gate=False,reason=reason)
     if allowed:
+        # 알림 최상단용 자산군 흐름·시장 분위기. 직전 스캔이 저장해 둔 블록이 있으면 그것과
+        # 비교해 '흐름 변화'를 만들고, 조회 실패는 알림을 막지 않는다.
+        try:
+            import asset_regime
+            asset_regime.attach(report,previous=report.get('asset_regime'))
+        except Exception as exc:
+            print('Asset regime unavailable: '+type(exc).__name__,flush=True)
         evaluate_preopen(report,previous_session,datetime.now(timezone.utc))
         dump('preopen-analysis.json',report,indent=None)
         delivery=scanner.send_telegram_summary(report)

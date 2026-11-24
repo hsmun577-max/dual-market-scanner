@@ -2,6 +2,7 @@
 from datetime import datetime,timedelta
 import math
 from decimal import Decimal,ROUND_CEILING
+import asset_regime
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
 from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE, entry_gate
 from exit_policy import classify_asset, exit_policy_for
@@ -167,9 +168,11 @@ def validate_entry(row,quote,at,session_open):
         quote_at=seen.isoformat(),valid_until=(at+timedelta(seconds=30)).isoformat(),
         generated_at=at.isoformat(),filled=False)
 
-def format_requested_report(sector_lines,signals,evaluation,at):
+def format_requested_report(sector_lines,signals,evaluation,at,regime=None):
     ready=[row for row in signals if row.get('trade_ready') is True]
-    lines=[*sector_lines,'']
+    # 알림 최상단: 지금 상승 흐름 · 시장 분위기 · (바뀌었으면) 흐름 변화.
+    regime_lines=asset_regime.header_lines(regime)
+    lines=[*([*regime_lines,''] if regime_lines else []),*sector_lines,'']
     if ready:
         lines.append(f'매수 신호 · {at:%m/%d %H:%M:%S} KST')
         for row in ready[:5]:
