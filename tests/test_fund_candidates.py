@@ -211,13 +211,31 @@ class FundProfileWithoutQuoteTypeTests(unittest.TestCase):
         self.assertEqual(promoted, [row['symbol'] for row in others[:FUND_CANDIDATE_LIMIT]])
         self.assertEqual(report['research_scope']['funds_promoted'], FUND_CANDIDATE_LIMIT)
 
+    def test_a_fund_below_the_turnover_floor_does_not_take_a_candidate_slot(self):
+        # A high share count does not make a candidate: KDEF traded 29,000 shares at
+        # $29.01 ($1.5M over 20 days) and the entry screen refuses it as
+        # insufficient_liquidity, so its slot must not be reserved.
+        thin = fund_row('US', 'KDEF', 'PLUS KOREA DEFENSE INDUSTRY', volume=29_000,
+                        asset_type='stock_or_etf',
+                        indicators=dict(price=29.01, average_turnover_20d=1_486_153.0))
+        others = [fund_row('US', f'ETF{index}', f'ISHARES TEST {index}',
+                           volume=900_000 - index * 10_000) for index in range(9)]
+        report = analyse(dict(results=[thin, *others], sectors=[]))
+        self.assertEqual(thin['analysis_kind'], 'fund_screen_only')
+        self.assertNotIn('company_analysis', thin)
+        promoted = [row['symbol'] for row in others if row.get('analysis_kind') == 'fund_candidate']
+        self.assertEqual(promoted, [row['symbol'] for row in others[:FUND_CANDIDATE_LIMIT]])
+        self.assertEqual(report['research_scope']['funds_promoted'], FUND_CANDIDATE_LIMIT)
+
 
 class FundRankingTests(unittest.TestCase):
     def test_ranking_is_per_market_and_by_volume(self):
+        # Volumes are above the entry screen's turnover floor, so every row is a fund the
+        # analysis pass could read; the ranking itself is by volume, per market.
         rows = [fund_row('KR', f'{index}.KS', f'KODEX {index}', volume=volume)
-                for index, volume in enumerate([100, 900, 500])]
+                for index, volume in enumerate([3_000_000, 5_000_000, 4_000_000])]
         rows += [fund_row('US', f'ETF{index}', f'ISHARES {index}', volume=volume)
-                 for index, volume in enumerate([20, 90])]
+                 for index, volume in enumerate([500_000, 900_000])]
         promoted = promoted_fund_symbols(rows)
         self.assertEqual(promoted['KR'], ['1.KS', '2.KS', '0.KS'])
         self.assertEqual(promoted['US'], ['ETF1', 'ETF0'])

@@ -66,25 +66,24 @@ def promoted_fund_symbols(rows, limit=FUND_CANDIDATE_LIMIT):
     A fund that the instrument filter refuses on its name alone (cash or bond products,
     covered-call and weekly-pay structures, special securities) is left out of the
     ranking: promoting one could not produce a candidate, and it would take a slot from
-    a fund that could. The price floor is read the same way — a decaying inverse fund
-    quoted at 140원 (KODEX 200선물인버스2X on 2026-11-24) is refused as ``low_price`` by
-    the entry screen before its profile is ever read, so promoting it reserved one of the
-    eight research slots for a listing that can never be planned. The eighth and below
-    are not promoted, so the existing liquidity, trend, demand and market-regime gates
-    decide the rest as before.
+    a fund that could. The entry screen's own liquidity read is applied the same way — a
+    fund quoted at 140원 (KODEX 200선물인버스2X on 2026-11-24) or one whose 20-day dollar
+    turnover is under the floor (KDEF, $1.5M) is refused as ``low_price`` /
+    ``insufficient_liquidity`` before its profile is read, so promoting it reserved one of
+    the eight research slots for a listing that can never be planned. The predicate is
+    the one ``select_analysis_candidates`` uses to admit a row, so a promoted fund is
+    always a fund the analysis pass can actually read. The eighth and below are not
+    promoted, so the existing liquidity, trend, demand and market-regime gates decide
+    the rest as before.
     """
-    from candidate_selection import MIN_PRICE, instrument_rejection_reason
+    from candidate_selection import MIN_PRICE, liquidity_rejection_reason
     grouped = {}
     for row in rows:
         if not is_fund(row):
             continue
-        if instrument_rejection_reason(row.get('symbol'), row.get('name'), row.get('asset_type') or ''):
+        if row.get('market') not in MIN_PRICE:
             continue
-        price = (row.get('indicators') or {}).get('price')
-        floor = MIN_PRICE.get(row.get('market'))
-        if (not isinstance(price, (int, float)) or isinstance(price, bool)
-                or not math.isfinite(price) or price <= 0
-                or (floor is not None and price < floor)):
+        if liquidity_rejection_reason(row, row.get('market')):
             continue
         grouped.setdefault(row.get('market'), []).append(row)
     return {market: [row['symbol'] for row in
