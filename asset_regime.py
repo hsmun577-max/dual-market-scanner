@@ -630,7 +630,11 @@ def save_state(block, path=STATE_PATH):
 
 
 def headlines_from_report(report):
-    """당일 테마 블록의 이슈 한 줄을 분위기 맥락으로 쓴다. 없으면 None."""
+    """당일 테마 블록의 이슈 한 줄을 분위기 맥락으로 쓴다. 없으면 None.
+
+    테마 이슈는 이미 '이슈: …'로 시작한다. 여기서 벗겨 두어야 머리줄이
+    "이슈: 이슈: …"로 두 번 붙지 않는다(2026-11-24 12:03 보고서).
+    """
     snapshots = (report or {}).get('theme_sectors') or []
     for snapshot in snapshots:
         if not isinstance(snapshot, dict):
@@ -638,7 +642,10 @@ def headlines_from_report(report):
         for row in snapshot.get('rows') or []:
             issue = row.get('issue') if isinstance(row, dict) else None
             if issue and '뉴스 미확인' not in issue:
-                return _clip(issue)
+                text = str(issue).strip()
+                if text.startswith('이슈:'):
+                    text = text[len('이슈:'):].strip()
+                return _clip(text) if text else None
     return None
 
 

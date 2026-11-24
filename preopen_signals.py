@@ -4,17 +4,47 @@ from collections import Counter
 import math
 from candidate_selection import (liquidity_rejection_reason,candidate_rejection_reason,
                                  market_headwind_reason,early_entry_block_reason,
-                                 EARLY_ENTRY_LIFTABLE_REASONS)
+                                 EARLY_ENTRY_LIFTABLE_REASONS,MIN_DEMAND_VOLUME_RATIO)
 import rebound_track
 import early_entry_track
 from advance_policy import advance_context,eligible_for_advance_research
-from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE,confirmed_catalyst,liftable_reason
+from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE,confirmed_catalyst,liftable_reason,stamp
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
 from exit_policy import (DEFAULT_EXIT_POLICY, FUND_STOP_PCT, STOCK_STOP_PCT, exit_policy_for,
                          policy_snapshot, stop_basis)
 
 INCOMPLETE_REASONS={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch',
                     'missing_indicators','invalid_average_price','entry_tick_missing'}
+
+
+def _number(value):
+    if isinstance(value,bool):return None
+    try:
+        result=float(value)
+    except (TypeError,ValueError):return None
+    return result if math.isfinite(result) else None
+
+
+def catalyst_observation(row,evidence,at,status,score,lift_reason):
+    """A forward record of one confirmed catalyst and what the screen did with it.
+
+    Nothing here changes a score or an entry. It is the sample that decides, three months
+    from now, whether a confirmed contract on expanding volume deserves to lift a market
+    headwind (design note B3): the study could not settle that on history alone, and the
+    only other way to answer it is another backtest.
+    """
+    observed=stamp(evidence.get('observed_at'));values=row.get('indicators') or {}
+    volume=_number(values.get('volume_ratio'))
+    return dict(symbol=row.get('symbol'),market=row.get('market'),name=row.get('name'),
+        kind=evidence.get('kind'),summary=evidence.get('summary'),
+        source=evidence.get('source'),observed_at=evidence.get('observed_at'),
+        filing_date=observed.date().isoformat() if observed else None,
+        elapsed_days=round((at-observed).total_seconds()/86400,1) if observed else None,
+        # `conditional_buy`는 막힌 것이 아니라 그날 계획이 나간 경우다.
+        blocked_reason=status,composite_score=_number(score),
+        volume_ratio=volume,
+        volume_1_2x=bool(volume is not None and volume>=MIN_DEMAND_VOLUME_RATIO),
+        market_above_ma20=values.get('market_above_ma20'),liftable_reason=lift_reason)
 
 
 def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, score, strategy):
@@ -105,7 +135,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
     """
     at=at or datetime.now(timezone.utc)
     if at.utcoffset() is None: raise ValueError('Timezone-aware decision time required')
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]; rebound_picks=[]; early_picks=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]; rebound_picks=[]; early_picks=[]; observations=[]
     for row in report.get('results',[]):
         if market is not None and row.get('market')!=market: continue
         row.pop('preopen_signal',None)
@@ -151,7 +181,9 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         # safety blocks (liquidity, price, breakdown, extended, fund) are checked inside
         # ``liftable_reason`` and can never be lifted here.
         lift_reason=liftable_reason(row,row['market'])
-        catalyst_evidence=confirmed_catalyst(company,at,row.get('market')) if lift_reason else {}
+        # The evidence is read for every analysed name, not only for the liftable ones: the
+        # observation log needs the catalysts the screen never had a chance to lift.
+        catalyst_evidence=confirmed_catalyst(company,at,row.get('market'))
         ready_evidence=catalyst_evidence.get('eligible') is True
         entry_limit=price; entry_floor=None; strategy='trend'; plan=None
         reference_date=_expected_session(previous_session,row.get('market'))
@@ -251,6 +283,8 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
                 **stop_basis(row))
             recommendations.append(row['symbol'])
         counts[status]+=1; row['preopen_decision']=status
+        if ready_evidence:
+            observations.append(catalyst_observation(row,catalyst_evidence,at,status,score,lift_reason))
     evaluated=sum(counts.values())
     excluded=sum(counts[s] for s in INCOMPLETE_REASONS)
     report['buy_evaluation']=dict(completed=bool(evaluated) and not excluded,
@@ -262,6 +296,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         recommendations=recommendations,
         advance_candidates=advance,
         catalyst_candidates=catalyst_picks,
+        catalyst_observation=observations,
         early_entry_candidates=early_picks,
         rebound_candidates=rebound_picks,
         policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
@@ -288,7 +323,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
 
 
 def _merge(parts):
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]; rebound=[]; early=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]; rebound=[]; early=[]; observations=[]
     for part in parts.values():
         counts.update(part['counts']); missing.update(part['missing_dimensions'])
         caveats.update(part.get('caveats',{}))
@@ -296,6 +331,7 @@ def _merge(parts):
         catalyst.extend(part.get('catalyst_candidates',[]))
         rebound.extend(part.get('rebound_candidates',[]))
         early.extend(part.get('early_entry_candidates',[]))
+        observations.extend(part.get('catalyst_observation',[]))
     evaluated=sum(counts.values()); excluded=sum(counts[s] for s in INCOMPLETE_REASONS)
     policy=next(iter(parts.values()))['policy'] if parts else {}
     return dict(completed=bool(evaluated) and not excluded,
@@ -305,7 +341,8 @@ def _merge(parts):
         markets=sorted(parts),generated_at=next(iter(parts.values()))['generated_at'] if parts else None,
         evaluated=evaluated,counts=dict(counts),missing_dimensions=dict(missing),
         caveats=dict(caveats),recommendations=recommendations,advance_candidates=advance,
-        catalyst_candidates=catalyst,early_entry_candidates=early,rebound_candidates=rebound,policy=policy,
+        catalyst_candidates=catalyst,early_entry_candidates=early,rebound_candidates=rebound,
+        catalyst_observation=observations,policy=policy,
         live_execution_confirmed=False)
 
 
@@ -330,7 +367,7 @@ def evaluate_preopen_markets(report, at=None):
             previous_session={},markets=[],generated_at=at.isoformat(),evaluated=0,
             counts={},missing_dimensions={},caveats={},recommendations=[],advance_candidates=[],
             catalyst_candidates=[],early_entry_candidates=[],rebound_candidates=[],
-            policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
+            catalyst_observation=[],policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
                         stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                         take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
                         early_entry=dict(entry_offset_pct=early_entry_track.ENTRY_OFFSET_PCT,

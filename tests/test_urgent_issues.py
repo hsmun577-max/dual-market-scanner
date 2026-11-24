@@ -161,7 +161,10 @@ class UrgentIssueSelectionTests(unittest.TestCase):
         lines = format_urgent_block(issues)
         self.assertEqual(lines[0], HEADING)
         self.assertIn('매수 신호 아님', lines[0])
+        # 부제 줄은 머리줄과 같은 말을 되풀이했다. 이제 바로 첫 종목이 온다.
+        self.assertTrue(lines[1].startswith('• 엔비디아 (NVDA)'), lines[1])
         text = '\n'.join(lines)
+        self.assertNotIn('게이트에 막혀 매수 후보에서 빠진 당일 급등', text)
         self.assertIn('엔비디아 (NVDA) +31.5%', text)
         self.assertIn('보류: 시장 역풍', text)
         self.assertIn('이슈: US stocks surge', text)

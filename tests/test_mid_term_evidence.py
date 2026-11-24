@@ -445,21 +445,25 @@ class MessageTests(unittest.TestCase):
             send_telegram_summary(report_)
         return post.call_args.kwargs["json"]["text"]
 
-    def test_each_name_carries_its_reason_line(self):
+    def test_each_name_carries_its_reason_line_in_the_analysis_data(self):
         report_ = report(row())
         attach(report_, AT, evidence=lambda symbol, name, at: record(
             dict(label="3Q26", operating_income=299.0, prior_operating_income=245.0),
             filings=[{"date": "2026-11-21", "title": "단일판매ㆍ공급계약체결", "source": "DART"}]))
         text = self.message(report_)
-        self.assertIn(LABEL, text)
-        self.assertIn("재료: 3Q26 영업이익 +299억 (+22%) · 11/21 단일판매ㆍ공급계약체결", text)
-        self.assertIn("20~60일 보유 · -15% 손절 전제", text)
+        # 재료 한 줄은 분석 자료에 남고, 알림 본문에는 목록 자체를 싣지 않는다.
+        self.assertNotIn(LABEL, text)
+        self.assertIn("재료: 3Q26 영업이익 +299억 (+22%) · 11/21 단일판매ㆍ공급계약체결",
+                      format_block(report_["mid_term_watch"])[2])
+        self.assertEqual(report_["mid_term_watch"][0]["catalyst_summary"],
+                         "3Q26 영업이익 +299억 (+22%) · 11/21 단일판매ㆍ공급계약체결")
 
-    def test_a_name_with_nothing_found_still_prints_the_line(self):
+    def test_a_name_with_nothing_found_still_carries_the_line_in_the_data(self):
         report_ = report(row())
         attach(report_, AT, evidence=lambda symbol, name, at: record(None))
         text = self.message(report_)
-        self.assertIn("재료: 최근 공시·뉴스 없음", text)
+        self.assertNotIn("재료:", text)
+        self.assertIn("재료: 최근 공시·뉴스 없음", format_block(report_["mid_term_watch"])[2])
 
     def test_the_block_states_the_premise_and_two_lines_per_name(self):
         report_ = report(row())

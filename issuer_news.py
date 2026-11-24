@@ -5,6 +5,12 @@ import re
 import requests
 from event_impact_analysis import issuer_name_in_text,issuer_title_subject,HEADERS
 
+# How far back issuer news is collected. It has to be at least as wide as the window a
+# catalyst is judged in (``catalyst_track.confirmed_news``: 72 hours), otherwise a headline
+# from two days ago is never in the array the check reads: on 2026-11-24 no Korean article
+# reached the catalyst path for that reason alone.
+NEWS_WINDOW_HOURS = 72
+
 def _items(document):
     if isinstance(document,list):
         for row in document:yield from _items(row)
@@ -33,7 +39,7 @@ def parse_issuer_news(document,name,now):
                 published=datetime.fromisoformat(raw.replace('Z','+00:00'))
                 if published.utcoffset() is None:continue
         except ValueError:continue
-        if not now-timedelta(hours=24)<=published<now:continue
+        if not now-timedelta(hours=NEWS_WINDOW_HOURS)<=published<now:continue
         office=str(row['officeId']);article=str(row['articleId'])
         if not re.fullmatch(r'\d{3}',office) or not re.fullmatch(r'\d{6,20}',article):continue
         rows.append(dict(headline=title,available_at=published.isoformat(),

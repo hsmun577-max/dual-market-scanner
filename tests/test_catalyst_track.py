@@ -161,7 +161,9 @@ class SpeculationAndFreshnessTests(unittest.TestCase):
             self.assertTrue(quantified_catalyst(headline), headline)
 
     def test_a_stale_or_future_filing_cannot_support_todays_plan(self):
-        for stamp in ("2026-11-05T08:00:00+09:00", "2026-11-12T09:30:00+09:00"):
+        # 실적 재료 창은 21일(분기 공시 주기)이다. 그보다 오래된 공시와 아직공개되지 않은 공시는
+        # 오늘의 계획을 지지하지 못한다.
+        for stamp in ("2026-10-20T08:00:00+09:00", "2026-11-12T09:30:00+09:00"):
             item = row()
             item["company_analysis"] = company(filings=[dict(
                 filing_date="2026-11-12", form="분기보고서 (2026.09)", url=FILING_URL,
@@ -171,11 +173,75 @@ class SpeculationAndFreshnessTests(unittest.TestCase):
             self.assertEqual(item["preopen_decision"], "breakdown_or_rebound")
             self.assertNotIn("preopen_signal", item)
 
+    def test_a_quarterly_report_stays_usable_for_the_earnings_window(self):
+        # 2026-11-24 테스·이수페타시스가 72시간 때문에 탈락한 자리: 8일 전 분기보고서는 살아 있다.
+        for days in (1, 7, 20):
+            item = row()
+            at = AT + timedelta(days=days)
+            item["company_forecast"]["generated_at"] = at.isoformat()
+            item["company_analysis"] = company(filings=[dict(
+                filing_date="2026-11-12", form="분기보고서 (2026.09)", url=FILING_URL)])
+            found = confirmed_catalyst(item["company_analysis"], at, "KR")
+            self.assertTrue(found["eligible"], days)
+            self.assertEqual(found["kind"], "earnings_surprise")
+
     def test_a_loss_is_not_an_earnings_surprise(self):
         self.assertFalse(confirmed_catalyst(company(operating_income_amount=-1.2e9), AT, "KR")["eligible"])
         self.assertFalse(confirmed_catalyst(company(operating_income_yoy_pct=31.0), AT, "KR")["eligible"])
         self.assertTrue(confirmed_catalyst(
             company(operating_income_yoy_pct=None, operating_income_turnaround=True), AT, "KR")["eligible"])
+
+
+class ObservationLogTests(unittest.TestCase):
+    """재료 관찰 로그: 점수·문턱·진입은 그대로, 재료가 있는 종목만 기록한다."""
+
+    def observation(self, item):
+        evaluation = evaluate_preopen(report(item), "2026-11-11", AT)
+        return evaluation, evaluation.get("catalyst_observation") or []
+
+    def test_a_lifted_name_is_recorded_with_its_evidence_and_score(self):
+        item = row()
+        evaluation, observations = self.observation(item)
+        self.assertEqual(len(observations), 1)
+        found = observations[0]
+        self.assertEqual(found["symbol"], "263860.KQ")
+        self.assertEqual(found["kind"], "earnings_surprise")
+        self.assertEqual(found["filing_date"], "2026-11-12")
+        self.assertEqual(found["observed_at"], "2026-11-12T08:05:00+09:00")
+        self.assertAlmostEqual(found["elapsed_days"], 0.0, places=1)
+        self.assertEqual(found["blocked_reason"], "conditional_buy")
+        self.assertAlmostEqual(found["composite_score"], 51.5)
+        self.assertAlmostEqual(found["volume_ratio"], 4.24)
+        self.assertTrue(found["volume_1_2x"])
+        self.assertIs(found["market_above_ma20"], False)
+        self.assertEqual(found["liftable_reason"], "rebound")
+        self.assertIn("영업이익", found["summary"])
+        # 기록만 추가되고 판정·추천은 그대로다.
+        self.assertEqual(evaluation["catalyst_candidates"], ["263860.KQ"])
+        self.assertEqual(item["preopen_decision"], "conditional_buy")
+
+    def test_a_name_the_screen_blocked_is_recorded_with_why(self):
+        item = row()
+        item["company_forecast"]["composite_score"] = MIN_CATALYST_COMPOSITE_SCORE - 1
+        evaluation, observations = self.observation(item)
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["blocked_reason"], "catalyst_score_below_policy")
+        self.assertNotIn("preopen_signal", item)
+        self.assertEqual(evaluation["catalyst_candidates"], [])
+
+    def test_a_name_without_a_confirmed_catalyst_is_not_logged(self):
+        item = row()
+        item["company_analysis"] = company(operating_income_yoy_pct=31.0)
+        _evaluation, observations = self.observation(item)
+        self.assertEqual(observations, [])
+
+    def test_a_volume_shortfall_is_visible_in_the_record(self):
+        item = row()
+        item["indicators"]["volume_ratio"] = 1.05
+        _evaluation, observations = self.observation(item)
+        self.assertEqual(len(observations), 1)
+        self.assertFalse(observations[0]["volume_1_2x"])
+        self.assertAlmostEqual(observations[0]["volume_ratio"], 1.05)
 
 
 class SafetyBlockTests(unittest.TestCase):

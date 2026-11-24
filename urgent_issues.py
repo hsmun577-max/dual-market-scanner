@@ -21,7 +21,6 @@ from candidate_selection import (MIN_AVERAGE_TURNOVER, MIN_PRICE, average_turnov
 from research_asset import is_fund
 
 HEADING = '🚨 긴급 이슈 참고 (매수 신호 아님 · 게이트 보류)'
-SUBTITLE = '게이트에 막혀 매수 후보에서 빠진 당일 급등 · 뉴스로 확인된 종목만'
 # 당일 급등 기준. 8%로 두면 잡주 급등이 섞여서, 실제 대형 이슈 급등만 남도록 10%로 잡았다.
 MIN_CHANGE_PCT = 10.0
 # 이보다 큰 '하루 등락'은 뉴스가 아니라 가격 데이터 오류다(예: PARA +9,614%).
@@ -431,7 +430,8 @@ def format_urgent_block(issues, limit=None):
         if not items:
             continue
         if not lines:
-            lines.extend([HEADING, SUBTITLE])
+            # 머리줄 하나로 끝낸다. 바로 아래 부제는 머리줄과 같은 말을 반복했다.
+            lines.append(HEADING)
         if len(grouped) > 1:
             lines.append(f'[{MARKET_LABELS.get(market, market)}]')
         for item in items:

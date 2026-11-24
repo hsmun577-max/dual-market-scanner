@@ -26,6 +26,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import price_sanity
+from catalyst_track import personnel_only
 
 # (종목코드, 한글명). 국내 시총 상위·핵심 대표주. 테마 대표주가 여기에 없어도 테마 집계는 따로 돈다.
 WATCH_UNIVERSE = (
@@ -48,9 +49,10 @@ NEWS_WINDOW_HOURS = 24
 MAX_SIGNALS = 5
 # 미국 테마 연동만으로 올린 종목은 소수만 둔다. 실제 장전 움직임·촉매 뉴스 자리를 빼앗지 않게.
 MAX_US_LINK_ONLY = 3
-HEADING = '[국내 장전 사전 시그널]'
-SUBTITLE = '매수 신호 아님 · 게이트와 별개로 장전 움직임·촉매만 표시'
+HEADING = '[국내 장전 사전 시그널] · 매수 신호 아님'
 KST = ZoneInfo('Asia/Seoul')
+# 정규장 개장. 이 뒤에 모은 '장전' 감시는 이미 지난 창문이라 메시지에 싣지 않는다.
+REGULAR_OPEN = time(9, 0)
 # NXT 세션(한국 시간). 장전 08:00~09:00, 시간외 15:30~20:00.
 NXT_SESSIONS = (('nxt_premarket', time(8, 0), time(9, 0)), ('nxt_after_hours', time(15, 30), time(20, 0)))
 SESSION_LABELS = {'nxt_premarket': 'NXT 장전', 'nxt_after_hours': 'NXT 시간외'}
@@ -120,6 +122,33 @@ def session_of(now):
     return None
 
 
+def premarket_run(now=None):
+    """그 시각이 국내 정규장 개장 전인지. 장전 블록을 메시지에 실을 수 있는 시간이다."""
+    local = (now or datetime.now(timezone.utc)).astimezone(KST)
+    if local.weekday() >= 5:
+        return False
+    return local.time() < REGULAR_OPEN
+
+
+def include_block(watch):
+    """이 감시 결과를 메시지에 실을지.
+
+    장전 실행(08:00~09:00 NXT, 또는 개장 전 실행)에서 모은 것만 싣는다. 정규장 장중 스캔은
+    이미 지난 장전 창문을 다시 보여 주는 것이고, 그때는 시세도 '장전'이라 부를 수 없다
+    (2026-11-24 12:34 발송의 '장전 시세 미확인' 다섯 줄).
+    """
+    watch = watch or {}
+    if watch.get('session') == 'nxt_premarket':
+        return True
+    checked = watch.get('checked_at')
+    if not checked:
+        return True  # 시각을 모르는 예전 보고서는 그대로 둔다
+    try:
+        return premarket_run(datetime.fromisoformat(str(checked)))
+    except (TypeError, ValueError):
+        return True
+
+
 def theme_membership():
     """종목코드 → 그 종목이 속한 국내 세부 테마 이름들."""
     from theme_sectors import KR_THEMES
@@ -175,7 +204,12 @@ def us_links(code, us_rows, membership=None, today=None):
 
 def catalyst_categories(headline):
     text = str(headline or '')
-    return [name for name, pattern in CATALYST_PATTERNS if pattern.search(text)]
+    categories = [name for name, pattern in CATALYST_PATTERNS if pattern.search(text)]
+    # 단순 임원 인사(승진·정기 인사·보직 이동)는 경영 변화가 아니다. 이 필터가 없으면
+    # "삼성SDI, 부사장 4명 등 11명 승진"·"임원 승진 인사"가 매일 CEO·경영진 촉매로 실린다.
+    if 'ceo' in categories and personnel_only(text):
+        categories = [name for name in categories if name != 'ceo']
+    return categories
 
 
 def _headlines(code, name, now):
@@ -430,7 +464,7 @@ def format_block(items, session=None):
     items = list(items or [])
     if not items:
         return []
-    lines = [HEADING, SUBTITLE]
+    lines = [HEADING]
     for item in items:
         code = item.get('code') or ''
         label = SESSION_LABELS.get(item.get('session') or session)
@@ -439,8 +473,10 @@ def format_block(items, session=None):
         elif label and item.get('change_pct') is not None:
             move = f"{label} ±{PREMARKET_MOVE_PCT:.0f}% 미만"
         else:
-            move = '장전 시세 미확인'
-        parts = [f"• {item.get('name')} ({code}) · {move}"]
+            # 체결가가 없을 때 '장전 시세 미확인'을 줄마다 붙이면 촉매 줄만 길어진다.
+            # 확인하지 못했다는 사실은 시세 칸을 비우는 것으로 말한다.
+            move = None
+        parts = [f"• {item.get('name')} ({code})" + (f" · {move}" if move else '')]
         context = []
         if item.get('catalyst_labels'):
             context.append('촉매: ' + '·'.join(item['catalyst_labels']))
