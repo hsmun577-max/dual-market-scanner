@@ -88,8 +88,9 @@ def aggregate(start: date, end: date):
     return {
         "period": [start.isoformat(), end.isoformat()],
         "method": ("Archived five-minute bars and timestamped bid/ask quotes; baseline entries are closed by the "
-                   "legacy +2% target/30-minute rule, policy entries by the −2% stop, +6% take profit and surge "
-                   "trailing exit of exit_policy.py; estimated fees from each source replay."),
+                   "legacy +2% target/30-minute rule, policy entries by exit_policy.py's instrument stop "
+                   "(−2% fund / −3% single stock), +6% take profit and surge trailing exit; estimated fees "
+                   "from each source replay."),
         "scope": "Only successful intraday runs with a retained intraday-replay artifact; daily/preopen candidate alerts are not represented unless they produced a quote replay sample.",
         "workflow_runs_found": len(runs_seen), "artifacts_with_replays": artifacts_seen,
         "runs": runs_seen, "results": results, "collection_issues": issues,

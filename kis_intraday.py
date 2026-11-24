@@ -27,7 +27,7 @@ from candidate_selection import instrument_rejection_reason, rank_market_candida
 from sector_flow import format_sector_header
 from theme_sectors import sector_section, theme_sector_snapshot
 from telegram_text import split_telegram_text
-from exit_policy import DEFAULT_EXIT_POLICY
+from exit_policy import DEFAULT_EXIT_POLICY, exit_policy_for
 from provider_retry import call as provider_call, isolate_yfinance_cache, transient
 from scanner import (BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, calculate_indicators,
                      classify_signal, clean_prices, sector_flow_snapshot, yf_download)
@@ -127,12 +127,17 @@ def breakout_v2(bars, quote, close_time, volume_baseline=None):
     return limit
 
 
-def protective_stop(bars, entry_limit, bid, overseas):
-    """Place the stop below the completed breakout candle's low."""
+def protective_stop(bars, entry_limit, bid, overseas, stop_pct=0.02):
+    """Place the stop below the completed breakout candle's low.
+
+    ``stop_pct`` is the instrument's own fixed stop (a fund is stopped at −2%, a single
+    stock at −3%): a support level further down than that is not a tighter stop, it is a
+    different position, so it is refused.
+    """
     support = Decimal(str(bars[2]["low"]))
     step = Decimal("0.01" if overseas else "1")
     stop = (support * Decimal("0.999")).quantize(step, rounding=ROUND_DOWN)
-    if not Decimal(str(entry_limit)) * Decimal("0.98") <= stop < Decimal(str(bid)):
+    if not Decimal(str(entry_limit)) * Decimal(str(1 - stop_pct)) <= stop < Decimal(str(bid)):
         return None
     return float(stop)
 
@@ -1545,7 +1550,10 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     # This is a risk policy, not a historically optimized profitability claim.
     if forecast["base_price"] / limit - 1 < MIN_BASE_REWARD_PCT / 100:
         return "insufficient_expected_reward", None
-    stop = limit * 0.98
+    # The fixed stop is the instrument's own: −2% on a listed fund, −3% on a single stock.
+    stop_pct = exit_policy_for(dict(symbol=symbol, name=name,
+                                    company_analysis=company)).stop_pct
+    stop = limit * (1 - stop_pct)
     if quote["bid"] <= stop:
         return "entry_below_fixed_stop", None
     projection = (forecast["base_price"], "종합평가 5거래일 시나리오")
@@ -1788,10 +1796,12 @@ def exit_watch(candidates, bars, after_bars, closes):
     """Apply the sell rule to the bars observed after each delivered signal.
 
     The entry is the signal's limit price, not a confirmed fill, and every alert built from
-    this says so. Without post-signal bars, or without a pre-entry volume baseline, the
-    rule keeps its fixed +6%/−2% branch and reports that the surge could not be confirmed.
+    this says so. The stop is the one the signal was made on, read back from the signal's
+    own fixed stop (row[5]) so a fund keeps −2% and a single stock keeps −3%. Without
+    post-signal bars, or without a pre-entry volume baseline, the rule keeps its fixed
+    +6% branch and reports that the surge could not be confirmed.
     """
-    from exit_policy import evaluate_series
+    from exit_policy import ExitPolicy, evaluate_series
     decisions = []
     for row in candidates:
         if row[4] is None:
@@ -1805,11 +1815,19 @@ def exit_watch(candidates, bars, after_bars, closes):
             continue
         opening = bars.get(symbol) or {}
         baseline = [opening[slot]["volume"] for slot in (0, 1) if slot in opening]
-        decision = evaluate_series(row[4], observations, entry_at=closes,
+        policy = DEFAULT_EXIT_POLICY
+        fixed_stop = row[5]
+        if (isinstance(fixed_stop, (int, float)) and not isinstance(fixed_stop, bool)
+                and isinstance(row[4], (int, float)) and not isinstance(row[4], bool)
+                and 0 < fixed_stop < row[4]):
+            ratio = round(1 - fixed_stop / row[4], 6)
+            if 0 < ratio < 1:
+                policy = ExitPolicy(stop_pct=ratio)
+        decision = evaluate_series(row[4], observations, policy=policy, entry_at=closes,
                                    baseline_volume=(sum(baseline) / len(baseline)) if baseline else None)
         if decision is None:
             continue
-        decisions.append(dict(symbol=symbol, entry=row[4], decision=decision,
+        decisions.append(dict(symbol=symbol, entry=row[4], decision=decision, stop_pct=policy.stop_pct,
                               last_price=observations[-1]["price"],
                               return_pct=round((observations[-1]["price"] / row[4] - 1) * 100, 2),
                               volume_baseline=(sum(baseline) / len(baseline)) if baseline else None))
@@ -1844,7 +1862,8 @@ def format_exit_watch(market, decisions, closes):
             if decision["reason"] == "surge_hold":
                 state = "단기 급등 확인 → +6%에서 팔지 않고 트레일링 보유"
             else:
-                state = "기본 규칙 유지 (손절 −2% · 익절 +6%)"
+                state = (f"기본 규칙 유지 (손절 −{row.get('stop_pct', DEFAULT_EXIT_POLICY.stop_pct):.0%}"
+                         f" · 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%})")
             extra = ""
             if decision["reason"] != "surge_hold" and decision.get("mode") == "fixed" and row.get("volume_baseline") is None:
                 extra = " · 급등 판정에 필요한 기준 거래량 없음"
@@ -1925,11 +1944,14 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
         entry_label = "$" + f"{limit:,.2f}" if overseas else f"{limit:,.0f}원"
         base, upside = forecast["base_price"], forecast["bull_price"]
         target_label = "$" + f"{base:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{base:,.0f} / {upside:,.0f}원"
+        # The alert names the stop of this instrument, not of the default policy.
+        policy = exit_policy_for(dict(symbol=symbol, name=name,
+                                      company_analysis=companies.get(symbol)))
         lines.extend(["", f"• {name} ({ticker}) · 종합 {forecast['composite_score']:.1f}/100",
                       f"진입 상한 {entry_label} · {(closes+timedelta(seconds=30)):%H:%M:%S}까지",
                       f"5거래일 분석 목표 · 기준/상승 {target_label}",
-                      f"손절 −{DEFAULT_EXIT_POLICY.stop_pct:.0%} · 기본 익절 +{DEFAULT_EXIT_POLICY.take_profit_pct:.0%} · "
-                      f"단기 급등 시 {DEFAULT_EXIT_POLICY.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
+                      f"손절 −{policy.stop_pct:.0%} · 기본 익절 +{policy.take_profit_pct:.0%} · "
+                      f"단기 급등 시 {policy.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
                       "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"])
     if urgent:
         import urgent_issues

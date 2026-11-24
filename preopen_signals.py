@@ -8,7 +8,8 @@ import rebound_track
 from advance_policy import advance_context,eligible_for_advance_research
 from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE,confirmed_catalyst,liftable_reason
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
-from exit_policy import DEFAULT_EXIT_POLICY,policy_snapshot
+from exit_policy import (DEFAULT_EXIT_POLICY, FUND_STOP_PCT, STOCK_STOP_PCT, exit_policy_for,
+                         policy_snapshot, stop_basis)
 
 INCOMPLETE_REASONS={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch',
                     'missing_indicators','invalid_average_price','entry_tick_missing'}
@@ -20,7 +21,7 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
     The band is the previous session's close less half the 14-day ATR, so a gap-up past it
     is not bought; the upside case still has to leave the +6% policy room.
     """
-    values=row['indicators']; price=values['price']
+    values=row['indicators']; price=values['price']; policy=exit_policy_for(row)
     for key in ('bull_price','base_price'):
         value=forecast.get(key)
         if not isinstance(value,(int,float)) or isinstance(value,bool) or not math.isfinite(value):
@@ -44,8 +45,10 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
         caveats=list(forecast.get('caveats',[])),
         entry_basis='source_dated_catalyst_pullback_band',fresh_execution_quote_required=True,
         target_basis='upside_scenario_not_expected_return',expires_session=expires_session,
-        stop_pct=DEFAULT_EXIT_POLICY.stop_pct,take_profit_pct=DEFAULT_EXIT_POLICY.take_profit_pct,
-        take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot(),
+        # The stop follows the instrument: −2% on a fund, −3% on a single stock.
+        take_profit_pct=policy.take_profit_pct,
+        take_profit_mode=policy.take_profit_mode,exit_policy=policy_snapshot(policy),
+        **stop_basis(row),
         catalyst=dict(evidence))
     return 'conditional_buy',plan
 
@@ -202,6 +205,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             if plan.get('strategy')=='earnings_catalyst': catalyst_picks.append(row['symbol'])
             elif plan.get('track')=='rebound': rebound_picks.append(row['symbol'])
         elif status=='conditional_buy':
+            policy=exit_policy_for(row)
             row['preopen_signal']=dict(status=status,confirmed=False,entry_limit=entry_limit,
                 entry_floor=entry_floor,strategy=strategy,
                 reference_price=price,reference_date=_expected_session(previous_session,row.get('market')),
@@ -210,9 +214,10 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
                 entry_basis='source_dated_catalyst_pullback_band' if catalyst else 'previous_session_close_limit_not_current_market_quote',
                 fresh_execution_quote_required=True,
                 target_basis='upside_scenario_not_expected_return' if catalyst else 'base_scenario',
-                expires_session=report.get('preopen_session'),stop_pct=DEFAULT_EXIT_POLICY.stop_pct,
-                take_profit_pct=DEFAULT_EXIT_POLICY.take_profit_pct,
-                take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=policy_snapshot())
+                expires_session=report.get('preopen_session'),
+                take_profit_pct=policy.take_profit_pct,
+                take_profit_mode=policy.take_profit_mode,exit_policy=policy_snapshot(policy),
+                **stop_basis(row))
             recommendations.append(row['symbol'])
         counts[status]+=1; row['preopen_decision']=status
     evaluated=sum(counts.values())
@@ -227,7 +232,8 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         advance_candidates=advance,
         catalyst_candidates=catalyst_picks,
         rebound_candidates=rebound_picks,
-        policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,stop_pct=2,take_profit_pct=6,
+        policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
+                    stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                     take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
                     rebound=dict(gap_cancel_pct=rebound_track.GAP_CANCEL_PCT,
                                  hold_sessions=rebound_track.HOLD_SESSIONS,
@@ -283,7 +289,7 @@ def evaluate_preopen_markets(report, at=None):
             counts={},missing_dimensions={},caveats={},recommendations=[],advance_candidates=[],
             catalyst_candidates=[],rebound_candidates=[],
             policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
-                        stop_pct=2,take_profit_pct=6,
+                        stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                         take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
                         rebound=dict(gap_cancel_pct=rebound_track.GAP_CANCEL_PCT,
                                      hold_sessions=rebound_track.HOLD_SESSIONS,

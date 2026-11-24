@@ -2,9 +2,11 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from backtest_intraday import replay
-from exit_policy import (DEFAULT_EXIT_POLICY, ExitPolicy, ExitTracker, evaluate_series,
-                         policy_snapshot)
+from exit_policy import (DEFAULT_EXIT_POLICY, FUND_EXIT_POLICY, FUND_STOP_PCT, STOCK_EXIT_POLICY,
+                         STOCK_STOP_PCT, ExitPolicy, ExitTracker, classify_asset, evaluate_series,
+                         exit_policy_for, policy_snapshot, stop_basis)
 from scanner import build_risk_plan
+from kis_intraday import exit_watch, format_exit_watch
 from tradable_signal import format_requested_report, validate_entry
 
 KST = timezone(timedelta(hours=9))
@@ -61,6 +63,72 @@ class ExitPolicyNumbers(unittest.TestCase):
         text = format_requested_report([], [signal], {}, T0)
         self.assertIn("기본 익절", text)
         self.assertIn("트레일링", text)
+
+
+class StopSplit(unittest.TestCase):
+    """The owner's 2026-11-24 rule: 손절은 이분화 — a fund −2%, a single stock −3%."""
+
+    def test_the_two_policies_share_the_six_percent_target_and_differ_only_in_the_stop(self):
+        self.assertEqual((FUND_EXIT_POLICY.stop_pct, STOCK_EXIT_POLICY.stop_pct), (0.02, 0.03))
+        self.assertEqual(FUND_EXIT_POLICY.take_profit_pct, STOCK_EXIT_POLICY.take_profit_pct)
+        self.assertEqual(FUND_EXIT_POLICY.stop_pct, DEFAULT_EXIT_POLICY.stop_pct)
+
+    def test_a_fund_is_known_from_its_class_its_profile_or_its_name(self):
+        cases = ((dict(asset_type="etf"), ("fund", "asset_type")),
+                 (dict(asset_type="inverse_etf"), ("fund", "asset_type")),
+                 (dict(company_analysis=dict(quote_type="ETF")), ("fund", "quote_type")),
+                 (dict(name="KODEX 200"), ("fund", "listing_name")),
+                 (dict(name="TIGER 미국나스닥100"), ("fund", "listing_name")),
+                 (dict(name="SPDR S&P 500 ETF"), ("fund", "listing_name")),
+                 (dict(name="삼성전자", asset_type="stock_or_etf"), ("stock", "unclassified")),
+                 (dict(name="지니언스"), ("stock", "unclassified")))
+        for row, expected in cases:
+            self.assertEqual(classify_asset(row), expected, row)
+
+    def test_the_stop_price_quantity_and_ratio_follow_the_instrument(self):
+        fund = build_risk_plan(10000, policy=exit_policy_for(dict(name="KODEX 200")))
+        stock = build_risk_plan(10000, policy=exit_policy_for(dict(name="삼성전자")))
+        self.assertEqual((fund["stop_pct"], fund["stop_price"], fund["risk_reward_ratio"]), (0.02, 9800, 3))
+        self.assertEqual((stock["stop_pct"], stock["stop_price"], stock["risk_reward_ratio"]), (0.03, 9700, 2))
+        # The same 30,000원 risk budget buys fewer shares at the wider stop.
+        self.assertEqual((fund["quantity_risk_only"], stock["quantity_risk_only"]), (150, 100))
+        self.assertEqual((fund["asset_class"], stock["asset_class"]), ("fund", "stock"))
+        self.assertEqual(stock["exit_policy"]["stop_pct"], 0.03)
+
+    def test_stop_basis_says_which_rule_was_applied_and_why(self):
+        basis = stop_basis(dict(name="KODEX 200"))
+        self.assertEqual(basis, dict(asset_class="fund", stop_pct=0.02, stop_pct_label="−2%",
+                                     stop_evidence="listing_name"))
+
+    def test_a_single_stock_is_not_stopped_at_the_fund_level(self):
+        # 10,000 entry: −2.5% is inside the stock's −3% stop but through the fund's −2%.
+        for row, reason in ((dict(name="삼성전자"), "fixed_hold"), (dict(name="KODEX 200"), "stop_loss")):
+            tracker = ExitTracker(10000, exit_policy_for(row), entry_at=T0, baseline_volume=1000)
+            self.assertEqual(tracker.observe(minutes(5), 9750, volume=800)["reason"], reason, row)
+        self.assertEqual(ExitTracker(10000, STOCK_EXIT_POLICY).stop_price, 9700)
+        self.assertEqual(ExitTracker(10000, FUND_EXIT_POLICY).stop_price, 9800)
+
+    def test_the_risk_plan_default_stays_the_fund_policy(self):
+        plan = build_risk_plan(10000)
+        self.assertEqual(plan["stop_price"], 9800)
+        self.assertEqual(plan["exit_policy"], DEFAULT_EXIT_POLICY.snapshot())
+
+
+class ExitWatchStopSplit(unittest.TestCase):
+    def bars(self, prices):
+        return {slot: dict(high=price, low=price, close=price, volume=100)
+                for slot, price in enumerate(prices)}
+
+    def test_the_sell_watch_keeps_the_stop_the_signal_was_made_on(self):
+        # entry 10,000 with the stock's own stop at 9,700: 9,750 holds, 9,650 is a stop.
+        candidate = ("005930", 2.0, 0.1, 10100.0, 10000.0, 9700.0, (10600.0, "시나리오"))
+        opening = {"005930": self.bars([10000, 10000])}
+        held = exit_watch([candidate], opening, {"005930": self.bars([9750])}, T0)
+        self.assertEqual(held[0]["stop_pct"], 0.03)
+        self.assertEqual(held[0]["decision"]["reason"], "fixed_hold")
+        self.assertIn("손절 −3%", format_exit_watch("KRX", held, T0))
+        stopped = exit_watch([candidate], opening, {"005930": self.bars([9650])}, T0)
+        self.assertEqual(stopped[0]["decision"]["reason"], "stop_loss")
 
 
 class FixedExits(unittest.TestCase):

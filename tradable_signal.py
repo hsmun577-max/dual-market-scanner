@@ -4,7 +4,7 @@ import math
 from decimal import Decimal,ROUND_CEILING
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
 from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE, entry_gate
-from exit_policy import DEFAULT_EXIT_POLICY
+from exit_policy import classify_asset, exit_policy_for
 from rebound_track import entry_state as rebound_entry_state
 
 def krx_tick(price):
@@ -118,12 +118,16 @@ def validate_entry(row,quote,at,session_open):
                     session_price=quote.get('last_price'),day_open=quote.get('day_open'),
                     volume_ratio=quote.get('volume_ratio'),catalyst=plan.get('catalyst'))
     elif base/ask-1<MIN_BASE_REWARD_PCT/100:return reject('insufficient_expected_reward')
+    # The stop follows the instrument the row is: −2% on a fund, −3% on a single stock.
+    policy=exit_policy_for(row)
     return dict(result,trade_ready=True,reason='entry_conditions_met',score=score,
         reference_price=plan.get('reference_price'),reference_date=plan.get('reference_date'),
         indicative_entry=ask,entry_limit=limit,entry_floor=floor,bid=bid,
-        stop_price=round_trigger(Decimal(str(ask))*Decimal('.98')),
-        take_profit_price=round_trigger(Decimal(str(ask))*Decimal(str(1+DEFAULT_EXIT_POLICY.take_profit_pct))),base_target=base,bull_target=bull,
-        take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,exit_policy=DEFAULT_EXIT_POLICY.snapshot(),
+        stop_price=round_trigger(Decimal(str(ask))*Decimal(str(1-policy.stop_pct))),
+        take_profit_price=round_trigger(Decimal(str(ask))*Decimal(str(1+policy.take_profit_pct))),base_target=base,bull_target=bull,
+        stop_pct=policy.stop_pct,take_profit_pct=policy.take_profit_pct,
+        asset_class=classify_asset(row)[0],
+        take_profit_mode=policy.take_profit_mode,exit_policy=policy.snapshot(),
         catalyst=plan.get('catalyst') if plan.get('strategy')=='earnings_catalyst' else None,
         quote_at=seen.isoformat(),valid_until=(at+timedelta(seconds=30)).isoformat(),
         generated_at=at.isoformat(),filled=False)
@@ -150,7 +154,8 @@ def format_requested_report(sector_lines,signals,evaluation,at):
                 f"{datetime.fromisoformat(row['valid_until']):%H:%M:%S}까지 가격 재확인 후 진입",
                 f"분석 목표 {row['base_target']:,.0f}원 / 상승 시나리오 {row['bull_target']:,.0f}원",
                 f"예상 손절 {row['stop_price']:,.0f}원 · 기본 익절 {row['take_profit_price']:,.0f}원",
-                '손절 −2%·익절 +6%는 실제 체결가로 재계산 · 급등 시 6% 매도 대신 트레일링 보유 후 거래량 급감 시 청산'])
+                f"손절 −{row['stop_pct']:.0%}·익절 +{row['take_profit_pct']:.0%}는 실제 체결가로 재계산 · 급등 시 "
+                f"{row['take_profit_pct']:.0%} 매도 대신 트레일링 보유 후 거래량 급감 시 청산"])
     elif any(row.get('reason')=='waiting_for_entry_price' for row in signals):
         lines.extend([f'매수 대기 · {at:%m/%d %H:%M} KST','분석 조건은 충족했으나 현재 호가가 매수 상한 초과'])
     elif evaluation.get('decision_completed',0)>0 and not signals:

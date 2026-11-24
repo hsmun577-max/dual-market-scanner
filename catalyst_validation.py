@@ -13,6 +13,7 @@ from company_forecast import build_company_forecast
 from preopen_signals import evaluate_preopen
 from valuation_data import domestic_valuations
 from catalyst_policy import completed_bar_available_at
+from exit_policy import exit_policy_for
 KST=ZoneInfo('Asia/Seoul')
 
 def bars_for(symbol,day='2026-11-19'):
@@ -43,20 +44,28 @@ def execution_diagnostic(row):
         if op>plan['entry_limit'] and low<=plan['entry_limit']:
             entry=plan['entry_limit'];entry_at=at;break
     if entry is None:return dict(status='no_observed_entry',opening_price=opening)
-    stop=entry*.98;target=entry*1.06
+    # The replayed exit rule is the row's own: −2% stop on a fund, −3% on a single stock.
+    policy=exit_policy_for(row)
+    stop=entry*(1-policy.stop_pct);target=entry*(1+policy.take_profit_pct)
+    stop_gross=round(-policy.stop_pct*100,2);cost=.2
     base=dict(entry=entry,entry_at=entry_at.isoformat(),opening_price=opening,stop=stop,target=target,
+              stop_pct=policy.stop_pct,asset_class=row.get('asset_type'),
               basis='hypothetical_limit_fill_5m_OHLC_no_historical_orderbook',
-              point_in_time_full_model_validated=False,roundtrip_cost_assumption_pct=.2)
+              point_in_time_full_model_validated=False,roundtrip_cost_assumption_pct=cost)
     for at,bar in df.iterrows():
         if at<entry_at:continue
         low=float(bar['Low']);high=float(bar['High']);op=float(bar['Open'])
         if at>entry_at and op<=stop:return dict(base,status='stop_gap',exit_at=at.isoformat(),exit=op,gross_pct=(op/entry-1)*100)
         if low<=stop and high>=target:
-            return dict(base,status='intrabar_order_unknown',bar_at=at.isoformat(),gross_return_range_pct=[-2,6])
+            return dict(base,status='intrabar_order_unknown',bar_at=at.isoformat(),
+                        gross_return_range_pct=[stop_gross,policy.take_profit_pct*100])
         if at==entry_at and op>entry and high>=target:
-            return dict(base,status='entry_target_order_unknown',bar_at=at.isoformat(),gross_return_range_pct=[0,6])
-        if low<=stop:return dict(base,status='stop',exit_at=at.isoformat(),exit=stop,gross_pct=-2,net_pct=-2.2)
-        if high>=target:return dict(base,status='target',exit_at=at.isoformat(),exit=target,gross_pct=6,net_pct=5.8)
+            return dict(base,status='entry_target_order_unknown',bar_at=at.isoformat(),
+                        gross_return_range_pct=[0,policy.take_profit_pct*100])
+        if low<=stop:return dict(base,status='stop',exit_at=at.isoformat(),exit=stop,gross_pct=stop_gross,net_pct=round(stop_gross-cost,2))
+        if high>=target:return dict(base,status='target',exit_at=at.isoformat(),exit=target,
+                                    gross_pct=policy.take_profit_pct*100,
+                                    net_pct=round(policy.take_profit_pct*100-cost,2))
     close=float(df.iloc[-1]['Close'])
     return dict(base,status='still_open_at_regular_close',marked_price=close,
                 unrealized_pct=round((close/entry-1)*100,4))

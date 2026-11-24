@@ -64,6 +64,20 @@ class PreopenTests(unittest.TestCase):
             company_forecast=dict(assessment_status='complete',generated_at=AT.isoformat(),
                 composite_score=70,base_price=10600,bull_price=11000,missing_dimensions=[]))
     def report(self,row):return dict(results=[row],preopen_session='2026-11-19',sectors=[])
+    def test_the_stop_follows_the_instrument(self):
+        row=self.row();evaluate_preopen(self.report(row),'2026-11-18',AT)
+        self.assertEqual((row['preopen_signal']['asset_class'],row['preopen_signal']['stop_pct']),
+                         ('stock',0.03))
+        self.assertIn('손절 −3%',telegram_candidate_line(row))
+        fund=self.row();fund.update(symbol='069500.KS',name='KODEX 200')
+        result=evaluate_preopen(self.report(fund),'2026-11-18',AT)
+        self.assertEqual((fund['preopen_signal']['asset_class'],fund['preopen_signal']['stop_pct']),
+                         ('fund',0.02))
+        self.assertEqual(fund['preopen_signal']['exit_policy']['stop_pct'],0.02)
+        self.assertIn('손절 −2%',telegram_candidate_line(fund))
+        # The evaluation reports both stops, not one number that only fits half the book.
+        self.assertEqual(result['policy']['stop_pct'],dict(fund=0.02,stock=0.03))
+
     def test_daily_unconfirmed_flag_no_longer_blocks_a_valid_conditional_plan(self):
         row=self.row();report=self.report(row)
         result=evaluate_preopen(report,'2026-11-18',AT)
