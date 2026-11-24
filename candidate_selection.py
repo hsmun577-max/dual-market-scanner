@@ -101,6 +101,39 @@ def candidate_rejection_reason(item, market):
     return market_headwind_reason(values)
 
 
+# The short-term early-entry track (``early_entry_track``) buys the first one-to-three
+# sessions of an average alignment, so the momentum gate's own trend confirmation —
+# ``unconfirmed_uptrend`` (price > ma20 >= ma60) and ``weak_relative_trend`` (5- and
+# 20-day returns plus relative strength already positive) — is exactly what it is meant to
+# see past. What it may never lift is the safety around it: instrument, liquidity, price,
+# a breakdown, an extended price, and the market regime. Those stay here, in one place, so
+# the two paths cannot drift apart.
+EARLY_ENTRY_LIFTABLE_REASONS = frozenset({"unconfirmed_uptrend", "weak_relative_trend"})
+
+
+def early_entry_block_reason(item, market):
+    """The block the short-term early-entry track may not lift, or ``None``.
+
+    Read straight off the same indicators the momentum path reads, so a name the early
+    track would plan is still refused when it is untradable, thin, breaking down, already
+    extended, or trading under a market index beneath its 20-day average. This is the
+    complement of ``EARLY_ENTRY_LIFTABLE_REASONS``: those two refusals are the only ones
+    the track is allowed to see past.
+    """
+    reason = liquidity_rejection_reason(item, market)
+    if reason:
+        return reason
+    values = item["indicators"]
+    if values.get("breakdown"):
+        return "breakdown"
+    return_5d = values.get("return_5d")
+    if values.get("overheated") or (isinstance(return_5d, (int, float))
+                                    and not isinstance(return_5d, bool)
+                                    and return_5d > 0.12):
+        return "extended_price"
+    return market_headwind_reason(values)
+
+
 def rank_market_candidates(candidates, market, limit=5):
     """Rank eligible candidates without reserving slots for volume outliers."""
     eligible = [item for item in candidates if candidate_rejection_reason(item, market) is None]

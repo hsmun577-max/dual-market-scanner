@@ -3,8 +3,10 @@ from datetime import datetime,timedelta,timezone
 from collections import Counter
 import math
 from candidate_selection import (liquidity_rejection_reason,candidate_rejection_reason,
-                                 market_headwind_reason)
+                                 market_headwind_reason,early_entry_block_reason,
+                                 EARLY_ENTRY_LIFTABLE_REASONS)
 import rebound_track
+import early_entry_track
 from advance_policy import advance_context,eligible_for_advance_research
 from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE,confirmed_catalyst,liftable_reason
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
@@ -103,7 +105,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
     """
     at=at or datetime.now(timezone.utc)
     if at.utcoffset() is None: raise ValueError('Timezone-aware decision time required')
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]; rebound_picks=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]; rebound_picks=[]; early_picks=[]
     for row in report.get('results',[]):
         if market is not None and row.get('market')!=market: continue
         row.pop('preopen_signal',None)
@@ -160,6 +162,11 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         # a downtrend cannot hold them back and a name the screen would refuse as
         # ``unconfirmed_uptrend`` can still be planned here.
         rebound=rebound_track.setup(values)
+        # The short-term early-entry track reads the first sessions of an average alignment
+        # (``unconfirmed_uptrend``/``weak_relative_trend`` by the momentum gate) and enters
+        # on the next open less 1%. Its own safety list — liquidity, breakdown, an extended
+        # price and the market regime — is read beside it, so "early" never means "unsafe".
+        early=early_entry_track.setup(values)
         if reason: status=reason
         elif values['ma20']<=0: status='invalid_average_price'
         elif values.get('breakdown'): status='breakdown'
@@ -175,6 +182,29 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             status,plan=rebound_track.rebound_plan(rebound,values,reference_date,
                 report.get('preopen_session'),at,row.get('market') or market or 'KR',
                 next_open=rebound_track.observed_open(values),
+                caveats=forecast.get('caveats',[]))
+            if plan: strategy=plan['strategy']
+        elif early and early_entry_block_reason(row,row['market']):
+            # Not liftable by this track: the momentum gate's safety blocks and the market
+            # regime stay exactly as they are for every other entry.
+            status=early_entry_block_reason(row,row['market'])
+        elif early and not early_entry_track.qualifier(row):
+            # The chart alone carried no edge in the study; without a measured inflow or a
+            # 61+ fundamental score there is no early entry to plan.
+            status='early_entry_qualifier_missing'
+        elif early and (not isinstance(score,(int,float)) or not math.isfinite(score)
+                        or score<MIN_COMPOSITE_SCORE):
+            status='composite_score_below_policy'
+        elif early and (not isinstance(forecast.get('base_price'),(int,float))
+                        or isinstance(forecast.get('base_price'),bool)
+                        or not math.isfinite(forecast['base_price'])
+                        or forecast['base_price']/price-1<MIN_BASE_REWARD_PCT/100):
+            status='insufficient_expected_reward'
+        elif early:
+            status,plan=early_entry_track.entry_plan(row,forecast,reference_date,
+                report.get('preopen_session'),at,row.get('market') or market or 'KR',
+                next_open=early_entry_track.observed_open(values),
+                qualifier_reason=early_entry_track.qualifier(row),
                 caveats=forecast.get('caveats',[]))
             if plan: strategy=plan['strategy']
         elif headwind and (event_support or not trend_reason):
@@ -203,6 +233,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             row['preopen_signal']=plan
             recommendations.append(row['symbol'])
             if plan.get('strategy')=='earnings_catalyst': catalyst_picks.append(row['symbol'])
+            elif plan.get('track')=='early_entry': early_picks.append(row['symbol'])
             elif plan.get('track')=='rebound': rebound_picks.append(row['symbol'])
         elif status=='conditional_buy':
             policy=exit_policy_for(row)
@@ -231,10 +262,20 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         recommendations=recommendations,
         advance_candidates=advance,
         catalyst_candidates=catalyst_picks,
+        early_entry_candidates=early_picks,
         rebound_candidates=rebound_picks,
         policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
                     stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                     take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
+                    early_entry=dict(entry_offset_pct=early_entry_track.ENTRY_OFFSET_PCT,
+                                     hold_sessions=early_entry_track.HOLD_SESSIONS,
+                                     min_volume_ratio=early_entry_track.MIN_VOLUME_RATIO,
+                                     max_alignment_days=early_entry_track.MAX_ALIGNMENT_DAYS,
+                                     max_above_ma20_pct=early_entry_track.MAX_ABOVE_MA20*100,
+                                     qualifiers=sorted(early_entry_track.QUALIFIER_LABELS),
+                                     lifted_reasons=sorted(EARLY_ENTRY_LIFTABLE_REASONS),
+                                     stop_pct='instrument_split',
+                                     take_profit_pct=6),
                     rebound=dict(gap_cancel_pct=rebound_track.GAP_CANCEL_PCT,
                                  hold_sessions=rebound_track.HOLD_SESSIONS,
                                  stop_policy=rebound_track.STOP_POLICY,
@@ -247,13 +288,14 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
 
 
 def _merge(parts):
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]; rebound=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]; rebound=[]; early=[]
     for part in parts.values():
         counts.update(part['counts']); missing.update(part['missing_dimensions'])
         caveats.update(part.get('caveats',{}))
         recommendations.extend(part['recommendations']); advance.extend(part['advance_candidates'])
         catalyst.extend(part.get('catalyst_candidates',[]))
         rebound.extend(part.get('rebound_candidates',[]))
+        early.extend(part.get('early_entry_candidates',[]))
     evaluated=sum(counts.values()); excluded=sum(counts[s] for s in INCOMPLETE_REASONS)
     policy=next(iter(parts.values()))['policy'] if parts else {}
     return dict(completed=bool(evaluated) and not excluded,
@@ -263,7 +305,7 @@ def _merge(parts):
         markets=sorted(parts),generated_at=next(iter(parts.values()))['generated_at'] if parts else None,
         evaluated=evaluated,counts=dict(counts),missing_dimensions=dict(missing),
         caveats=dict(caveats),recommendations=recommendations,advance_candidates=advance,
-        catalyst_candidates=catalyst,rebound_candidates=rebound,policy=policy,
+        catalyst_candidates=catalyst,early_entry_candidates=early,rebound_candidates=rebound,policy=policy,
         live_execution_confirmed=False)
 
 
@@ -287,10 +329,19 @@ def evaluate_preopen_markets(report, at=None):
             connected=True,mode='conditional_preopen',scope='analysed_candidates',
             previous_session={},markets=[],generated_at=at.isoformat(),evaluated=0,
             counts={},missing_dimensions={},caveats={},recommendations=[],advance_candidates=[],
-            catalyst_candidates=[],rebound_candidates=[],
+            catalyst_candidates=[],early_entry_candidates=[],rebound_candidates=[],
             policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
                         stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                         take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
+                        early_entry=dict(entry_offset_pct=early_entry_track.ENTRY_OFFSET_PCT,
+                                         hold_sessions=early_entry_track.HOLD_SESSIONS,
+                                         min_volume_ratio=early_entry_track.MIN_VOLUME_RATIO,
+                                         max_alignment_days=early_entry_track.MAX_ALIGNMENT_DAYS,
+                                         max_above_ma20_pct=early_entry_track.MAX_ABOVE_MA20*100,
+                                         qualifiers=sorted(early_entry_track.QUALIFIER_LABELS),
+                                         lifted_reasons=sorted(EARLY_ENTRY_LIFTABLE_REASONS),
+                                         stop_pct='instrument_split',
+                                         take_profit_pct=6),
                         rebound=dict(gap_cancel_pct=rebound_track.GAP_CANCEL_PCT,
                                      hold_sessions=rebound_track.HOLD_SESSIONS,
                                      stop_policy=rebound_track.STOP_POLICY,
