@@ -170,9 +170,6 @@ def validate_entry(row,quote,at,session_open):
         quote_at=seen.isoformat(),valid_until=(at+timedelta(seconds=30)).isoformat(),
         generated_at=at.isoformat(),filled=False)
 
-# Why a planned entry is not trade-ready, in the words of the request report. The names are
-# shown as plans and never as signals: a session that has already closed cannot confirm an
-# entry, and the reader still needs to know what the analysis found.
 HOLD_REASON_LABELS = {
     'market_closed': '장 마감 · 다음 거래일 시가 확인',
     'wrong_plan_session': '계획 세션 아님 · 다음 세션 계획',
@@ -187,10 +184,19 @@ HOLD_REASON_LABELS = {
 }
 
 
+# The plan's own label, or the Korean name of its strategy: a raw 'earnings_catalyst' in
+# the message tells the reader nothing about why the name is there.
+TRACK_LABELS = {
+    'earnings_catalyst': '실적·호재 촉매', 'event_catalyst': '호재형',
+    'early_ma_alignment': '단기 상승 초입', 'bottom_rebound': 'R2 바닥반등',
+    'oversold_rebound': 'R3 과매도반등', 'trend': '정배열 추세',
+}
+
+
 def plan_line(plan):
     """One line for a conditional plan that could not be confirmed at this moment."""
     code = str(plan.get('symbol') or '').split('.')[0]
-    label = plan.get('label') or plan.get('strategy') or '조건부'
+    label = plan.get('label') or TRACK_LABELS.get(plan.get('strategy'), plan.get('strategy')) or '조건부'
     band = []
     floor, limit = plan.get('entry_floor'), plan.get('entry_limit')
     text = lambda value: f"{value:,.0f}원" if plan.get('market') != 'US' else f"${value:,.2f}"

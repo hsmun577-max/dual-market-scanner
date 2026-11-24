@@ -116,6 +116,14 @@ class TradableSignalTests(unittest.TestCase):
         self.assertIn('장 마감 · 다음 거래일 시가 확인',message)
         self.assertIn('+253%',message)
 
+    def test_a_plan_without_a_korean_label_shows_its_strategy_in_korean(self):
+        from tradable_signal import plan_line
+        text = plan_line(dict(symbol='009150.KS', name='삼성전기', market='KR',
+                              strategy='earnings_catalyst', entry_limit=778000,
+                              entry_floor=732000, composite_score=65.2))
+        self.assertIn('[실적·호재 촉매]', text)
+        self.assertNotIn('earnings_catalyst', text)
+
     def test_the_plan_list_never_appears_instead_of_a_confirmed_signal(self):
         r,q=fixture();signal=validate_entry(r,q,AT,True)
         message=format_requested_report([],[signal],dict(completed=True),AT,plans=[dict(
