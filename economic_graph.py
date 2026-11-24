@@ -245,6 +245,7 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_s
     from advance_policy import eligible_for_advance_research
     from catalyst_track import watch_candidates as catalyst_watch_candidates
     from rebound_track import watch_candidates as rebound_watch_candidates
+    from early_entry_track import watch_candidates as early_entry_watch_candidates
     event_set=set(event_symbols)
     eligible=[row for row in pool if liquidity_rejection_reason(row,market) is None
         or (row['symbol'] in event_set and eligible_for_advance_research(row,market))]
@@ -260,22 +261,28 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_s
     # A bottom or oversold reversal qualifies on its own candle, which the momentum screen
     # refuses; without a slot it would never be analysed and never planned.
     rebound=rebound_watch_candidates(eligible,market,limit=max(2,limit//8))
+    # The short-term early-entry track reads an alignment the momentum screen refuses; its
+    # qualifier (measured inflow or a 61+ fundamental score) is only known after analysis.
+    early_entry=early_entry_watch_candidates(eligible,market,limit=max(2,limit//8))
     neutral=sorted(eligible,key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:8]
     pinned_symbols=[symbol for symbol in pinned if symbol in indexed]
     pinned_rows=[indexed[symbol] for symbol in pinned_symbols]
     selected=[]; seen=set(); entries=set(); catalysts=set(); rebounds=set()
     from itertools import zip_longest
     entry=[row for group in zip_longest(trend,recovery) for row in group if row is not None]
-    for row in [*pinned_rows,*entry,*event_rows,*catalyst,*rebound,*neutral]:
+    for row in [*pinned_rows,*entry,*event_rows,*catalyst,*rebound,*early_entry,*neutral]:
         if row['symbol'] not in seen:
             selected.append(row); seen.add(row['symbol'])
     entries={row['symbol'] for row in entry}; catalysts={row['symbol'] for row in catalyst}
     rebounds={row['symbol'] for row in rebound}; pinned_set=set(pinned_symbols)
+    early_entries={row['symbol'] for row in early_entry}
     for row in selected[:limit]:
         # Only a name that arrived through its own budget is labelled with it; a reversal
         # setup is the more specific reason when both apply.
         if row['symbol'] in rebounds and row['symbol'] not in entries:
             row['selection_reason']='rebound_watch'
+        elif row['symbol'] in early_entries and row['symbol'] not in entries:
+            row['selection_reason']='early_entry_watch'
         elif row['symbol'] in catalysts and row['symbol'] not in entries:
             row['selection_reason']='catalyst_watch'
         elif row['symbol'] in pinned_set and row['symbol'] not in entries:

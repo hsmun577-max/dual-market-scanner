@@ -6,6 +6,7 @@ from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
 from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE, entry_gate
 from exit_policy import classify_asset, exit_policy_for
 from rebound_track import entry_state as rebound_entry_state
+from early_entry_track import entry_state as early_entry_state
 
 def krx_tick(price):
     for upper,tick in [(2000,1),(5000,5),(20000,10),(50000,50),(200000,100),(500000,500)]:
@@ -66,6 +67,37 @@ def rebound_entry(plan,quote,at,result,seen,market='KR'):
         filled=False)
 
 
+def early_entry(plan,quote,at,result,seen,market='KR',score=None):
+    """An early-entry plan is priced from the observed open less 1%, never from a close.
+
+    The study's edge came from the resting limit (-1% under the open, filled 83.4%): a
+    quote at or under it means the dip is there, and a quote far below it means the premise
+    of the plan is gone. Nothing is chased — an unfilled limit is left unfilled.
+    """
+    def reject(reason):return dict(result,reason=reason)
+    state=early_entry_state((quote or {}).get('day_open'),market)
+    if state['status']=='awaiting_open':return reject('early_entry_open_unverified')
+    limit=state['entry_limit'];ask=number(quote.get('ask'));bid=number(quote.get('bid'))
+    if limit is None or limit<=0:return reject('entry_limit_missing')
+    if ask>limit:return reject('waiting_for_entry_price')
+    if ask<limit*.98:return reject('price_moved_requires_reanalysis')
+    policy=exit_policy_for({'asset_type':plan.get('asset_class'),
+                            'name':result.get('name')})
+    return dict(result,trade_ready=True,reason='entry_conditions_met',track='early_entry',
+        strategy=plan.get('strategy'),label=plan.get('label'),score=score,
+        hold_sessions=plan.get('hold_sessions'),
+        reference_price=number(plan.get('reference_price')),reference_date=plan.get('reference_date'),
+        indicative_entry=ask,entry_limit=limit,entry_floor=None,bid=bid,
+        day_open=number(quote.get('day_open')),entry_offset_pct=plan.get('entry_offset_pct'),
+        stop_price=round_trigger(Decimal(str(ask))*Decimal(str(1-policy.stop_pct))),
+        take_profit_price=round_trigger(Decimal(str(ask))*Decimal(str(1+policy.take_profit_pct))),
+        stop_pct=policy.stop_pct,take_profit_pct=policy.take_profit_pct,
+        asset_class=plan.get('asset_class'),take_profit_mode=policy.take_profit_mode,
+        exit_policy=policy.snapshot(),quote_at=seen.isoformat(),
+        valid_until=(at+timedelta(seconds=30)).isoformat(),generated_at=at.isoformat(),
+        filled=False)
+
+
 def validate_entry(row,quote,at,session_open):
     """Validate a conditional plan at a fresh executable ask; never assume a fill."""
     result=dict(symbol=row.get('symbol'),name=row.get('name'),trade_ready=False)
@@ -95,6 +127,9 @@ def validate_entry(row,quote,at,session_open):
     ask_size=number(quote.get('ask_size'));bid_size=number(quote.get('bid_size'))
     if ask_size is None or bid_size is None or min(ask_size,bid_size)<1:return reject('empty_or_unverified_orderbook_size')
     if (ask-bid)/ask>.005:return reject('spread_too_wide')
+    if plan.get('track')=='early_entry':
+        # Priced from this session's own open, so it sits before the previous-close limit.
+        return early_entry(plan,quote,at,result,seen,row.get('market') or 'KR',score)
     limit=number(plan.get('entry_limit'));floor=number(plan.get('entry_floor'))
     if limit is None or limit<=0:return reject('entry_limit_missing')
     if ask>limit:return reject('waiting_for_entry_price')
@@ -138,6 +173,14 @@ def format_requested_report(sector_lines,signals,evaluation,at):
     if ready:
         lines.append(f'매수 신호 · {at:%m/%d %H:%M:%S} KST')
         for row in ready[:5]:
+            if row.get('track')=='early_entry':
+                # The early entry is a limit 1% under the session's own open, held 5
+                # sessions, with the instrument's own split stop.
+                lines.extend(['',f"• {row['name']} ({row['symbol'].split('.')[0]}) · [단기 상승 초입] · 5일 보유",
+                    f"진입 확인가 {row['indicative_entry']:,.0f}원 · 시가 −1% 지정가 {row['entry_limit']:,.0f}원 (시가 {row['day_open']:,.0f}원 대비)",
+                    f"{datetime.fromisoformat(row['valid_until']):%H:%M:%S}까지 가격 재확인 후 진입 · 미체결 시 추격 매수 없음",
+                    f"예상 손절 {row['stop_price']:,.0f}원 (−{row['stop_pct']:.0%}) · 기본 익절 {row['take_profit_price']:,.0f}원 (+{row['take_profit_pct']:.0%}) · 5거래일 보유"])
+                continue
             if row.get('track')=='rebound':
                 # A rebound entry has no +6% target and no -2% stop on purpose: it is a
                 # 5-session hold bought on a dip from the open.

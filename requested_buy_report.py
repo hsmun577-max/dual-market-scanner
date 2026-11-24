@@ -77,6 +77,7 @@ def main():
     report['theme_sectors']=[theme]
     sector_lines=(format_report(industry).splitlines() if industry.get('rows') else ['오늘의 주요 섹터','확인 불가'])
     if theme.get('rows'):sector_lines=sector_lines+format_theme_block(theme,'KR')
+    import mid_term_watch
     message=format_requested_report(sector_lines,entries,evaluation,sent_at)
     # 요청 장전 리포트에도 매수 후보와 분리된 '긴급 이슈 참고'를 붙인다.
     urgent={}
@@ -96,12 +97,21 @@ def main():
         if block:message='\n'.join([message,'',*block])
     except Exception as exc:
         print('Domestic premarket watch unavailable: '+type(exc).__name__,flush=True)
+    # 중기 +30% 눌림 발굴은 당일 매수 판정과 다른 20~60일 관찰 목록이다. 리포트 메시지에
+    # 별도 섹션으로만 붙고 ``recommendations``에는 들어가지 않는다.
+    if report.get('mid_term_watch') is None:
+        mid_term_watch.attach(report, datetime.now(timezone.utc))
+    mid_term_lines=mid_term_watch.format_block(report.get('mid_term_watch') or [])
+    if mid_term_lines:message='\n'.join([message,'',*mid_term_lines])
     audit=dict(session=args.session,generated_at=sent_at.isoformat(),strategy_commit=os.getenv('GITHUB_SHA'),
         explicit_manual_request=True,scheduled_delivery_guards_unchanged=True,
         evaluation=evaluation,entry_checks=entries,trade_ready_count=sum(e['trade_ready'] for e in entries),
         complete_forecasts=sum(r.get('company_forecast',{}).get('assessment_status')=='complete' for r in report['results']),
         research_scope=report.get('research_scope'),
         urgent_issues=urgent,kr_premarket_watch=kr_premarket,
+        mid_term_watch=report.get('mid_term_watch') or [],
+        mid_term_watch_scope=report.get('mid_term_watch_scope'),
+        early_entry_candidates=(evaluation or {}).get('early_entry_candidates'),
         industry_rows=len(industry.get('rows',[])),industry_error=industry.get('error'),
         recommendations=[dict(symbol=r['symbol'],name=r.get('name'),
             score=r['company_forecast']['composite_score'],plan=r['preopen_signal'],quote=quotes.get(r['symbol'])) for r in recommendations],

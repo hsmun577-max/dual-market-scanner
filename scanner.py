@@ -357,6 +357,25 @@ def calculate_indicators(data, benchmark=None):
     ma20 = float(close.tail(20).mean())
     ma60 = float(close.tail(60).mean())
 
+    # How young the 5/20-day alignment is: the short-term early-entry track buys the first
+    # one-to-three sessions of it (or the first close back above the 20-day average), which
+    # the momentum gate refuses as ``unconfirmed_uptrend``. Both are read off the series so
+    # an archived frame that does not carry them is never read as a pass.
+    ma5_series = close.rolling(5).mean()
+    ma20_series = close.rolling(20).mean()
+    aligned_days = None
+    if len(close) >= 20 and pd.notna(ma5_series.iloc[-1]) and pd.notna(ma20_series.iloc[-1]):
+        if ma5_series.iloc[-1] > ma20_series.iloc[-1]:
+            aligned_days = 0
+            for position in range(len(close) - 1, 3, -1):
+                short, long = ma5_series.iloc[position], ma20_series.iloc[position]
+                if pd.isna(short) or pd.isna(long) or short <= long:
+                    break
+                aligned_days += 1
+    ma20_cross_up = None
+    if len(close) >= 21 and pd.notna(ma20_series.iloc[-2]):
+        ma20_cross_up = bool(close.iloc[-2] <= ma20_series.iloc[-2] and price > ma20_series.iloc[-1])
+
     # The bar's own open/high/low and one-day change: a rebound setup is read from the
     # day's candle (a bullish close, a 5-day-MA break, a short upper wick) and not from
     # the 5-day return alone. ``Open`` is optional so archived frames and test fixtures
@@ -467,6 +486,8 @@ def calculate_indicators(data, benchmark=None):
         "ma5": safe_float(ma5),
         "ma20": safe_float(ma20),
         "ma60": safe_float(ma60),
+        "ma5_above_ma20_days": aligned_days,
+        "ma20_cross_up": ma20_cross_up,
         "return_1d": safe_float(return_1d),
         "rsi14": safe_float(calculate_rsi(close)),
         "upper_wick_ratio": safe_float(upper_wick_ratio),
@@ -824,6 +845,10 @@ def prepare_selected_analysis(report):
     # The momentum pass is done, so the names it dropped for turnover alone can be read
     # without touching its decisions: they never enter ``preopen_signal``.
     quality_watch_research(report, datetime.now(timezone.utc))
+    # 중기 +30% 눌림 발굴은 20~60일 보유 전제의 관찰 목록이다. 당일 매수 판정과 분리한
+    # 별도 필드(``mid_term_watch``)에만 쓰고 ``preopen_signal``·``buy_evaluation``은 건드리지 않는다.
+    import mid_term_watch
+    mid_term_watch.attach(report, datetime.now(timezone.utc))
 
 
 QUALITY_WATCH_LIMIT = 8
@@ -982,12 +1007,69 @@ def telegram_rebound_line(item):
             "  좁은 −2% 손절 비권장 · 5거래일 보유 후 청산" + caveat_note(item))
 
 
+def telegram_early_entry_line(item):
+    """An early-entry line: the open −1% limit, the alignment age and the qualifier.
+
+    The study's entry is a resting limit 1% under the next session's open (+0.530% over 5
+    sessions against +0.069% bought at the open). Until the open prints, the plan carries
+    the rule and the flat-open reference level; once it prints, the real limit is shown.
+    """
+    plan = item.get('preopen_signal') or {}
+    if plan.get('track') != 'early_entry':
+        return ''
+    from exit_policy import exit_policy_for
+    overseas = item.get('market') == 'US'
+    symbol = item['symbol']
+    code = symbol if overseas else symbol.split('.')[0]
+    name = item.get('name') or symbol
+    score = plan.get('composite_score')
+    price_text = lambda value: (f"${value:,.2f}" if overseas else f"{value:,.0f}원")
+    entry = plan.get('entry_limit')
+    flat = plan.get('flat_open_entry_limit')
+    if entry:
+        limit_line = (f"시가 −1% 지정가 {price_text(entry)} · 시가 확인됨 "
+                      "(미체결 시 추격 매수 없음)")
+    else:
+        limit_line = ("시가 −1% 지정가 진입 권장"
+                      + (f" · 갭 없이 열리면 {price_text(flat)}" if flat else "")
+                      + " · 시가 확인 후 확정 · 미체결 시 추격 매수 없음")
+    evidence = plan.get('evidence') or {}
+    numbers = []
+    days = evidence.get('alignment_days')
+    if isinstance(days, int):
+        numbers.append(f"MA5>MA20 {days}일차")
+    elif evidence.get('ma20_cross_up'):
+        numbers.append("MA20 첫 돌파일")
+    volume = evidence.get('volume_ratio')
+    if isinstance(volume, (int, float)) and not isinstance(volume, bool):
+        numbers.append(f"거래량 {volume:.1f}배")
+    above = evidence.get('above_ma20_pct')
+    if isinstance(above, (int, float)) and not isinstance(above, bool):
+        numbers.append(f"MA20 대비 {above:+.1%}")
+    if evidence.get('return_1d') is not None:
+        numbers.append(f"당일 {evidence['return_1d']:+.1%}")
+    qualifier = plan.get('qualifier_label')
+    if qualifier:
+        numbers.append(qualifier)
+    basis = (f"  기준 {plan.get('reference_date')} 종가"
+             + (' · ' + ' · '.join(numbers) if numbers else ''))
+    policy = exit_policy_for(item)
+    heading = f"[단기 상승 초입] 조건부 매수 · 종합 {score:.1f}/100" if score is not None else "[단기 상승 초입] 조건부 매수"
+    return (f"• {name} ({code}) · {heading}\n"
+            f"  {limit_line}\n"
+            f"{basis}\n"
+            f"  손절 −{policy.stop_pct:.0%} · 기본 익절 +{policy.take_profit_pct:.0%} · 5거래일 보유 · "
+            "급등 시 트레일링 보유, 거래량 급감·고점 대비 하락 시 청산" + caveat_note(item))
+
+
 def telegram_candidate_line(item):
     forecast = item.get("company_forecast", {})
     signal = item.get("signal", {})
     preopen = item.get('preopen_signal', {})
     if preopen.get('track') == 'rebound':
         return telegram_rebound_line(item)
+    if preopen.get('track') == 'early_entry':
+        return telegram_early_entry_line(item)
     conditional = preopen.get('status') == 'conditional_buy'
     entry = preopen.get('entry_limit') if conditional else signal.get("entry_limit")
     score = forecast.get("composite_score")
@@ -1304,6 +1386,12 @@ def send_telegram_summary(report):
         lines.extend(['', '[수급 유입 우량주]',
                       '외인·기관 순매수 확인 · 매수 후보 검토 대상'])
         lines.extend(quality_watch_line(row) for row in inflow[:5])
+    # 중기 +30% 눌림 발굴은 20~60일 보유·−15% 손절 전제라서 당일 매수 신호와 섞지 않는다.
+    # 관찰 목록으로만 자기 섹션에 실린다(백테스트 3장: 60일 +9.54%·+30% 도달 58.4%).
+    import mid_term_watch
+    mid_term_lines = mid_term_watch.format_block(report.get('mid_term_watch') or [])
+    if mid_term_lines:
+        lines.extend(['', *mid_term_lines])
 
     messages = split_telegram_text("\n".join(lines))
     for message in messages:
