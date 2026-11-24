@@ -169,11 +169,56 @@ def validate_entry(row,quote,at,session_open):
         quote_at=seen.isoformat(),valid_until=(at+timedelta(seconds=30)).isoformat(),
         generated_at=at.isoformat(),filled=False)
 
-def format_requested_report(sector_lines,signals,evaluation,at,regime=None):
+# Why a planned entry is not trade-ready, in the words of the request report. The names are
+# shown as plans and never as signals: a session that has already closed cannot confirm an
+# entry, and the reader still needs to know what the analysis found.
+HOLD_REASON_LABELS = {
+    'market_closed': '장 마감 · 다음 거래일 시가 확인',
+    'wrong_plan_session': '계획 세션 아님 · 다음 세션 계획',
+    'waiting_for_entry_price': '현재 호가가 매수 상한 초과',
+    'price_moved_requires_reanalysis': '가격이 계획 밖으로 이동 · 재분석 필요',
+    'rebound_open_unverified': '시가 확인 전 · 시가 −2~3% 지정가 대기',
+    'early_entry_open_unverified': '시가 확인 전 · 시가 −1% 지정가 대기',
+    'quote_unverified_or_stale': '호가 신선도 미확인',
+    'analysis_incomplete': '분석 자료 부족',
+    'stale_analysis': '분석이 오래됨',
+    'score_below_policy': '종합점수 미달',
+}
+
+
+def plan_line(plan):
+    """One line for a conditional plan that could not be confirmed at this moment."""
+    code = str(plan.get('symbol') or '').split('.')[0]
+    label = plan.get('label') or plan.get('strategy') or '조건부'
+    band = []
+    floor, limit = plan.get('entry_floor'), plan.get('entry_limit')
+    text = lambda value: f"{value:,.0f}원" if plan.get('market') != 'US' else f"${value:,.2f}"
+    if isinstance(floor, (int, float)) and isinstance(limit, (int, float)) and floor < limit:
+        band.append(f"{text(floor)}~{text(limit)}")
+    elif isinstance(limit, (int, float)):
+        band.append(f"상한 {text(limit)}")
+    elif isinstance(plan.get('flat_open_entry_limit'), (int, float)):
+        band.append(f"갭 없이 열리면 {text(plan['flat_open_entry_limit'])}")
+    score = plan.get('composite_score')
+    head = f"• {plan.get('name')} ({code}) · [{label}]"
+    if band:
+        head += ' · 매수 구간 ' + band[0]
+    if isinstance(score, (int, float)):
+        head += f" · 종합 {score:.1f}/100"
+    lines = [head]
+    if plan.get('catalyst_summary'):
+        lines.append(f"  근거 {plan['catalyst_summary']}")
+    if plan.get('hold_reason'):
+        lines.append(f"  {HOLD_REASON_LABELS.get(plan['hold_reason'], plan['hold_reason'])}")
+    return "\n".join(lines)
+
+
+def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans=None,
+                            market_note=None):
     ready=[row for row in signals if row.get('trade_ready') is True]
     # 알림 최상단: 지금 상승 흐름 · 시장 분위기 · (바뀌었으면) 흐름 변화.
     regime_lines=asset_regime.header_lines(regime)
-    lines=[*([*regime_lines,''] if regime_lines else []),*sector_lines,'']
+    lines=[*([*regime_lines,''] if regime_lines else []),*sector_lines,*([*market_note] if market_note else []),'']
     if ready:
         lines.append(f'매수 신호 · {at:%m/%d %H:%M:%S} KST')
         for row in ready[:5]:
@@ -215,7 +260,14 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None):
     elif evaluation.get('completed') is False:
         lines.extend([f'분석 상태 · {at:%m/%d %H:%M} KST','매수 판정 보류 · 분석자료 미확인'])
     elif signals:
-        lines.extend([f'진입 확인 보류 · {at:%m/%d %H:%M} KST','실시간 호가·가격 조건 미확인 또는 미충족'])
+        # No entry is confirmed right now (a closed session, a quote above the limit), but
+        # the analysis did produce plans. They are printed as plans with the reason they
+        # are not executable yet — never as a buy signal.
+        lines.extend([f'진입 확인 보류 · {at:%m/%d %H:%M} KST',
+                      '지금 체결 기준을 확인하지 못했습니다 · 아래는 조건부 계획(매수 신호 아님)'])
+        shown = [plan for plan in (plans or [])][:5]
+        lines.extend(['', *[plan_line(plan) for plan in shown]] if shown else
+                     ['실시간 호가·가격 조건 미확인 또는 미충족'])
     else:
         lines.extend([f'분석 결과 · {at:%m/%d %H:%M} KST','현재 매수 조건을 충족한 종목 없음'])
     return '\n'.join(lines)

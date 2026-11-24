@@ -97,4 +97,31 @@ class TradableSignalTests(unittest.TestCase):
         r['company_forecast']['catalyst_context']['eligible']=False
         self.assertFalse(validate_entry(r,q,AT,True)['trade_ready'])
 
+    def test_a_closed_session_still_names_the_plan_and_says_it_is_not_a_signal(self):
+        # A request after the close can confirm nothing, but the analysis did produce a
+        # plan: the message names it, its band and why it is on hold, without ever
+        # calling it a buy.
+        r,q=fixture();signal=validate_entry(r,q,AT,False)
+        self.assertEqual(signal['reason'],'market_closed')
+        message=format_requested_report([],[signal],dict(completed=True),AT,plans=[dict(
+            symbol='123456.KS',name='가상 검증종목',market='KR',label='실적·호재 촉매',
+            entry_limit=10000,entry_floor=9800,composite_score=65.0,
+            catalyst_summary='2026년 3분기 영업이익 전년 대비 +253% (DART 실적 공시)',
+            hold_reason='market_closed')])
+        self.assertIn('진입 확인 보류',message)
+        self.assertIn('매수 신호 아님',message)
+        self.assertIn('가상 검증종목 (123456)',message)
+        self.assertIn('매수 구간 9,800원~10,000원',message)
+        self.assertIn('종합 65.0/100',message)
+        self.assertIn('장 마감 · 다음 거래일 시가 확인',message)
+        self.assertIn('+253%',message)
+
+    def test_the_plan_list_never_appears_instead_of_a_confirmed_signal(self):
+        r,q=fixture();signal=validate_entry(r,q,AT,True)
+        message=format_requested_report([],[signal],dict(completed=True),AT,plans=[dict(
+            symbol='999999.KS',name='보류종목',market='KR',label='트렌드',entry_limit=5000,
+            hold_reason='waiting_for_entry_price')])
+        self.assertIn('매수 신호',message)
+        self.assertNotIn('보류종목',message)
+
 if __name__=='__main__':unittest.main()
