@@ -81,8 +81,22 @@ def main():
     sector_lines=sector_section(report.get('sectors') or [], theme, 'KR',
                                 override=format_report(industry).splitlines() if industry.get('rows') else None)
     import mid_term_watch
+    # 확인되지 않은 계획도 "무엇을 찾았는지"는 남긴다. 장 마감 후 요청이면 어떤 계획도
+    # 호가로 확정될 수 없어 메시지가 '보류' 한 줄로 끝나기 때문이다. 계획은 계획으로만 쓴다.
+    reason_by_symbol={entry.get('symbol'):entry.get('reason') for entry in entries}
+    plans=[]
+    for row in recommendations[:5]:
+        plan=row.get('preopen_signal') or {}
+        plans.append(dict(symbol=row['symbol'],name=row.get('name'),market=row.get('market'),
+            label=(plan.get('label') or plan.get('strategy')),
+            entry_limit=plan.get('entry_limit'),entry_floor=plan.get('entry_floor'),
+            flat_open_entry_limit=plan.get('flat_open_entry_limit'),
+            composite_score=(row.get('company_forecast') or {}).get('composite_score'),
+            catalyst_summary=(plan.get('catalyst') or {}).get('summary'),
+            hold_reason=reason_by_symbol.get(row['symbol'])))
     message=format_requested_report(sector_lines,entries,evaluation,sent_at,
-                                    regime=asset_regime.cached_block())
+                                    regime=asset_regime.cached_block(),plans=plans,
+                                    market_note=scanner.market_regime_note(report))
     # 요청 장전 리포트에도 매수 후보와 분리된 '긴급 이슈 참고'를 붙인다.
     urgent={}
     try:
@@ -92,6 +106,13 @@ def main():
         if block:message='\n'.join([message,'',*block])
     except Exception as exc:
         print('Urgent issue check unavailable: '+type(exc).__name__,flush=True)
+    # 외인·기관이 실제로 사고 있는 종목만 보낸다. 일일 알림과 같은 블록·같은 문구다.
+    inflow=[row for row in report.get('quality_watch') or []
+            if row.get('grade')=='supply_inflow_quality']
+    if inflow:
+        message='\n'.join([message,'','[수급 유입 우량주]',
+            '외인·기관 순매수 확인 · 매수 후보 검토 대상 · 매수 신호 아님',
+            *[scanner.quality_watch_line(row) for row in inflow[:5]]])
     # 요청 장전 리포트에도 국내 핵심 대표주의 NXT 장전 움직임·촉매·간밤 미국 연동을 붙인다.
     # 정규장 장중 요청에는 이미 지난 장전 창문이므로 싣지 않는다(kr_premarket.include_block).
     kr_premarket=dict(items=[])
