@@ -18,7 +18,7 @@ class Clock(datetime):
 class Socket:
     def __init__(self):
         self.pending = list(scanner.FEEDS['KRX'])
-        self.minutes = iter([5, 6, 15, 46])
+        self.minutes = iter([5, 6, 25, 56])
 
     async def __aenter__(self):
         return self

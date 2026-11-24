@@ -267,10 +267,16 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_s
     neutral=sorted(eligible,key=lambda row:(-average_turnover(row['indicators']),row['symbol']))[:8]
     pinned_symbols=[symbol for symbol in pinned if symbol in indexed]
     pinned_rows=[indexed[symbol] for symbol in pinned_symbols]
-    selected=[]; seen=set(); entries=set(); catalysts=set(); rebounds=set()
+    selected=[]; seen=set()
     from itertools import zip_longest
     entry=[row for group in zip_longest(trend,recovery) for row in group if row is not None]
-    for row in [*pinned_rows,*entry,*event_rows,*catalyst,*rebound,*early_entry,*neutral]:
+    # Reserve three per track in the full research list and one per track
+    # in the opening watchlist, leaving room for trend and event research.
+    seats = min(3, limit // 8)
+    reserved = [row for group in zip_longest(catalyst[:seats], rebound[:seats], early_entry[:seats])
+                for row in group if row is not None]
+    overflow = [*catalyst[seats:], *rebound[seats:], *early_entry[seats:]]
+    for row in [*pinned_rows, *reserved, *entry, *event_rows, *overflow, *neutral]:
         if row['symbol'] not in seen:
             selected.append(row); seen.add(row['symbol'])
     entries={row['symbol'] for row in entry}; catalysts={row['symbol'] for row in catalyst}

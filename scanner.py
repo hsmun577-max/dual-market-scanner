@@ -13,7 +13,8 @@ import numpy as np
 import pandas as pd
 import requests
 import asset_regime
-from candidate_selection import candidate_rejection_reason, rank_market_candidates
+from candidate_selection import (INVERSE_BENCHMARKS, candidate_rejection_reason,
+                                 is_inverse, rank_market_candidates)
 from sector_flow import fetch_intraday_sectors, format_sector_header
 from theme_sectors import theme_lines, theme_sector_snapshot
 from telegram_text import split_telegram_text
@@ -76,11 +77,6 @@ WATCHLIST = {
 BENCHMARKS = {
     "KR": "^KS11",
     "US": "SPY"
-}
-
-INVERSE_ETFS = {
-    "114800.KS", "252670.KS",
-    "SOXS", "SQQQ", "SPXS"
 }
 
 LEVERAGED_ETFS = {
@@ -265,8 +261,9 @@ def clean_prices(data):
     return data
 
 
-def scan_batches(market, names, benchmark):
+def scan_batches(market, names, benchmark, inverse_prices=None):
     symbols = list(names)
+    selection_now = datetime.now(timezone.utc)
     results, errors = [], []
     for start in range(0, len(symbols), 100):
         batch = symbols[start:start + 100]
@@ -301,7 +298,8 @@ def scan_batches(market, names, benchmark):
             )
             continue
 
-        found, failed = scan_market(market, batch, benchmark, names=names, prices=prices)
+        found, failed = scan_market(market, batch, benchmark, names=names, prices=prices,
+                                    inverse_prices=inverse_prices, selection_now=selection_now)
         results.extend(found)
         errors.extend(failed)
         print(f"{market}: {len(results) + len(errors)}/{len(symbols)}")
@@ -622,37 +620,62 @@ def build_risk_plan(price, stop_pct=None,
         )
     }
 
-def completed_daily_prices(data, market, now=None):
-    """Daily candidate selection uses previous local dates; live entries use intraday data."""
+def last_completed_session(market, now):
+    from exchange_calendars import get_calendar
     zone = ZoneInfo('Asia/Seoul' if market == 'KR' else 'America/New_York')
-    local_day = (now or datetime.now(timezone.utc)).astimezone(zone).date()
+    calendar = get_calendar('XKRX' if market == 'KR' else 'XNYS')
+    local_day = now.astimezone(zone).date()
+    session = calendar.date_to_session(local_day.isoformat(), direction='previous')
+    if calendar.session_close(session).to_pydatetime() > now:
+        session = calendar.previous_session(session)
+    return session.date()
+
+
+def completed_daily_prices(data, market, now=None, *, through=None):
+    zone = ZoneInfo('Asia/Seoul' if market == 'KR' else 'America/New_York')
+    cutoff = through or last_completed_session(market, now or datetime.now(timezone.utc))
     dates = pd.DatetimeIndex(data.index)
     if dates.tz is not None:
         dates = dates.tz_convert(zone)
-    return data.loc[dates.date < local_day].copy()
+    return data.loc[dates.date <= cutoff].copy()
 
 
-def scan_market(market, tickers, benchmark, names=None, prices=None):
+def attach_inverse_regime(indicators, symbol, benchmark):
+    index_symbol = INVERSE_BENCHMARKS.get(symbol)
+    below = None
+    if benchmark is not None and 'Close' in benchmark:
+        closes = benchmark['Close'].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
+        if len(closes) >= 20 and str(closes.index[-1].date()) == indicators.get('data_date'):
+            below = bool(closes.iloc[-1] < closes.tail(20).mean())
+    indicators['inverse_underlying'] = index_symbol
+    indicators['inverse_underlying_below_ma20'] = below
+
+
+def scan_market(market, tickers, benchmark, names=None, prices=None, *,
+                inverse_prices=None, selection_now=None):
     names = names or {}
     results = []
     errors = []
-
-    selection_now = datetime.now(timezone.utc)
+    if selection_now is None:
+        selection_now = datetime.now(timezone.utc)
+    cutoff = last_completed_session(market, selection_now)
     if benchmark is not None:
-        benchmark = completed_daily_prices(benchmark, market, selection_now)
+        benchmark = completed_daily_prices(benchmark, market, through=cutoff)
+    inverse_prices = {symbol: completed_daily_prices(frame, market, through=cutoff)
+                      for symbol, frame in (inverse_prices or {}).items() if frame is not None}
     for symbol in dict.fromkeys(tickers):
         try:
             data = download_prices(symbol) if prices is None else clean_prices(prices[symbol])
-            data = completed_daily_prices(data, market, selection_now)
+            data = completed_daily_prices(data, market, through=cutoff)
 
             indicators = calculate_indicators(
                 data, benchmark
             )
 
-            signal = classify_signal(
-                indicators,
-                inverse=symbol in INVERSE_ETFS
-            )
+            inverse = is_inverse(symbol, names.get(symbol))
+            if inverse:
+                attach_inverse_regime(indicators, symbol, inverse_prices.get(INVERSE_BENCHMARKS.get(symbol)))
+            signal = classify_signal(indicators, inverse=inverse)
 
             result = {
                 "market": market,
@@ -660,7 +683,7 @@ def scan_market(market, tickers, benchmark, names=None, prices=None):
                 "name": names.get(symbol),
                 "asset_type": (
                     "inverse_etf"
-                    if symbol in INVERSE_ETFS
+                    if inverse
                     else "leveraged_etf"
                     if symbol in LEVERAGED_ETFS
                     else "stock_or_etf"
@@ -781,8 +804,14 @@ def prepare_selected_analysis(report):
         for symbol, item in keys.items():
             company = companies.get(symbol, {})
             observed_prices = company.get('price_indicators', {})
-            if observed_prices.get('price') and observed_prices.get('data_date'):
-                item['indicators'] = observed_prices.copy()
+            if (observed_prices.get('price') and observed_prices.get('data_date')
+                    and observed_prices['data_date'] >= item['indicators'].get('data_date', '')):
+                indicators = {**item['indicators'], **observed_prices}
+                if (is_inverse(item['symbol'], item.get('name'), item.get('asset_type'))
+                        and 'inverse_underlying_below_ma20' not in observed_prices
+                        and observed_prices['data_date'] != item['indicators'].get('data_date')):
+                    attach_inverse_regime(indicators, item['symbol'], None)
+                item['indicators'] = indicators
             item["company_analysis"] = company
             item["company_analysis_at"] = company.get("checked_at", checked.isoformat())
             margin = company.get("operating_margin_pct")
@@ -811,7 +840,7 @@ def prepare_selected_analysis(report):
             item["institutional_flows"] = supply
             item["supply_line"] = share_line(supply)
             consensus = consensus_for(item, company, at=checked, price=item["indicators"]["price"])
-            item["company_forecast"] = build_company_forecast(company, {**item["indicators"], **company.get("price_indicators", {})},
+            item["company_forecast"] = build_company_forecast(company, item["indicators"],
                 item["indicators"]["price"], datetime.now(timezone.utc),
                 [row for row in risks if row.get("symbol") == symbol], report.get("sectors", []),
                 supply=supply, consensus=consensus)
@@ -1547,14 +1576,24 @@ def main():
                 "error": str(exc)
             })
 
+    inverse_prices = {"KR": {}, "US": {}}
+    for market, tickers in watchlist.items():
+        underlying = {INVERSE_BENCHMARKS[ticker] for ticker in tickers if ticker in INVERSE_BENCHMARKS}
+        for symbol in sorted(underlying):
+            try:
+                inverse_prices[market][symbol] = download_prices(symbol)
+            except Exception as exc:
+                benchmark_errors.append({"market": market, "symbol": symbol, "error": str(exc)})
+
     all_results = []
     all_errors = []
 
     for market, tickers in watchlist.items():
         if full_scan:
-            results, errors = scan_batches(market, names[market], benchmarks[market])
+            results, errors = scan_batches(market, names[market], benchmarks[market], inverse_prices[market])
         else:
-            results, errors = scan_market(market, tickers, benchmarks[market], names=names[market])
+            results, errors = scan_market(market, tickers, benchmarks[market], names=names[market],
+                                          inverse_prices=inverse_prices[market])
 
         all_results.extend(results)
         all_errors.extend(errors)
@@ -1614,7 +1653,7 @@ def main():
             "섹터 거래대금은 대표 ETF 종가×거래량 추정치이며 투자자 순매수·ETF 순유입은 미수집",
             "일봉 기반이며 실시간 매수 확정 불가",
             "완료된 거래일 일봉 기준이며 일중 VWAP·실시간 호가 미포함",
-            "실시간 VWAP 미구현",
+            "VWAP는 별도 장중 감시에서 체결 기반으로 평가",
             "기사·공시 조회는 발송 후보에 한정하며 거시 이벤트의 기업 실적 영향 정량평가는 미구현",
             "발송 후보의 분기 손익·매출 증감은 조회하나 기업가치 전체 평가는 미구현",
             "백테스트 및 표본 외 검증 미구현",

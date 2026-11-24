@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch, Mock
 import scanner
 from telegram_text import split_telegram_text
@@ -15,12 +16,12 @@ class DailyDeliveryTests(unittest.TestCase):
         self.assertEqual(list(selected.Close),[4200])
         self.assertEqual(len(frame),2)
 
-    def test_daily_selection_uses_us_local_date(self):
+    def test_daily_selection_includes_us_close_after_midnight_utc(self):
         import pandas as pd
         from datetime import datetime, timezone
         frame = pd.DataFrame({'Close':[1,2]},index=pd.to_datetime(['2026-11-17','2026-11-18']))
         now = datetime(2026,11,19,1,0,tzinfo=timezone.utc)
-        self.assertEqual(list(scanner.completed_daily_prices(frame,'US',now).Close),[1])
+        self.assertEqual(list(scanner.completed_daily_prices(frame,'US',now).Close),[1,2])
 
     def test_actual_yahoo_field_names_and_pretty_aliases(self):
         import pandas as pd
@@ -39,7 +40,7 @@ class DailyDeliveryTests(unittest.TestCase):
             signal=dict(score=6,stage='장중 조건부 진입 후보',reasons=['거래량 증가']),
             indicators=dict(price=10000.,volume=2000000.,volume_ratio=2.,ma20=9500.,ma60=9000.,
                 return_5d=.05,return_20d=.1,relative_strength=.05,obv_rising=True,breakout=True,
-                breakdown=False,rebound=False,overheated=False,data_date='2026-11-17'),
+                breakdown=False,rebound=False,overheated=False,data_date=scanner.last_completed_session('KR', datetime.now(timezone.utc)).isoformat()),
             fundamentals='미검증',news_and_filings='미검증')
 
     def test_actual_daily_candidates_are_enriched_before_sending(self):

@@ -3,7 +3,7 @@ from datetime import datetime,timedelta,timezone
 from collections import Counter
 import math
 from candidate_selection import (liquidity_rejection_reason,candidate_rejection_reason,
-                                 market_headwind_reason,early_entry_block_reason,
+                                 market_headwind_reason,early_entry_block_reason,is_inverse,
                                  EARLY_ENTRY_LIFTABLE_REASONS,MIN_DEMAND_VOLUME_RATIO)
 import rebound_track
 import early_entry_track
@@ -14,7 +14,7 @@ from exit_policy import (DEFAULT_EXIT_POLICY, FUND_STOP_PCT, STOCK_STOP_PCT, exi
                          policy_snapshot, stop_basis)
 
 INCOMPLETE_REASONS={'analysis_stale_or_missing','analysis_incomplete','price_session_mismatch',
-                    'missing_indicators','invalid_average_price','entry_tick_missing'}
+                    'missing_indicators','invalid_average_price','entry_tick_missing','inverse_underlying_unverified'}
 
 
 def _number(value):
@@ -80,7 +80,7 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
         # The confirmed-disclosure track is the one path allowed past a market headwind.
         # The fact is recorded on the plan so the alert can say why a plan exists while
         # the index is under its 20-day average, instead of leaving the reader to wonder.
-        market_regime_lifted=values.get('market_above_ma20') is False,
+        market_regime_lifted=market_headwind_reason(values, row) == 'market_headwind',
         # The stop follows the instrument: −2% on a fund, −3% on a single stock.
         take_profit_pct=policy.take_profit_pct,
         take_profit_mode=policy.take_profit_mode,exit_policy=policy_snapshot(policy),
@@ -90,31 +90,12 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
 
 
 def session_dates(report,at=None):
-    """Last completed session per market, taken from the rows' own price data.
-
-    The daily scan keeps the most recent completed bar, so the plan's reference date is
-    that bar's date. It is still checked against the exchange calendar: a row carrying an
-    old or invented date must not silently become the reference the entry limit is based
-    on, and a market whose rows disagree is reported by the session check below.
-    """
+    """Use the calendar's completed session and let evaluation reject stale rows."""
     at=at or datetime.now(timezone.utc)
-    from exchange_calendars import get_calendar
-    calendars={'KR':get_calendar('XKRX'),'US':get_calendar('XNYS')}
-    dates={}
-    for market,calendar in calendars.items():
-        seen=Counter(row.get('indicators',{}).get('data_date') for row in report.get('results',[])
-            if row.get('market')==market and 'company_analysis' in row)
-        seen.pop(None,None)
-        for day,_count in seen.most_common():
-            try:
-                if not calendar.is_session(day):continue
-                close=calendar.session_close(day).to_pydatetime()
-                if close.utcoffset() is None:continue
-                if close>at:continue
-            except (ValueError,TypeError):continue
-            dates[market]=day
-            break
-    return dates
+    from scanner import last_completed_session
+    markets = {row['market'] for row in report.get('results', []) if 'company_analysis' in row}
+    return {market: last_completed_session(market, at).isoformat()
+            for market in ('KR', 'US') if market in markets}
 
 
 def next_session(day,market):
@@ -179,7 +160,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         # Read the regime on its own, not as the last item of the trend check: the trend
         # check reports the chart reason it finds first, so a name that is misaligned or
         # thin still has to be held back by the market it trades in.
-        headwind=market_headwind_reason(values)
+        headwind=market_headwind_reason(values,row)
         catalyst=forecast.get('catalyst_context',{}).get('eligible') is True
         # A confirmed, quantified disclosure may override a soft chart rejection. The
         # safety blocks (liquidity, price, breakdown, extended, fund) are checked inside
@@ -204,6 +185,8 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         # price and the market regime — is read beside it, so "early" never means "unsafe".
         early=early_entry_track.setup(values)
         if reason: status=reason
+        elif headwind and is_inverse(row['symbol'], row.get('name'), row.get('asset_type')):
+            status=headwind
         elif values['ma20']<=0: status='invalid_average_price'
         elif values.get('breakdown'): status='breakdown'
         elif not catalyst and (values.get('overheated') or values.get('return_5d',0)>.12 or price/values['ma20']>1.08):

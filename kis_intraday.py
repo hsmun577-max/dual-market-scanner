@@ -26,14 +26,16 @@ from signal_context import context_status
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE, build_company_forecast
 from delivery_policy import delivery_status
 from event_impact_analysis import article_text, world_events, analyze_events, company_news_events
-from candidate_selection import instrument_rejection_reason, rank_market_candidates
+from candidate_selection import (INVERSE_BENCHMARKS, instrument_rejection_reason, is_inverse,
+                                 market_headwind_reason, rank_market_candidates)
 from sector_flow import format_sector_header
 from theme_sectors import sector_section, theme_sector_snapshot
 from telegram_text import split_telegram_text
 from exit_policy import DEFAULT_EXIT_POLICY, exit_policy_for
 from provider_retry import call as provider_call, isolate_yfinance_cache, transient
-from scanner import (BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, calculate_indicators,
-                     classify_signal, clean_prices, sector_flow_snapshot, yf_download)
+from scanner import (BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, attach_inverse_regime,
+                     calculate_indicators, classify_signal, clean_prices, completed_daily_prices,
+                     last_completed_session, sector_flow_snapshot, yf_download)
 
 
 # Common shares from the current watchlist. NXT subscription acceptance is checked per session.
@@ -41,6 +43,8 @@ SYMBOLS = tuple(symbol.split(".")[0] for symbol in list(KR_SYMBOL_NAMES)[:9])
 US_SYMBOLS = ("AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "GOOGL", "TSLA")
 OPEN_TIMES = {"NXT": time(8), "KRX": time(9), "US-early": time(4), "US-late": time(8, 20)}
 BAR_SECONDS = 300
+DECISION_MINUTES = 25
+OPENING_SLOTS = frozenset(range(DECISION_MINUTES // 5))
 # Reopening the feed keeps the bars already collected, so a short disconnect is cheap.
 RECONNECT_BACKOFF_SECONDS = (2, 5, 10, 20)
 MAX_QUOTE_AGE = 10
@@ -73,8 +77,8 @@ def intraday_delivery_status(market, now, decision_at, key=None):
     """Gate a decision-time alert: real session, fresh decision, no repeat.
 
     The preopen window in delivery_policy (ten minutes before an opening ±2 minutes)
-    describes when a plan may go out. An intraday decision is made 15 minutes after the
-    opening, so applying that window suppressed every intraday alert. This gate checks
+    describes when a plan may go out. The intraday decision follows the opening window,
+    so applying the preopen gate would suppress every intraday alert. This gate checks
     what actually matters for a decision: the exchange trades that day, the decision was
     not made in the future or long ago, and the same signal is not sent twice.
     """
@@ -1134,7 +1138,12 @@ def company_context(market, symbols, now):
     mapped_tickers = {symbol: (symbol[4:] if overseas else symbol + (
         ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS")) for symbol in symbols}
     isolate_yfinance_cache()
-    history_prices = download_company_history([*mapped_tickers.values(), benchmark_symbol], market)
+    inverse_benchmarks = {INVERSE_BENCHMARKS[ticker] for ticker in mapped_tickers.values()
+                          if ticker in INVERSE_BENCHMARKS}
+    history_prices = download_company_history(
+        [*mapped_tickers.values(), benchmark_symbol, *sorted(inverse_benchmarks)], market)
+    market_code = 'US' if overseas else 'KR'
+    cutoff = last_completed_session(market_code, now)
 
     def fetch(symbol):
         suffix = ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS"
@@ -1217,10 +1226,14 @@ def company_context(market, symbols, now):
             try:
                 data = history_prices[mapped_tickers[symbol]]
                 benchmark = history_prices[benchmark_symbol]
-                local_day = now.astimezone(ZoneInfo("America/New_York") if overseas else KST).date()
-                data = clean_prices(data.loc[data.index.date < local_day])
-                benchmark = clean_prices(benchmark.loc[benchmark.index.date < local_day])
-                snapshot["price_indicators"] = calculate_indicators(data, benchmark)
+                data = clean_prices(completed_daily_prices(data, market_code, through=cutoff))
+                benchmark = clean_prices(completed_daily_prices(benchmark, market_code, through=cutoff))
+                indicators = calculate_indicators(data, benchmark)
+                underlying = history_prices.get(INVERSE_BENCHMARKS.get(mapped_tickers[symbol]))
+                if underlying is not None:
+                    underlying = completed_daily_prices(underlying, market_code, through=cutoff)
+                attach_inverse_regime(indicators, mapped_tickers[symbol], underlying)
+                snapshot["price_indicators"] = indicators
                 from catalyst_policy import completed_bar_available_at
                 snapshot['price_history']=[dict(date=day.date().isoformat(),close=float(bar['Close']),
                     available_at=completed_bar_available_at(day.date(),'US' if overseas else 'KR'))
@@ -1545,11 +1558,12 @@ def update_bar(bars, slot, event_time, price, size):
     if bar is None:
         # The slot's first trade is the opening price the catalyst gate compares against.
         bars[slot] = {"open": price, "high": price, "low": price, "close": price,
-                      "last": event_time, "volume": size}
+                      "last": event_time, "volume": size, "trade_value": price * size}
         return
     bar["high"] = max(bar["high"], price)
     bar["low"] = min(bar["low"], price)
     bar["volume"] += size
+    bar["trade_value"] += price * size
     if event_time >= bar["last"]:
         bar["close"], bar["last"] = price, event_time
 
@@ -1585,17 +1599,67 @@ def candidate_metrics(bars, quote, close_time, volume_baseline=None):
     return evaluate_breakout(bars, quote, close_time, volume_baseline)[1]
 
 
-def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False, prior_highs=(), company=None, sectors=(), volume_baseline=None):
+def evaluate_first_pullback(bars, quote, at, volume_baseline=None):
+    """Require a VWAP recovery, then the first completed retest and a confirming close."""
+    if set(bars) != OPENING_SLOTS:
+        return "missing_pullback_bars", None, None
+    if quote is None:
+        return "missing_quote", None, None
+    age = (at - datetime.fromisoformat(quote["event_time"])).total_seconds()
+    if not 0 <= age <= MAX_QUOTE_AGE:
+        return "stale_quote", None, None
+    if not 0 < quote["bid"] <= quote["ask"] or quote["spread_pct"] > MAX_SPREAD_PCT:
+        return "wide_spread", None, None
+    if any(not bar.get("trade_value") or bar["volume"] <= 0 for bar in bars.values()):
+        return "vwap_unverified", None, None
+
+    vwap = []
+    trade_value = volume = 0
+    for slot in sorted(bars):
+        trade_value += bars[slot]["trade_value"]
+        volume += bars[slot]["volume"]
+        vwap.append(trade_value / volume)
+
+    prior, breakout, pullback, confirmation = (bars[slot] for slot in range(1, 5))
+    resistance = max(bars[0]["high"], prior["high"])
+    reference, _ = volume_reference(bars, volume_baseline)
+    ratio = breakout["volume"] / reference if reference > 0 else 0
+    if ratio < 2 or breakout["close"] <= resistance:
+        return "no_confirmed_breakout", None, None
+    if prior["close"] > vwap[1] or breakout["close"] <= vwap[2]:
+        return "vwap_not_recovered", None, None
+
+    support = max(resistance, vwap[3])
+    if not (support <= pullback["low"] <= support * (1 + MAX_BREAKOUT_EXTENSION)
+            and pullback["volume"] < breakout["volume"]):
+        return "first_pullback_not_supported", None, None
+    limit = max(resistance, vwap[4]) * (1 + MAX_BREAKOUT_EXTENSION)
+    if not (confirmation["low"] >= support and confirmation["close"] > pullback["close"]
+            and confirmation["close"] >= vwap[4]
+            and max(resistance, vwap[4]) <= quote["bid"] <= quote["ask"] <= limit):
+        return "pullback_entry_not_confirmed", None, None
+    return "first_pullback_confirmed", (ratio, quote["spread_pct"], confirmation["close"]), limit
+
+
+def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False, prior_highs=(), company=None, sectors=(), volume_baseline=None,
+                       require_pullback=False):
     ticker = symbol[4:] if overseas else symbol
     name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (
         KR_SYMBOL_NAMES.get(symbol + ".KS") or KR_SYMBOL_NAMES.get(symbol + ".KQ") or symbol)
     reason = instrument_rejection_reason(symbol, name)
     if reason:
         return reason, None
-    if overseas and quote is not None and quote.get("ask", 0) < 5:
+    if (overseas or require_pullback) and quote is not None and quote.get(
+            "ask", 0) < (5 if overseas else 1000):
         return "low_price", None
     company = company if company is not None else {}
-    status, metrics = evaluate_breakout(bars, quote, closes, volume_baseline)
+    limit = None
+    if require_pullback:
+        status, metrics, limit = evaluate_first_pullback(bars, quote, closes, volume_baseline)
+        if metrics is None:
+            return status, None
+    else:
+        status, metrics = evaluate_breakout(bars, quote, closes, volume_baseline)
     if not observation_only:
         from catalyst_track import confirmed_catalyst, entry_gate
         catalyst = confirmed_catalyst(company, closes, "US" if overseas else "KR") if company else {}
@@ -1603,7 +1667,7 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
             # A confirmed catalyst is not an entry: it must be held above the session's open
             # on expanding same-time volume, or the market is selling the news.
             reference = None
-            if set(bars) == {0, 1, 2}:
+            if {0, 1, 2}.issubset(bars):
                 reference, _basis = volume_reference(bars, volume_baseline)
             tone = entry_gate((quote or {}).get("ask") or (quote or {}).get("price"),
                               (bars.get(0) or {}).get("open"),
@@ -1617,10 +1681,20 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     if observation_only or evidence is None:
         status = context_status(evidence or [], window, symbol, closes)
         return status if status != "supported" else "observation_only", (symbol, *metrics, None, None, None)
-    limit = breakout_v2(bars, quote, closes, volume_baseline)
+    if not require_pullback:
+        limit = breakout_v2(bars, quote, closes, volume_baseline)
     if limit is None:
         return "strict_breakout_failed", None
-    status = context_status(evidence, window, symbol, closes)
+    inverse = is_inverse(ticker if overseas else ticker + '.KS', name)
+    if inverse:
+        indicators = company.get("price_indicators", {})
+        market_code = "US" if overseas else "KR"
+        if indicators.get("data_date") != last_completed_session(market_code, closes).isoformat():
+            return "inverse_underlying_unverified", None
+        status = market_headwind_reason(indicators, {"symbol": ticker, "asset_type": "inverse_etf"})
+        if status:
+            return status, None
+    status = context_status(evidence, window, symbol, closes, inverse_market_verified=inverse)
     if status != "supported":
         return status, None
     applicable = [row for row in evidence if row.get("symbol") in (symbol, "*")
@@ -1642,7 +1716,8 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     stop = limit * (1 - stop_pct)
     if quote["bid"] <= stop:
         return "entry_below_fixed_stop", None
-    projection = (forecast["base_price"], "종합평가 5거래일 시나리오")
+    label = "관찰 구간 VWAP 회복·첫 눌림 지지" if require_pullback else "종합평가 5거래일 시나리오"
+    projection = (forecast["base_price"], label)
     return "buy_signal", (symbol, *metrics, limit, stop, projection)
 
 
@@ -1652,7 +1727,7 @@ def late_subscription(rt_cd, received, opens, bars):
     An ack that arrives after the open means the opening bars were missed — unless they
     were already collected before a reconnect, in which case the symbol is still valid.
     """
-    return rt_cd != "0" or (received >= opens and set(bars) != {0, 1, 2})
+    return rt_cd != "0" or (received >= opens and not {0, 1, 2}.issubset(bars))
 
 
 async def collect(approval, market, symbols, opens, on_signal, samples_path, evidence=None,
@@ -1662,12 +1737,11 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
     """Collect the opening bars, publish the decision once, then watch the sell rule.
 
     A dropped feed no longer ends the run. The session is re-opened with the bars already
-    collected, and if it stays down the same three five-minute bars are rebuilt from KIS
-    REST and a live quote is taken, so the decision can still be applied. Whatever route
-    produced the bars, the exit rule is evaluated on the bars that follow the signal.
+    collected. REST can restore prices for diagnostics, while only a complete stream
+    provides the trade values needed for VWAP. Exit checks use bars after the signal.
     """
     resistance = resistance or {}
-    closes = opens + timedelta(minutes=15)
+    closes = opens + timedelta(minutes=DECISION_MINUTES)
     feeds = FEEDS[market]
     pending = {(tr_id, symbol) for tr_id in feeds for symbol in symbols}
     rejected = set()
@@ -1678,6 +1752,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
     flags = {"evaluated": False, "published": None, "task": None,
              "refresh_task": None, "next_refresh": opens + timedelta(minutes=5),
              "deadline": closes, "source": None}
+    incomplete_tape = set()
 
     def decide(rejected_set, source, decision_at=None):
         decision_at = decision_at or closes
@@ -1688,12 +1763,16 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
             if symbol in rejected_set:
                 decisions[symbol] = "subscription_failed"
                 continue
+            observed_bars = bars[symbol]
+            if symbol in incomplete_tape:
+                observed_bars = {slot: {**bar, "trade_value": None}
+                                 for slot, bar in observed_bars.items()}
             status, candidate = evaluate_candidate(
-                bars[symbol], quotes.get(symbol), decision_at, samples_path.stem, symbol,
+                observed_bars, quotes.get(symbol), decision_at, samples_path.stem, symbol,
                 evidence, market == "US", observation_only, resistance.get(symbol, ()),
                 company=(companies or {}).get(symbol),
                 sectors=(sector_snapshot or {}).get("rows", []),
-                volume_baseline=(volume_baseline or {}).get(symbol),
+                volume_baseline=(volume_baseline or {}).get(symbol), require_pullback=True,
             )
             decisions[symbol] = status
             composite_scores[symbol] = (companies or {}).get(symbol, {}).get("forecast", {}).get("composite_score")
@@ -1787,6 +1866,8 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                     if symbol not in bars or symbol in rejected or not opens <= event_time:
                         continue
                     if not -1 <= item["lag_seconds"] <= MAX_QUOTE_AGE:
+                        if not flags["evaluated"] and item["kind"] == "trade" and event_time < closes:
+                            incomplete_tape.add(symbol)
                         continue
                     if flags["evaluated"]:
                         if item["kind"] == "quote" and event_time >= closes and received <= flags["deadline"]:
@@ -1809,6 +1890,8 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
             break
         except (WebSocketException, OSError, TimeoutError, asyncio.IncompleteReadError, json.JSONDecodeError) as exc:
             attempts += 1
+            if not flags["evaluated"] and datetime.now(KST) >= opens:
+                incomplete_tape.update(symbols)
             print(f"{market} 실시간 연결 끊김 ({type(exc).__name__}) · 재연결 시도 {attempts}/{reconnect_attempts}", flush=True)
             if attempts > reconnect_attempts or datetime.now(KST) >= closes + timedelta(minutes=2):
                 print(f"{market} 실시간 재연결 포기 · REST 5분봉 대체 수집", flush=True)
@@ -1836,7 +1919,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
 
     with samples_path.open("w", encoding="utf-8") as output:
         for symbol in symbols:
-            if symbol in rejected or set(bars[symbol]) != {0, 1, 2}:
+            if symbol in rejected or set(bars[symbol]) != OPENING_SLOTS:
                 continue
             quote = quotes.get(symbol)
             before = [{"at": quote["event_time"], "bid": quote["bid"], "ask": quote["ask"]}] if quote else []
@@ -1845,13 +1928,16 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 "symbol": symbol,
                 "signal_at": closes.isoformat(),
                 "daily_eligible": True,
+                "entry_rule": "vwap_first_pullback",
+                "entry_decision": (flags["published"] or {}).get("decisions", {}).get(symbol),
                 # The same clock-slot volume the live decision used, so a replay applies
                 # the operating rule instead of its opening-share fallback.
                 "volume_baseline": (volume_baseline or {}).get(symbol),
                 "prior_highs": resistance.get(symbol, []),
                 "bars": [
                     {"start": (opens + timedelta(minutes=5 * slot)).isoformat(),
-                     **{key: bar[key] for key in ("high", "low", "close", "volume")}}
+                     **{key: bar[key] for key in ("high", "low", "close", "volume")},
+                     "trade_value": None if symbol in incomplete_tape else bar.get("trade_value")}
                     for slot, bar in sorted(bars[symbol].items())
                 ],
                 "quotes": before + followup[symbol],
@@ -2218,7 +2304,7 @@ def main():
             print(f"{market} 장중 거래대금 감시: {', '.join(symbols) or '후보 없음'}")
         elif overseas:
             # The prior daily screen must not prevent premarket observation.
-            symbols = [f"DNAS{ticker}" for ticker in US_SYMBOLS]
+            symbols = [f"DNAS{ticker}" for ticker in (*US_SYMBOLS, "SQQQ", "SOXS", "SPXS")]
             if market == "US-late":
                 symbols.extend(us_premarket_leaders(app_key, app_secret, datetime.now(local_zone)))
             print(f"{market} 프리장 체결·호가 감시 {len(symbols)}종목 (일봉 통과 조건 없음)")
@@ -2242,7 +2328,7 @@ def main():
             evidence.extend(company_risks)
             evidence.extend(confirmed_contract_events(companies, market, datetime.now(local_zone)))
             evidence.extend(scheduled_event_evidence(
-                market, datetime.now(local_zone), opens + timedelta(minutes=15)))
+                market, datetime.now(local_zone), opens + timedelta(minutes=DECISION_MINUTES)))
             if args.context or evidence:
                 dump(Path("signal-context.json"), evidence)
         available_kinds = {row["kind"] for row in evidence if row["market"] in (market, "*")}
@@ -2255,7 +2341,7 @@ def main():
             elif market == "US-late":
                 candidates = filter_us_updates(candidates, today, snapshot)
             if candidates:
-                decision_at = opens + timedelta(minutes=15)
+                decision_at = opens + timedelta(minutes=DECISION_MINUTES)
                 for symbol, *_ in candidates:
                     company = companies.setdefault(symbol, {})
                     company["research_label"] = research_label(evidence, market, symbol, decision_at)
@@ -2318,9 +2404,9 @@ def main():
             approval = request_approval(app_key, app_secret)
             opens = collection_open(scheduled_open, datetime.now(local_zone))
             if opens != scheduled_open:
-                print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=15):%H:%M}")
+                print(f"{market} 대체 수집 시작 {opens.isoformat()} · 알림 {opens + timedelta(minutes=DECISION_MINUTES):%H:%M}")
             def publish_exit(decisions):
-                delivery = notify_exit(market, decisions, opens + timedelta(minutes=15), token, chat_id,
+                delivery = notify_exit(market, decisions, opens + timedelta(minutes=DECISION_MINUTES), token, chat_id,
                                        regime=asset_regime.cached_block())
                 dump(Path(f"{market}-exit-watch.json"), delivery)
                 if not delivery.get("sent"):
@@ -2351,7 +2437,7 @@ def event_watch_symbols(market, at, registry=None, events=None, limit=6, turnove
     if turnover is None:
         turnover={}
         try:
-            from candidate_selection import average_turnover
+            from candidate_selection import INVERSE_BENCHMARKS, is_inverse, market_headwind_reason, average_turnover
             report=json.loads(Path('opening-scan/latest.json').read_text(encoding='utf-8-sig'))
             for row in report['results']:
                 turnover[row['symbol']]=average_turnover(row['indicators'])
