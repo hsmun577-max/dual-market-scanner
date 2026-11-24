@@ -124,6 +124,24 @@ class TradableSignalTests(unittest.TestCase):
         self.assertIn('[실적·호재 촉매]', text)
         self.assertNotIn('earnings_catalyst', text)
 
+    def test_a_closed_market_is_said_once_per_plan(self):
+        from tradable_signal import plan_line
+        text = plan_line(dict(symbol='009150.KS', name='삼성전기', market='KR',
+                              strategy='earnings_catalyst', entry_limit=778000,
+                              entry_floor=732000, composite_score=65.2,
+                              live_quote=dict(status='market_closed'),
+                              hold_reason='market_closed'))
+        self.assertEqual(text.count('장 마감'), 1)
+        self.assertIn('다음 거래일 시가 확인', text)
+
+    def test_a_bracketed_plan_label_is_not_doubled(self):
+        from tradable_signal import plan_line
+        text = plan_line(dict(symbol='NKTR', name='넥타', market='US',
+                              label='[반등 눌림 후보]', strategy='bottom_rebound',
+                              entry_limit=12.5, composite_score=48.0))
+        self.assertIn('[반등 눌림 후보]', text)
+        self.assertNotIn('[[', text)
+
     def test_the_plan_list_never_appears_instead_of_a_confirmed_signal(self):
         r,q=fixture();signal=validate_entry(r,q,AT,True)
         message=format_requested_report([],[signal],dict(completed=True),AT,plans=[dict(

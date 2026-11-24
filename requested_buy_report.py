@@ -88,7 +88,7 @@ def main():
     for row in recommendations[:5]:
         plan=row.get('preopen_signal') or {}
         plans.append(dict(symbol=row['symbol'],name=row.get('name'),market=row.get('market'),
-            label=(plan.get('label') or plan.get('strategy')),
+            label=plan.get('label'),strategy=plan.get('strategy'),
             entry_limit=plan.get('entry_limit'),entry_floor=plan.get('entry_floor'),
             flat_open_entry_limit=plan.get('flat_open_entry_limit'),
             composite_score=(row.get('company_forecast') or {}).get('composite_score'),
