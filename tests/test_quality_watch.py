@@ -211,9 +211,19 @@ class QualityWatchResearchTests(unittest.TestCase):
         self.assertIn('수급 유입 우량주', text)
         self.assertIn('펀더멘탈 66/100', text)
         self.assertIn('57,333원', text)
-        self.assertIn('매수 후보 검토', text)
-        self.assertIn('매수 신호 아님', text)
         self.assertNotIn('수급 대기 우량주', text)
+        # The block's meaning is said once in its heading; the 12:34 alert repeated
+        # '수급 유입 · 매수 후보 검토 · 매수 신호 아님' under every name.
+        self.assertNotIn('매수 후보 검토', text)
+        self.assertNotIn('매수 신호 아님', text)
+
+    def test_a_waiting_record_keeps_its_own_basis_label(self):
+        text = scanner.quality_watch_line(dict(name='관찰종목', symbol='000000.KS',
+                                               grade='supply_waiting_quality',
+                                               fundamental_score=64.0))
+        self.assertIn('수급 대기 우량주', text)
+        self.assertIn('관찰 목록', text)
+        self.assertIn('매수 신호 아님', text)
 
 
 class DailyReportWiringTests(unittest.TestCase):
@@ -280,8 +290,8 @@ class DailyReportWiringTests(unittest.TestCase):
         text = self.sent_text(self.daily_report(flow('inflow', .35)))
         self.assertIn("[수급 유입 우량주]", text)
         self.assertIn("롯데정밀화학 (004000)", text)
-        self.assertIn("매수 후보 검토", text)
-        self.assertIn("매수 신호 아님", text)
+        # The heading says it once instead of every entry repeating it.
+        self.assertEqual(text.count("매수 신호 아님"), 1)
         self.assertNotIn("[수급 대기 우량주]", text)
         # the live-confirmation label, not the "순매수 확인" of the block subtitle
         self.assertNotIn("· 매수 확인", text)

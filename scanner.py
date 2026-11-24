@@ -791,6 +791,11 @@ def prepare_selected_analysis(report):
                 # and no statement to be current. Its score comes from the fund model in
                 # company_forecast, and whether it stays a candidate is settled by the final
                 # top-eight ranking below.
+                # The scan's own classification is stamped on the profile: a restored profile
+                # cache may hold an entry built before the provider's ``quote_type`` was read,
+                # and without it the fund would be graded as an operating company and have
+                # its score withheld for a statement it never had.
+                company.setdefault('instrument_class', 'listed_fund')
                 item['fund_profile_seen']=True
                 item["fundamentals"]="ETF 상장상품 · 발행사 재무제표 없음"
             else:
@@ -946,7 +951,9 @@ def quality_watch_line(entry):
     """One message line for a quality name: the grade, the axes and why.
 
     The message sends only '수급 유입 우량주' entries; a waiting entry still renders with
-    its own label, so a record kept in the report can be read as it was graded.
+    its own label, so a record kept in the report can be read as it was graded. What the
+    whole block is (a buy-candidate review, not a buy signal) is said once in its heading:
+    repeating it under every name was five identical lines in the 2026-11-24 12:34 alert.
     """
     name = entry.get('name') or entry.get('symbol')
     code = (entry.get('symbol') or '').split('.')[0]
@@ -968,8 +975,10 @@ def quality_watch_line(entry):
     supply_line = entry.get('supply_line')
     if supply_line:
         lines.append("  " + supply_line)
-    basis = '수급 유입 · 매수 후보 검토' if entry.get('grade') == 'supply_inflow_quality' else '수급 미유입 · 관찰 목록'
-    lines.append(f"  {basis} · 매수 신호 아님")
+    if entry.get('grade') != 'supply_inflow_quality':
+        # Only the unsent grade needs its own basis label; the inflow block's heading
+        # already carries '매수 후보 검토 · 매수 신호 아님'.
+        lines.append("  수급 미유입 · 관찰 목록 · 매수 신호 아님")
     return "\n".join(lines)
 
 
@@ -1120,6 +1129,11 @@ def telegram_candidate_line(item):
             except (KeyError,TypeError,ValueError):when=''
             basis_line=f"\n  근거 {evidence['summary']}" + (f' · {when}' if when else '')
             guard=(f'\n  장초반 시가 아래·동시간 거래량 {MIN_ENTRY_VOLUME_RATIO:.1f}배 미달이면 진입하지 않음')
+        # 확정 공시 트랙만 하락장 게이트를 넘을 수 있다. 그 사실을 줄에 적어 두지 않으면
+        # 바로 위의 '하락 국면' 줄과 이 후보가 모순처럼 읽힌다(2026-11-24 지적).
+        if preopen.get('market_regime_lifted'):
+            guard = ('\n  지수 20일선 아래 · 확정 공시 근거로 예외 적용 (시가·거래량 게이트는 그대로)'
+                     + guard)
         return (f"• {name} ({code}) · {heading} · 종합 {score:.1f}/100{basis_line}\n"
                 f"  매수 구간 {entry_zone} · 눌림 구간 진입 시\n"
                 f"  기준 종가 {preopen['reference_date']} · 상승 시나리오 목표 {upper_label}\n"
@@ -1401,7 +1415,7 @@ def send_telegram_summary(report):
               if row.get('grade') == 'supply_inflow_quality']
     if inflow:
         lines.extend(['', '[수급 유입 우량주]',
-                      '외인·기관 순매수 확인 · 매수 후보 검토 대상'])
+                      '외인·기관 순매수 확인 · 매수 후보 검토 대상 · 매수 신호 아님'])
         lines.extend(quality_watch_line(row) for row in inflow[:5])
     # 중기 +30% 눌림 발굴은 20~60일 보유·−15% 손절 전제의 관찰 목록이다. 알림 본문에는 싣지 않고
     # 분석 자료(`mid_term_watch`·`mid_term_watch_scope`)에만 남긴다(2026-11-24 지시:
@@ -1432,7 +1446,6 @@ def send_telegram_summary(report):
     result.update(sent=bool(messages), parts_sent=len(messages))
     print(f"Telegram confirmed: {len(messages)} daily report parts")
     return result
-    return True
 
 
 def main():
