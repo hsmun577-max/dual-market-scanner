@@ -70,10 +70,8 @@ def promoted_fund_symbols(rows, limit=FUND_CANDIDATE_LIMIT):
     covered-call and weekly-pay structures, special securities) is left out of the
     ranking: promoting one could not produce a candidate, and it would take a slot from
     a fund that could. The entry screen's own liquidity read is applied the same way — a
-    fund quoted at 140원 (KODEX 200선물인버스2X on 2026-11-24) or one whose 20-day dollar
-    turnover is under the floor (KDEF, $1.5M) is refused as ``low_price`` /
-    ``insufficient_liquidity`` before its profile is read, so promoting it reserved one of
-    the eight research slots for a listing that can never be planned. The predicate is
+    fund below its applicable price or turnover floor is excluded before its profile is
+    read. KODEX 200선물인버스2X (252670) has a price-floor exception. The predicate is
     the one ``select_analysis_candidates`` uses to admit a row, so a promoted fund is
     always a fund the analysis pass can actually read. The eighth and below are not
     promoted, so the existing liquidity, trend, demand and market-regime gates decide

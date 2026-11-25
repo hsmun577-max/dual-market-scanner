@@ -72,6 +72,19 @@ class SelectionRegressionTests(unittest.TestCase):
         item["indicators"]["price"]=.9
         self.assertEqual(candidate_rejection_reason(item,"US"),"low_price")
 
+    def test_live_price_floor_exception_is_specific_to_kodex_inverse_2x(self):
+        at = datetime(2026, 11, 18, 9, tzinfo=KST)
+        for symbol, ask, expected in [
+            ("252670", 140, "missing_pullback_bars"),
+            ("252670", 0, "low_price"),
+            ("114800", 140, "low_price"),
+            ("005930", 900, "low_price"),
+        ]:
+            with self.subTest(symbol=symbol, ask=ask):
+                status, _ = evaluate_candidate({}, {"ask": ask}, at, "KRX", symbol,
+                                               [], False, require_pullback=True)
+                self.assertEqual(status, expected)
+
     def test_rebounds_and_chasing_are_filtered(self):
         item=stock()
         item["indicators"]["rebound"]=True

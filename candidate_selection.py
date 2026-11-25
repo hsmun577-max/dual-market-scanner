@@ -74,6 +74,13 @@ def instrument_rejection_reason(symbol, name, asset_type=""):
     return None
 
 
+def meets_price_floor(symbol, market, price):
+    # The 1,000-won exemption applies only to KODEX 200 Futures Inverse 2X.
+    if market == "KR" and symbol in {"252670", "252670.KS"}:
+        return price >= 1
+    return price >= MIN_PRICE[market]
+
+
 def average_turnover(indicators):
     """Support archived scans using current price times prior average share volume."""
     actual = indicators.get("average_turnover_20d")
@@ -92,7 +99,7 @@ def liquidity_rejection_reason(item, market):
                 "return_5d", "return_20d", "relative_strength")
     if any(not isinstance(values.get(key), (int, float)) or not math.isfinite(values[key]) for key in required):
         return "missing_indicators"
-    if values["price"] < MIN_PRICE[market]:
+    if not meets_price_floor(item["symbol"], market, values["price"]):
         return "low_price"
     average = average_turnover(values)
     if (not math.isfinite(average) or average < MIN_AVERAGE_TURNOVER[market]
