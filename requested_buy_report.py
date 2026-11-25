@@ -60,14 +60,18 @@ def main():
     if recommendations and session_open:
         try:client=Client()
         except Exception:pass
-    for row in recommendations[:5]:
-        # Quoted when the evidence may be executed at all — the same rule the execution
-        # check reads (score issued, no withheld integrity gap), not 'complete': a partial
-        # assessment with a published score is still executable.
-        if client and analysis_ready(row['company_forecast']):
+    if client:
+        def read_candidate_quote(row):
             try:
-                quotes[row['symbol']]=execution_quote(row['symbol'],datetime.now(KST),client)
-            except (TypeError,ValueError,KeyError,RuntimeError,requests.RequestException):pass
+                return execution_quote(row['symbol'], datetime.now(KST), client,
+                    compare_volume=row['preopen_signal'].get('strategy') == 'earnings_catalyst')
+            except (TypeError, ValueError, KeyError, RuntimeError, requests.RequestException):
+                return None
+
+        ready_rows = [row for row in recommendations[:5] if analysis_ready(row['company_forecast'])]
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            quotes = {row['symbol']: quote for row, quote in
+                      zip(ready_rows, executor.map(read_candidate_quote, ready_rows)) if quote is not None}
     sent_at=datetime.now(KST)
     if sent_at.date().isoformat()!=args.session:raise RuntimeError('Requested report session expired during analysis')
     if (sent_at-decided).total_seconds()>120:raise RuntimeError('Decision became stale before requested delivery')

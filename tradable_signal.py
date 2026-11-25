@@ -1,7 +1,7 @@
 """A notification is not a trade-ready signal until its execution contract is valid."""
 from datetime import datetime,timedelta
 import math
-from decimal import Decimal,ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import asset_regime
 from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
 from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE, entry_gate
@@ -9,10 +9,19 @@ from exit_policy import classify_asset, exit_policy_for
 from rebound_track import entry_state as rebound_entry_state
 from early_entry_track import entry_state as early_entry_state
 
-def krx_tick(price):
+def krx_tick(price, *, fund=False):
+    if fund:
+        return 1 if price < 2000 else 5
     for upper,tick in [(2000,1),(5000,5),(20000,10),(50000,50),(200000,100),(500000,500)]:
         if price<upper:return tick
     return 1000
+
+def floor_order_price(price, *, overseas=False, fund=False):
+    """Highest permitted order price at or below the strategy's raw cap."""
+    value = Decimal(str(price))
+    tick = Decimal('0.01') if overseas else Decimal(krx_tick(value, fund=fund))
+    return float((value / tick).to_integral_value(rounding=ROUND_FLOOR) * tick)
+
 
 def round_trigger(price):
     tick=Decimal(krx_tick(float(price)))
@@ -150,6 +159,9 @@ def validate_entry(row,quote,at,session_open):
         return early_entry(plan,quote,at,result,seen,row.get('market') or 'KR',score)
     limit=number(plan.get('entry_limit'));floor=number(plan.get('entry_floor'))
     if limit is None or limit<=0:return reject('entry_limit_missing')
+    limit = floor_order_price(limit, overseas=row.get('market') == 'US',
+                              fund=classify_asset(row)[0] == 'fund')
+    if limit<=0:return reject('entry_limit_missing')
     if ask>limit:return reject('waiting_for_entry_price')
     if floor is not None and ask<floor:return reject('below_entry_band')
     if floor is None and ask<limit*.98:return reject('price_moved_requires_reanalysis')

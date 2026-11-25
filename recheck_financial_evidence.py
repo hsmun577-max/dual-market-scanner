@@ -57,7 +57,8 @@ def main():
         key=lambda r:(-r['company_forecast']['composite_score'],r['symbol']))[:5]
     quotes={}
     for row in candidates:
-        try:quotes[row['symbol']]=execution_quote(row['symbol'],datetime.now(now.tzinfo))
+        try:quotes[row['symbol']]=execution_quote(row['symbol'],datetime.now(now.tzinfo),
+            compare_volume=row['preopen_signal'].get('strategy') == 'earnings_catalyst')
         except (requests.RequestException,ValueError,RuntimeError,KeyError,TypeError):pass
     at=datetime.now(now.tzinfo)
     opened=cal.session_open(session).to_pydatetime()<=at<cal.session_close(session).to_pydatetime()

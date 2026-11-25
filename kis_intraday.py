@@ -30,7 +30,8 @@ from candidate_selection import (INVERSE_BENCHMARKS, instrument_rejection_reason
                                  market_headwind_reason, rank_market_candidates)
 from theme_sectors import sector_section, theme_sector_snapshot
 from telegram_text import split_telegram_text
-from exit_policy import DEFAULT_EXIT_POLICY, exit_policy_for
+from exit_policy import DEFAULT_EXIT_POLICY, classify_asset, exit_policy_for
+from tradable_signal import floor_order_price
 from provider_retry import call as provider_call, isolate_yfinance_cache, transient
 from scanner import (BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, attach_inverse_regime,
                      calculate_indicators, classify_signal, clean_prices, completed_daily_prices,
@@ -1597,7 +1598,7 @@ def candidate_metrics(bars, quote, close_time, volume_baseline=None):
     return evaluate_breakout(bars, quote, close_time, volume_baseline)[1]
 
 
-def evaluate_first_pullback(bars, quote, at, volume_baseline=None):
+def evaluate_first_pullback(bars, quote, at, volume_baseline=None, *, overseas=False, fund=False):
     """Require a VWAP recovery, then the first completed retest and a confirming close."""
     if set(bars) != OPENING_SLOTS:
         return "missing_pullback_bars", None, None
@@ -1631,7 +1632,8 @@ def evaluate_first_pullback(bars, quote, at, volume_baseline=None):
     if not (support <= pullback["low"] <= support * (1 + MAX_BREAKOUT_EXTENSION)
             and pullback["volume"] < breakout["volume"]):
         return "first_pullback_not_supported", None, None
-    limit = max(resistance, vwap[4]) * (1 + MAX_BREAKOUT_EXTENSION)
+    raw_limit = Decimal(str(max(resistance, vwap[4]))) * (1 + Decimal(str(MAX_BREAKOUT_EXTENSION)))
+    limit = floor_order_price(raw_limit, overseas=overseas, fund=fund)
     if not (confirmation["low"] >= support and confirmation["close"] > pullback["close"]
             and confirmation["close"] >= vwap[4]
             and max(resistance, vwap[4]) <= quote["bid"] <= quote["ask"] <= limit):
@@ -1639,11 +1641,23 @@ def evaluate_first_pullback(bars, quote, at, volume_baseline=None):
     return "first_pullback_confirmed", (ratio, quote["spread_pct"], confirmation["close"]), limit
 
 
+def intraday_instrument(symbol, overseas, company):
+    ticker = symbol[4:] if overseas else symbol
+    names = US_SYMBOL_NAMES if overseas else KR_SYMBOL_NAMES
+    name = (names.get(ticker) if overseas else
+            names.get(ticker + ".KS") or names.get(ticker + ".KQ")) or ticker
+    return dict(symbol=symbol, name=name, company_analysis=company)
+
+
+def intraday_asset_class(symbol, overseas, company=None):
+    return classify_asset(intraday_instrument(symbol, overseas, company))[0]
+
+
 def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, observation_only=False, prior_highs=(), company=None, sectors=(), volume_baseline=None,
                        require_pullback=False):
     ticker = symbol[4:] if overseas else symbol
-    name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (
-        KR_SYMBOL_NAMES.get(symbol + ".KS") or KR_SYMBOL_NAMES.get(symbol + ".KQ") or symbol)
+    instrument = intraday_instrument(symbol, overseas, company)
+    name = instrument["name"]
     reason = instrument_rejection_reason(symbol, name)
     if reason:
         return reason, None
@@ -1653,7 +1667,9 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     company = company if company is not None else {}
     limit = None
     if require_pullback:
-        status, metrics, limit = evaluate_first_pullback(bars, quote, closes, volume_baseline)
+        status, metrics, limit = evaluate_first_pullback(
+            bars, quote, closes, volume_baseline,
+            overseas=overseas, fund=classify_asset(instrument)[0] == 'fund')
         if metrics is None:
             return status, None
     else:
@@ -1709,8 +1725,7 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     if forecast["base_price"] / limit - 1 < MIN_BASE_REWARD_PCT / 100:
         return "insufficient_expected_reward", None
     # The fixed stop is the instrument's own: −2% on a listed fund, −3% on a single stock.
-    stop_pct = exit_policy_for(dict(symbol=symbol, name=name,
-                                    company_analysis=company)).stop_pct
+    stop_pct = exit_policy_for(instrument).stop_pct
     stop = limit * (1 - stop_pct)
     if quote["bid"] <= stop:
         return "entry_below_fixed_stop", None
@@ -1927,6 +1942,7 @@ async def collect(approval, market, symbols, opens, on_signal, samples_path, evi
                 "signal_at": closes.isoformat(),
                 "daily_eligible": True,
                 "entry_rule": "vwap_first_pullback",
+                "asset_class": intraday_asset_class(symbol, market == "US", (companies or {}).get(symbol)),
                 "entry_decision": (flags["published"] or {}).get("decisions", {}).get(symbol),
                 # The same clock-slot volume the live decision used, so a replay applies
                 # the operating rule instead of its opening-share fallback.
@@ -2115,8 +2131,8 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
         name = US_SYMBOL_NAMES.get(ticker, ticker) if overseas else (
             KR_SYMBOL_NAMES.get(symbol+".KS") or KR_SYMBOL_NAMES.get(symbol+".KQ") or symbol)
         forecast = companies[symbol]["forecast"]
-        step = Decimal("0.01" if overseas else "1")
-        limit = Decimal(str(entry_limit)).quantize(step, rounding=ROUND_DOWN)
+        limit = floor_order_price(entry_limit, overseas=overseas,
+                                  fund=intraday_asset_class(symbol, overseas, companies.get(symbol)) == 'fund')
         entry_label = "$" + f"{limit:,.2f}" if overseas else f"{limit:,.0f}원"
         base, upside = forecast["base_price"], forecast["bull_price"]
         target_label = "$" + f"{base:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{base:,.0f} / {upside:,.0f}원"

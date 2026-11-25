@@ -63,13 +63,15 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
     tick=(row.get('company_analysis') or {}).get('price_tick',.01 if row.get('market')=='US' else None)
     if not isinstance(tick,(int,float)) or isinstance(tick,bool) or not math.isfinite(tick) or tick<=0:
         return 'entry_tick_missing',None
-    entry_limit=round(math.floor(min(price,forecast['bull_price']/1.06)/tick)*tick,2)
-    if entry_limit<price:
+    from tradable_signal import floor_order_price
+    order_type = dict(overseas=row.get('market') == 'US', fund=policy.stop_pct == FUND_STOP_PCT)
+    if forecast['bull_price'] / 1.06 < price:
         return 'insufficient_catalyst_upside_room',None
+    entry_limit = floor_order_price(price, **order_type)
     entry_floor=None
     atr=values.get('atr14_pct')
     if isinstance(atr,(int,float)) and not isinstance(atr,bool) and math.isfinite(atr) and atr>0:
-        entry_floor=max(tick,round(math.floor(price*(1-.5*atr/100)/tick)*tick,2))
+        entry_floor=max(tick,floor_order_price(price*(1-.5*atr/100), **order_type))
     plan=dict(status='conditional_buy',confirmed=False,entry_limit=entry_limit,
         entry_floor=entry_floor,strategy=strategy,
         reference_price=price,reference_date=reference_date,
@@ -255,7 +257,10 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             elif plan.get('track')=='early_entry': early_picks.append(row['symbol'])
             elif plan.get('track')=='rebound': rebound_picks.append(row['symbol'])
         elif status=='conditional_buy':
+            from tradable_signal import floor_order_price
             policy=exit_policy_for(row)
+            entry_limit = floor_order_price(entry_limit, overseas=row.get('market') == 'US',
+                                            fund=policy.stop_pct == FUND_STOP_PCT)
             row['preopen_signal']=dict(status=status,confirmed=False,entry_limit=entry_limit,
                 entry_floor=entry_floor,strategy=strategy,
                 reference_price=price,reference_date=_expected_session(previous_session,row.get('market')),
