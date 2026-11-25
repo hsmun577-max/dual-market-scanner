@@ -207,10 +207,8 @@ class FundProfileWithoutQuoteTypeTests(unittest.TestCase):
         self.assertNotIn('current_financial_period', forecast['score_withheld_reasons'])
 
     def test_a_fund_below_the_price_floor_does_not_take_a_candidate_slot(self):
-        # KODEX 200선물인버스2X was the most traded Korean fund on 2026-11-24 at 140원.
-        # The entry screen refuses it as low_price before any profile is read, so its slot
-        # belongs to the next fund that could actually be planned.
-        cheap = fund_row('KR', '252670.KS', 'KODEX 200선물인버스2X', volume=9_000_000,
+        # A different inverse fund below the ordinary floor still cannot take a slot.
+        cheap = fund_row('KR', '114800.KS', 'KODEX 인버스', volume=90_000_000,
                          indicators=dict(price=140.0, average_turnover_20d=1.2e12))
         others = [fund_row('KR', f'{100000 + index}.KS', f'KODEX 테스트{index}',
                            volume=1_000_000 - index * 1000) for index in range(9)]
@@ -221,6 +219,18 @@ class FundProfileWithoutQuoteTypeTests(unittest.TestCase):
         promoted = [row['symbol'] for row in others if row.get('analysis_kind') == 'fund_candidate']
         self.assertEqual(promoted, [row['symbol'] for row in others[:FUND_CANDIDATE_LIMIT]])
         self.assertEqual(report['research_scope']['funds_promoted'], FUND_CANDIDATE_LIMIT)
+
+    def test_kodex_inverse_2x_can_receive_a_slot_below_the_price_floor(self):
+        fund = fund_row('KR', '252670.KS', 'KODEX 200선물인버스2X', volume=90_000_000,
+                        indicators=dict(price=140., average_turnover_20d=1.2e12))
+        report = analyse(dict(results=[fund], sectors=[]))
+        self.assertEqual(fund['analysis_kind'], 'fund_candidate')
+        self.assertEqual(report['research_scope']['funds_promoted'], 1)
+        # The price exemption does not override missing underlying-market evidence.
+        self.assertEqual(fund.get('preopen_decision'), 'inverse_underlying_unverified')
+        self.assertNotIn('preopen_signal', fund)
+        fund['indicators']['volume'] = 9_000_000
+        self.assertEqual(promoted_fund_symbols([fund]), {})
 
     def test_a_fund_below_the_turnover_floor_does_not_take_a_candidate_slot(self):
         # A high share count does not make a candidate: KDEF traded 29,000 shares at

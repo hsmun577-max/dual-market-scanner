@@ -27,7 +27,7 @@ from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE, build_com
 from delivery_policy import delivery_status
 from event_impact_analysis import article_text, world_events, analyze_events, company_news_events
 from candidate_selection import (INVERSE_BENCHMARKS, instrument_rejection_reason, is_inverse,
-                                 market_headwind_reason, rank_market_candidates)
+                                 market_headwind_reason, meets_price_floor, rank_market_candidates)
 from theme_sectors import sector_section, theme_sector_snapshot
 from telegram_text import split_telegram_text
 from exit_policy import DEFAULT_EXIT_POLICY, classify_asset, exit_policy_for
@@ -1661,8 +1661,9 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     reason = instrument_rejection_reason(symbol, name)
     if reason:
         return reason, None
-    if (overseas or require_pullback) and quote is not None and quote.get(
-            "ask", 0) < (5 if overseas else 1000):
+    market_code = "US" if overseas else "KR"
+    if ((overseas or require_pullback) and quote is not None
+            and not meets_price_floor(ticker, market_code, quote.get("ask", 0))):
         return "low_price", None
     company = company if company is not None else {}
     limit = None
@@ -1702,7 +1703,6 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     inverse = is_inverse(ticker if overseas else ticker + '.KS', name)
     if inverse:
         indicators = company.get("price_indicators", {})
-        market_code = "US" if overseas else "KR"
         if indicators.get("data_date") != last_completed_session(market_code, closes).isoformat():
             return "inverse_underlying_unverified", None
         status = market_headwind_reason(indicators, {"symbol": ticker, "asset_type": "inverse_etf"})
