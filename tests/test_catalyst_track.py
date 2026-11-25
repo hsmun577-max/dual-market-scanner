@@ -17,6 +17,9 @@ from catalyst_track import (MIN_CATALYST_COMPOSITE_SCORE, confirmed_catalyst, en
                             liftable_reason, quantified_catalyst)
 from execution_quotes import parse_execution_quote
 from preopen_signals import evaluate_preopen
+from unittest.mock import Mock
+
+import scanner
 from scanner import telegram_candidate_line
 from tradable_signal import format_requested_report, validate_entry
 
@@ -64,6 +67,16 @@ def report(row):
 
 
 class JinianceRegressionTests(unittest.TestCase):
+    def message(self, item):
+        """The alert the preopen delivery would send for this one row."""
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "fake",
+                                       "TELEGRAM_CHAT_ID": "fake"}), \
+                patch("scanner.delivery_status", return_value=(True, "test")), \
+                patch("scanner.requests.post") as post:
+            post.return_value = Mock(status_code=200, json=lambda: {"ok": True})
+            scanner.send_telegram_summary(report(item))
+        return post.call_args.kwargs["json"]["text"]
+
     def test_the_third_quarter_earnings_jump_lifts_a_rebound_under_a_market_headwind(self):
         item = row()
         self.assertEqual(liftable_reason(item, "KR"), "rebound")
@@ -91,10 +104,11 @@ class JinianceRegressionTests(unittest.TestCase):
         evaluate_preopen(report(item), "2026-11-11", AT)
         text = telegram_candidate_line(item)
         self.assertIn("[실적·호재 촉매]", text)
-        self.assertIn("근거", text)
+        self.assertIn("호재:", text)
         self.assertIn("253", text)
-        self.assertIn("시가 아래", text)
         self.assertIn("손절 −3%", text)
+        # The entry guard moved to the block heading, where it is said once (2026-11-25).
+        self.assertIn("장초반 시가 아래", self.message(item))
 
     def test_a_catalyst_plan_under_a_market_headwind_says_so(self):
         # The confirmed-disclosure track is the one path allowed past the market regime
@@ -105,11 +119,13 @@ class JinianceRegressionTests(unittest.TestCase):
         evaluate_preopen(report(item), "2026-11-11", AT)
         self.assertFalse(item["indicators"]["market_above_ma20"])
         self.assertTrue(item["preopen_signal"]["market_regime_lifted"])
-        text = telegram_candidate_line(item)
+        text = self.message(item)
         self.assertIn("지수 20일선 아래", text)
-        self.assertIn("확정 공시 근거로 예외 적용", text)
-        # The execution gate is unchanged: the same line still carries the guard.
+        self.assertIn("확정 공시 근거", text)
+        # The execution gate is unchanged: the block still carries the guard.
         self.assertIn("장초반 시가 아래", text)
+        # ...and it is said once, not under every plan.
+        self.assertEqual(text.count("장초반 시가 아래"), 1)
 
     def test_a_plan_outside_a_headwind_does_not_claim_an_exception(self):
         item = row()
@@ -145,7 +161,7 @@ class JinianceRegressionTests(unittest.TestCase):
         self.assertIsNone(item["preopen_signal"]["entry_floor"])
         text = telegram_candidate_line(item)
         self.assertIn("[실적·호재 촉매]", text)
-        self.assertIn("매수 구간 25,900원", text)
+        self.assertIn("매수 25,900원", text)
 
     def test_a_verified_headline_with_the_figure_is_enough_when_the_statement_is_not_in_yet(self):
         url = "https://www.yna.co.kr/view/AKR202611120001"
@@ -395,7 +411,7 @@ class ExecutionCheckTests(unittest.TestCase):
         signal = validate_entry(item, quote, self.at, True)
         self.assertTrue(signal["trade_ready"])
         self.assertEqual(signal["catalyst"]["kind"], "earnings_surprise")
-        self.assertIn("[실적·호재 촉매]", format_requested_report([], [signal], dict(completed=True), self.at))
+        self.assertIn("호재:", format_requested_report([], [signal], dict(completed=True), self.at))
         item["company_forecast"]["composite_score"] = MIN_CATALYST_COMPOSITE_SCORE - 1
         self.assertEqual(validate_entry(item, quote, self.at, True)["reason"], "score_below_policy")
 

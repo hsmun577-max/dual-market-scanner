@@ -67,8 +67,10 @@ class DailyDeliveryTests(unittest.TestCase):
         self.assertEqual(row['preopen_signal']['status'],'conditional_buy')
         text=scanner.telegram_candidate_line(row)
         self.assertIn('조건부 매수',text)
-        self.assertIn('자료 일부 미확보',text)
         self.assertNotIn('미검증',text)
+        # The caveat is no longer a line under every name: the block says once which
+        # dimensions are thin (2026-11-25 short form).
+        self.assertNotIn('자료 일부 미확보',text)
         with patch.dict(os.environ,{'TELEGRAM_BOT_TOKEN':'fake','TELEGRAM_CHAT_ID':'fake'}), patch.object(scanner.requests,'post') as post, patch('scanner.delivery_status',return_value=(True,'test')):
             post.return_value=Mock(status_code=200,json=lambda:{'ok':True})
             scanner.send_telegram_summary(report)
@@ -77,6 +79,7 @@ class DailyDeliveryTests(unittest.TestCase):
         self.assertNotIn('DART 연결','\n'.join(messages))
         self.assertIn('조건부 매수 계획','\n'.join(messages))
         self.assertIn('삼성전자','\n'.join(messages))
+        self.assertIn('자료 미확보 종목은 점수에 감점 반영','\n'.join(messages))
         self.assertTrue(all(len(message)<=3800 for message in messages))
 
     def test_a_row_without_financial_statements_is_still_refused_and_reported(self):

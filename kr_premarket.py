@@ -483,9 +483,7 @@ def format_block(items, session=None):
         if item.get('us_links'):
             link = item['us_links'][0]
             context.append(f"간밤 미국 {link['name']} {link['return_pct']:+.1f}%")
-        if not item.get('catalyst_labels') and not item.get('us_links'):
-            context.append('촉매 뉴스 미확인')
-        lines.append(' · '.join(parts + [' · '.join(context)]))
+        lines.append(' · '.join(parts + ([' · '.join(context)] if context else [])))
         if item.get('headline'):
             lines.append(f"  {_clean(item['headline'])}")
     return lines

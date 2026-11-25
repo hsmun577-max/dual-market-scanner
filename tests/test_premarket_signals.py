@@ -129,11 +129,11 @@ class MessageBlockTests(unittest.TestCase):
 
     def test_block_heading_and_lines(self):
         lines = format_block(self.items())
-        self.assertEqual(lines[0], HEADING)
-        self.assertIn('매수 신호 아님', lines[1])
-        self.assertIn('엔비디아 (NVDA) · 프리마켓 +6.4%', lines[2])
-        self.assertIn('촉매: CEO·경영진', lines[2])
-        self.assertIn('Jensen Huang reinstated', lines[3])
+        # One heading line carries the 'not a buy signal' note (2026-11-25 short form).
+        self.assertEqual(lines[0], f'{HEADING} · 매수 신호 아님')
+        self.assertIn('엔비디아 (NVDA) · 프리마켓 +6.4%', lines[1])
+        self.assertIn('촉매: CEO·경영진', lines[1])
+        self.assertIn('Jensen Huang reinstated', lines[2])
         self.assertEqual(format_block([]), [])
 
     def test_intraday_message_puts_the_block_before_the_buy_heading(self):

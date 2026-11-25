@@ -61,7 +61,7 @@ class ExitPolicyNumbers(unittest.TestCase):
         self.assertEqual(signal["take_profit_mode"], "surge_trailing")
         self.assertEqual(signal["exit_policy"]["surge_window_minutes"], 30)
         text = format_requested_report([], [signal], {}, T0)
-        self.assertIn("기본 익절", text)
+        self.assertIn("익절 +6%", text)
         self.assertIn("트레일링", text)
 
 

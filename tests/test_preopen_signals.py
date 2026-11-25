@@ -86,7 +86,7 @@ class PreopenTests(unittest.TestCase):
         self.assertFalse(row['preopen_signal']['confirmed'])
         self.assertEqual(row['preopen_signal']['entry_limit'],10000)
         self.assertIn('조건부 매수',telegram_candidate_line(row))
-        self.assertIn('2026-11-18 종가 기준',telegram_candidate_line(row))
+        self.assertIn('(11/18 종가)',telegram_candidate_line(row))
         with patch.dict('os.environ',{'TELEGRAM_BOT_TOKEN':'fake','TELEGRAM_CHAT_ID':'fake'}),patch(
             'scanner.delivery_status',return_value=(True,'test')),patch('scanner.requests.post') as post:
             post.return_value=Mock(status_code=200,json=lambda:{'ok':True})

@@ -34,7 +34,7 @@ PREMARKET_MOVE_PCT = 5.0
 NEWS_WINDOW_HOURS = 24
 MAX_SIGNALS = 5
 HEADING = '[미국 장전 사전 시그널]'
-SUBTITLE = '매수 신호 아님 · 게이트와 별개로 장전 움직임·촉매 뉴스만 표시'
+SUBTITLE = '매수 신호 아님'
 NY = ZoneInfo('America/New_York')
 SESSION_LABELS = {'premarket': '프리마켓', 'after_hours': '시간외'}
 CATALYST_PATTERNS = (
@@ -320,7 +320,7 @@ def format_block(items):
     items = list(items or [])
     if not items:
         return []
-    lines = [HEADING, SUBTITLE]
+    lines = [f'{HEADING} · {SUBTITLE}']
     for item in items:
         symbol = item.get('symbol') or ''
         session = SESSION_LABELS.get(item.get('session'), '장전')
@@ -337,8 +337,6 @@ def format_block(items):
         parts = [f"• {item.get('name')} ({symbol}) · {move}"]
         if item.get('catalyst_labels'):
             parts.append('촉매: ' + '·'.join(item['catalyst_labels']))
-        else:
-            parts.append('촉매 뉴스 미확인')
         lines.append(' · '.join(parts))
         if item.get('headline'):
             lines.append(f"  {_clean(item['headline'])}")
