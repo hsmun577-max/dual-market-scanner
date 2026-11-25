@@ -90,4 +90,9 @@ def format_sector_header(rows, market=None):
         if not name or name in names: continue
         selected.append(name); names.add(name)
         if len(selected)==2: break
-    return ['오늘의 주요 섹터']+[f'{i}위 {name}' for i,name in enumerate(selected,1)]+(['확인 불가'] if not selected else [])
+    # No sector reading at all: say nothing instead of a heading plus '확인 불가'. The
+    # message already carries the theme block or the market regime; an empty heading was
+    # two lines of noise (2026-11-25 short form).
+    if not selected:
+        return []
+    return ['오늘의 주요 섹터']+[f'{i}위 {name}' for i,name in enumerate(selected,1)]

@@ -181,7 +181,8 @@ class SectorSectionTests(unittest.TestCase):
     def test_without_theme_data_the_old_header_is_unchanged(self):
         etf = [dict(market='KR', name='반도체', return_pct=1.0, market_excess_pct=0.5, turnover_ratio=1.1)]
         self.assertEqual(sector_section(etf, None, 'KR'), ['오늘의 주요 섹터', '1위 반도체'])
-        self.assertEqual(sector_section([], None, 'KR'), ['오늘의 주요 섹터', '확인 불가'])
+        # No reading at all is no block (2026-11-25): a heading plus '확인 불가' was noise.
+        self.assertEqual(sector_section([], None, 'KR'), [])
 
     def test_theme_block_replaces_the_coarse_word_list_entirely(self):
         # 세부 테마가 있으면 '오늘의 주요 섹터 / 1위 기계·장비' 대분류 목록은 싣지 않는다.

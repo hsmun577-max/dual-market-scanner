@@ -28,7 +28,6 @@ from delivery_policy import delivery_status
 from event_impact_analysis import article_text, world_events, analyze_events, company_news_events
 from candidate_selection import (INVERSE_BENCHMARKS, instrument_rejection_reason, is_inverse,
                                  market_headwind_reason, rank_market_candidates)
-from sector_flow import format_sector_header
 from theme_sectors import sector_section, theme_sector_snapshot
 from telegram_text import split_telegram_text
 from exit_policy import DEFAULT_EXIT_POLICY, exit_policy_for
@@ -973,7 +972,6 @@ def company_quality_metrics(ticker, snapshot, now):
                 if target in ('trailing_pe','forward_pe','price_to_book'):
                     # Per-field source so a KIS trailing PE cannot be compared with this one.
                     result[target+'_source'] = 'Yahoo Finance observed multiples'
-        num_fin = None
         for source, target, scale in (("heldPercentInstitutions", "institutional_holding_pct", 100),):
             value = info.get(source)
             if isinstance(value, (int, float)) and math.isfinite(value):
@@ -2434,7 +2432,7 @@ def event_watch_symbols(market, at, registry=None, events=None, limit=6, turnove
     if turnover is None:
         turnover={}
         try:
-            from candidate_selection import INVERSE_BENCHMARKS, is_inverse, market_headwind_reason, average_turnover
+            from candidate_selection import average_turnover
             report=json.loads(Path('opening-scan/latest.json').read_text(encoding='utf-8-sig'))
             for row in report['results']:
                 turnover[row['symbol']]=average_turnover(row['indicators'])
