@@ -14,7 +14,7 @@ from preopen_signals import evaluate_preopen
 from industry_flow import snapshot,format_report,Client
 from telegram_text import split_telegram_text
 from execution_quotes import execution_quote
-from tradable_signal import validate_entry,format_requested_report
+from tradable_signal import analysis_ready,validate_entry,format_requested_report
 import asset_regime
 
 KST=ZoneInfo('Asia/Seoul')
@@ -52,7 +52,7 @@ def main():
     evaluation=evaluate_preopen(report,reference_session,decided)
     session_open=cal.session_open(args.session).to_pydatetime()<=decided<cal.session_close(args.session).to_pydatetime()
     recommendations=sorted([r for r in report['results'] if r.get('preopen_signal',{}).get('status')=='conditional_buy'],
-        key=lambda r:(r['company_forecast'].get('assessment_status')!='complete',
+        key=lambda r:(not analysis_ready(r['company_forecast']),
                       -r['company_forecast']['composite_score'],r['symbol']))
     # The production conditional plan uses the previous close. A current quote is
     # displayed separately and never relabelled as a model entry or an actual fill.
@@ -61,7 +61,10 @@ def main():
         try:client=Client()
         except Exception:pass
     for row in recommendations[:5]:
-        if client and row['company_forecast'].get('assessment_status')=='complete':
+        # Quoted when the evidence may be executed at all — the same rule the execution
+        # check reads (score issued, no withheld integrity gap), not 'complete': a partial
+        # assessment with a published score is still executable.
+        if client and analysis_ready(row['company_forecast']):
             try:
                 quotes[row['symbol']]=execution_quote(row['symbol'],datetime.now(KST),client)
             except (TypeError,ValueError,KeyError,RuntimeError,requests.RequestException):pass

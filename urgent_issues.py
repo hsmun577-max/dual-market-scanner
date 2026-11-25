@@ -20,7 +20,7 @@ from candidate_selection import (MIN_AVERAGE_TURNOVER, MIN_PRICE, average_turnov
                                  instrument_rejection_reason)
 from research_asset import is_fund
 
-HEADING = '🚨 긴급 이슈 참고 (매수 신호 아님 · 게이트 보류)'
+HEADING = '🚨 긴급 이슈 참고 · 매수 신호 아님'
 # 당일 급등 기준. 8%로 두면 잡주 급등이 섞여서, 실제 대형 이슈 급등만 남도록 10%로 잡았다.
 MIN_CHANGE_PCT = 10.0
 # 이보다 큰 '하루 등락'은 뉴스가 아니라 가격 데이터 오류다(예: PARA +9,614%).
@@ -439,9 +439,6 @@ def format_urgent_block(issues, limit=None):
             code = symbol.split('.')[0] if item.get('market') == 'KR' else symbol
             reasons = ' · '.join((item.get('reason_labels') or ['게이트 보류'])[:2])
             lines.append(f"• {item.get('name')} ({code}) {item.get('change_pct', 0):+.1f}% · 보류: {reasons}")
-            from live_quote import quote_line
-            quote = quote_line(item.get('live_quote'), item.get('market'))
-            if quote:
-                lines.append(f"  {quote}")
-            lines.append(f"  이슈: {_clean(item.get('headline'), 110)}")
+            if item.get('headline'):
+                lines.append(f"  이슈: {_clean(item.get('headline'), 90)}")
     return lines

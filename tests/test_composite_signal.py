@@ -127,7 +127,8 @@ class CompositeSignalTests(unittest.TestCase):
         self.assertGreaterEqual(forecast['base_price']/candidate[4]-1,MIN_BASE_REWARD_PCT/100)
         text=format_notification('KRX',[candidate],AT,{'005930':company},sectors)
         self.assertIn('종합 ',text)
-        self.assertIn('/100',text)
+        # The score is one compact figure now, not '종합 66.2/100'.
+        self.assertIn(f"종합 {forecast['composite_score']:.1f}",text)
         for noise in ['영업이익률','증권사','공시','최근 기사','관찰 후보','30분','차트 점수']:
             self.assertNotIn(noise,text)
         status,candidate=evaluate_candidate(bars,quote,AT,'KRX','005930',evidence,False,

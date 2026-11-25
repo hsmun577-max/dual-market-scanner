@@ -99,6 +99,23 @@ def early_entry(plan,quote,at,result,seen,market='KR',score=None):
         filled=False)
 
 
+def analysis_ready(forecast):
+    """Whether this forecast's evidence may be executed, or why it may not.
+
+    The score is withheld only by an integrity gap (``company_forecast.BLOCKING_GAPS``): a
+    missing statement, a period that is not the latest filing, evidence stamped in the
+    future. A supporting dimension that was not observed — valuation multiples, sector
+    flow, an unread article body — is a caveat that the score already carries a deduction
+    for, and it used to be enough on its own to refuse an entry that the very same run had
+    planned. On 2026-11-25 that blocked 7 of the 10 Korean conditional plans
+    ("assessment_status: partial") forever, while their scores were published in the alert.
+    """
+    forecast = forecast or {}
+    if forecast.get('composite_score') is None:
+        return False
+    return not forecast.get('score_withheld_reasons')
+
+
 def validate_entry(row,quote,at,session_open):
     """Validate a conditional plan at a fresh executable ask; never assume a fill."""
     result=dict(symbol=row.get('symbol'),name=row.get('name'),trade_ready=False)
@@ -108,7 +125,7 @@ def validate_entry(row,quote,at,session_open):
     plan=row.get('preopen_signal',{});forecast=row.get('company_forecast',{})
     if plan.get('status')!='conditional_buy':return reject('no_conditional_buy_plan')
     if plan.get('expires_session')!=at.date().isoformat():return reject('wrong_plan_session')
-    if forecast.get('assessment_status')!='complete' or forecast.get('missing_dimensions'):
+    if not analysis_ready(forecast):
         return reject('analysis_incomplete')
     seen=stamp((quote or {}).get('observed_at'));trade=stamp((quote or {}).get('trade_at'))
     if seen is None or not at-timedelta(seconds=10)<=seen<=at:return reject('quote_unverified_or_stale')
@@ -194,7 +211,12 @@ TRACK_LABELS = {
 
 
 def plan_line(plan):
-    """One line for a conditional plan that could not be confirmed at this moment."""
+    """One compact entry for a conditional plan that could not be confirmed yet.
+
+    The short form the owner asked for on 2026-11-25: the name, what the news was, and
+    the price band with the target — no per-name sell-rule paragraph and no repeated
+    '매수 신호 아님' sentence, which the block's heading already says once.
+    """
     code = str(plan.get('symbol') or '').split('.')[0]
     label = plan.get('label') or TRACK_LABELS.get(plan.get('strategy'), plan.get('strategy')) or '조건부'
     label = str(label).strip('[]')
@@ -209,21 +231,22 @@ def plan_line(plan):
         band.append(f"갭 없이 열리면 {text(plan['flat_open_entry_limit'])}")
     score = plan.get('composite_score')
     head = f"• {plan.get('name')} ({code}) · [{label}]"
-    if band:
-        head += ' · 매수 구간 ' + band[0]
     if isinstance(score, (int, float)):
-        head += f" · 종합 {score:.1f}/100"
+        head += f" · 종합 {score:.1f}"
     lines = [head]
     if plan.get('catalyst_summary'):
-        lines.append(f"  근거 {plan['catalyst_summary']}")
-    from live_quote import LABELS as QUOTE_LABELS
-    from live_quote import quote_line
-    quote = quote_line(plan.get('live_quote'), plan.get('market'))
-    held_by_session = plan.get('hold_reason') in ('market_closed', 'wrong_plan_session')
-    if quote and not (held_by_session and quote == QUOTE_LABELS['market_closed']):
-        lines.append(f"  {quote}")
-    if plan.get('hold_reason'):
-        lines.append(f"  {HOLD_REASON_LABELS.get(plan['hold_reason'], plan['hold_reason'])}")
+        lines.append(f"  호재: {plan['catalyst_summary']}")
+    target = plan.get('bull_target') or plan.get('target_price')
+    price_line = []
+    if band:
+        price_line.append(f"매수 {band[0]}")
+    if isinstance(target, (int, float)):
+        price_line.append(f"목표 {text(target)}")
+    stop = plan.get('stop_pct')
+    if isinstance(stop, (int, float)):
+        price_line.append(f"손절 −{stop:.0%}")
+    if price_line:
+        lines.append('  ' + ' · '.join(price_line))
     return "\n".join(lines)
 
 
@@ -236,55 +259,49 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans
     if ready:
         lines.append(f'매수 신호 · {at:%m/%d %H:%M:%S} KST')
         for row in ready[:5]:
+            code = str(row.get('symbol','')).split('.')[0]
+            target = row.get('bull_target') or row.get('base_target')
+            try:
+                until = datetime.fromisoformat(row['valid_until']).strftime('%H:%M:%S')
+            except (KeyError, TypeError, ValueError):
+                until = None
             if row.get('track')=='early_entry':
-                # The early entry is a limit 1% under the session's own open, held 5
-                # sessions, with the instrument's own split stop.
-                lines.extend(['',f"• {row['name']} ({row['symbol'].split('.')[0]}) · [단기 상승 초입] · 5일 보유",
-                    f"진입 확인가 {row['indicative_entry']:,.0f}원 · 시가 −1% 지정가 {row['entry_limit']:,.0f}원 (시가 {row['day_open']:,.0f}원 대비)",
-                    f"{datetime.fromisoformat(row['valid_until']):%H:%M:%S}까지 가격 재확인 후 진입 · 미체결 시 추격 매수 없음",
-                    f"예상 손절 {row['stop_price']:,.0f}원 (−{row['stop_pct']:.0%}) · 기본 익절 {row['take_profit_price']:,.0f}원 (+{row['take_profit_pct']:.0%}) · 5거래일 보유"])
+                # The early entry is a limit 1% under the session's own open.
+                lines.extend(['',f"• {row['name']} ({code}) · 단기 상승 초입 · 종합 {row.get('score', 0):.1f}",
+                    f"  시가 −1% 지정가 {row['entry_limit']:,.0f}원 (시가 {row['day_open']:,.0f}원) · 추격 없음",
+                    f"  목표 +{row['take_profit_pct']:.0%} · 손절 −{row['stop_pct']:.0%} · 5거래일 보유"
+                    + (f" · {until}까지" if until else "")])
                 continue
             if row.get('track')=='rebound':
-                # A rebound entry has no +6% target and no -2% stop on purpose: it is a
-                # 5-session hold bought on a dip from the open.
-                lines.extend(['',f"• {row['name']} ({row['symbol'].split('.')[0]}) · [{row.get('label')}] 반등 눌림 · 5일 보유",
-                    f"진입 확인가 {row['indicative_entry']:,.0f}원 · 눌림 지정가 {row['entry_limit']:,.0f}원 (시가 {row['day_open']:,.0f}원 대비)",
-                    f"{datetime.fromisoformat(row['valid_until']):%H:%M:%S}까지 가격 재확인 후 진입",
-                    '좁은 −2% 손절 비권장 · 5거래일 보유 후 청산 · 시가가 전일 종가 −1% 아래면 취소'])
+                # A rebound entry has no +6% target and no -2% stop on purpose.
+                lines.extend(['',f"• {row['name']} ({code}) · {row.get('label')} · 5일 보유",
+                    f"  눌림 지정가 {row['entry_limit']:,.0f}원 (시가 {row['day_open']:,.0f}원)"
+                    + (f" · {until}까지" if until else "")])
                 continue
             evidence=row.get('catalyst') or {}
-            track='[실적·호재 촉매] ' if evidence else ''
-            from live_quote import quote_line
-            quote = quote_line(row.get('live_quote'), row.get('market') or 'KR')
-            lines.extend(['',f"• {row['name']} ({row['symbol'].split('.')[0]}) · {track}종합 {row['score']:.1f}/100",
-                *([f"근거 {evidence['summary']}"] if evidence.get('summary') else []),
-                *(['지수 20일선 아래 · 확정 공시 근거로 예외 적용 (시가·거래량 게이트는 그대로)']
-                  if row.get('market_regime_lifted') else []),
-                *([quote] if quote else []),
-                f"진입 확인가 {row['indicative_entry']:,.0f}원 · 매수 상한 {row['entry_limit']:,.0f}원",
-                f"{datetime.fromisoformat(row['valid_until']):%H:%M:%S}까지 가격 재확인 후 진입",
-                f"분석 목표 {row['base_target']:,.0f}원 / 상승 시나리오 {row['bull_target']:,.0f}원",
-                f"예상 손절 {row['stop_price']:,.0f}원 · 기본 익절 {row['take_profit_price']:,.0f}원",
-                f"손절 −{row['stop_pct']:.0%}·익절 +{row['take_profit_pct']:.0%}는 실제 체결가로 재계산 · 급등 시 "
-                f"{row['take_profit_pct']:.0%} 매도 대신 트레일링 보유 후 거래량 급감 시 청산"])
+            lines.extend(['',f"• {row['name']} ({code}) · 종합 {row['score']:.1f}",
+                *([f"  호재: {evidence['summary']}"] if evidence.get('summary') else []),
+                f"  매수 {row['entry_limit']:,.0f}원 · 목표 {target:,.0f}원 · 손절 −{row['stop_pct']:.0%}"
+                + (f" · {until}까지" if until else "")])
+        lines.append('')
+        lines.append('※ 익절 +6%, 급등 시 트레일링 보유 · 실제 체결가 기준')
     elif any(row.get('reason')=='waiting_for_entry_price' for row in signals):
-        lines.extend([f'매수 대기 · {at:%m/%d %H:%M} KST','분석 조건은 충족했으나 현재 호가가 매수 상한 초과'])
+        lines.extend([f'매수 대기 · {at:%m/%d %H:%M} KST','분석 조건 충족 · 현재 호가가 매수 상한 초과'])
     elif evaluation.get('decision_completed',0)>0 and not signals:
         lines.extend([f'분석 결과 · {at:%m/%d %H:%M} KST',
-            f"판정 완료 {evaluation['decision_completed']}종목 · 현재 매수 조건 충족 없음"])
+            f"판정 완료 {evaluation['decision_completed']}종목 · 매수 조건 충족 없음"])
         if evaluation.get('data_excluded'):
-            lines.append(f"자료 부족 {evaluation['data_excluded']}종목은 매수 판정에서 제외")
+            lines.append(f"자료 부족 {evaluation['data_excluded']}종목 제외")
     elif evaluation.get('completed') is False:
         lines.extend([f'분석 상태 · {at:%m/%d %H:%M} KST','매수 판정 보류 · 분석자료 미확인'])
     elif signals:
         # No entry is confirmed right now (a closed session, a quote above the limit), but
-        # the analysis did produce plans. They are printed as plans with the reason they
-        # are not executable yet — never as a buy signal.
-        lines.extend([f'진입 확인 보류 · {at:%m/%d %H:%M} KST',
-                      '지금 체결 기준을 확인하지 못했습니다 · 아래는 조건부 계획(매수 신호 아님)'])
+        # the analysis did produce plans. They are printed as plans, never as a signal.
+        lines.extend([f'조건부 계획 · {at:%m/%d %H:%M} KST',
+                      '지금 체결 기준 미확인 · 매수 신호 아님'])
         shown = [plan for plan in (plans or [])][:5]
         lines.extend(['', *[plan_line(plan) for plan in shown]] if shown else
                      ['실시간 호가·가격 조건 미확인 또는 미충족'])
     else:
-        lines.extend([f'분석 결과 · {at:%m/%d %H:%M} KST','현재 매수 조건을 충족한 종목 없음'])
+        lines.extend([f'분석 결과 · {at:%m/%d %H:%M} KST','매수 조건 충족 종목 없음'])
     return '\n'.join(lines)

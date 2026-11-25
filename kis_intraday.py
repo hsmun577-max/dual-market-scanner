@@ -2108,8 +2108,8 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
              + ["", f"{heading} · {timestamp}"])
     if not confirmed:
         if assessed:
-            lines.append(f"판정 완료 {assessed}종목 · 현재 매수 조건 충족 없음")
-            if incomplete:lines.append(f"자료 부족 {incomplete}종목은 매수 판정에서 제외")
+            lines.append(f"판정 완료 {assessed}종목 · 매수 조건 충족 없음")
+            if incomplete:lines.append(f"자료 부족 {incomplete}종목 제외")
         else:
             lines.append("매수 판정 보류 · 분석자료 미확인" if incomplete else "매수 조건 충족 종목 없음")
     for symbol, _ratio, _spread, _price, entry_limit, _stop, _projection in confirmed[:5]:
@@ -2125,12 +2125,9 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
         # The alert names the stop of this instrument, not of the default policy.
         policy = exit_policy_for(dict(symbol=symbol, name=name,
                                       company_analysis=companies.get(symbol)))
-        lines.extend(["", f"• {name} ({ticker}) · 종합 {forecast['composite_score']:.1f}/100",
-                      f"진입 상한 {entry_label} · {(closes+timedelta(seconds=30)):%H:%M:%S}까지",
-                      f"5거래일 분석 목표 · 기준/상승 {target_label}",
-                      f"손절 −{policy.stop_pct:.0%} · 기본 익절 +{policy.take_profit_pct:.0%} · "
-                      f"단기 급등 시 {policy.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
-                      "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"])
+        lines.extend(["", f"• {name} ({ticker}) · 종합 {forecast['composite_score']:.1f}",
+                      f"  매수 상한 {entry_label} · 목표 {target_label} · 손절 −{policy.stop_pct:.0%}",
+                      f"  {(closes+timedelta(seconds=30)):%H:%M:%S}까지 재확인 · 5거래일 보유"])
     if urgent:
         import urgent_issues
         block = urgent_issues.format_urgent_block(urgent)

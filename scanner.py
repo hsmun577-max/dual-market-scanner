@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import time
 from zoneinfo import ZoneInfo
 import argparse
@@ -106,6 +107,18 @@ SECTOR_TURNOVER_THRESHOLD = 2.0
 
 MASTER_URL = "https://new.real.download.dws.co.kr/common/master/"
 KR_SECURITY_GROUPS = {"ST", "MF", "RT", "SC", "IF", "DR", "EF", "FE", "FS"}
+# The master file's own group code for a listed fund ('EF' 상장형 ETF, 'FE'/'FS' 펀드형).
+# A fund is priced from what it tracks, not from an issuer statement it never had, so the
+# classification decides which scoring model the row is read with (research_asset.is_fund).
+KR_FUND_GROUPS = {"EF", "FE", "FS"}
+# US master (nasmst/nysmst/amsmst) '구분' 3 + '상품구분' 001/005 is an ETF; '구분' 2 is a
+# stock. QQQ and SPY are listed that way, and their Korean display names ("인베스코 QQQ")
+# carry no fund marker at all, so without this field they were graded as operating
+# companies and every one of them was refused as analysis_incomplete (2026-11-25 scan).
+US_ETF_SECURITY_TYPE = "3"
+US_ETF_PRODUCT_TYPES = {"001", "005"}
+# Filled by load_universe(): the instruments the exchange master itself calls a fund.
+UNIVERSE_FUNDS = {"KR": set(), "US": set()}
 FULL_SCOPE = "한국투자증권 종목정보 기준 코스피·코스닥·NASDAQ·NYSE·AMEX 주식 및 ETF"
 
 
@@ -126,7 +139,9 @@ def load_master(filename):
 
 
 def parse_kr_master(lines, suffix, tail_width):
+    """``(names, fund_symbols)`` — the group code is what tells a fund from a stock."""
     names = {}
+    funds = set()
     for line in lines:
         if len(line) <= 21 + tail_width:
             continue
@@ -134,41 +149,52 @@ def parse_kr_master(lines, suffix, tail_width):
         symbol, name = head[:9].strip(), head[21:].strip()
         if tail[:2] in KR_SECURITY_GROUPS and symbol and name:
             names[f"{symbol}.{suffix}"] = name
-    return names
+            if tail[:2] in KR_FUND_GROUPS:
+                funds.add(f"{symbol}.{suffix}")
+    return names, funds
 
 
 def parse_us_master(lines):
+    """``(names, fund_symbols)`` — '구분' 3 with 상품구분 001/005 is a listed fund."""
     names = {}
+    funds = set()
     for line in lines:
         fields = line.split("\t")
         if len(fields) < 23:
             continue
         security_type, product_type = fields[8].strip(), fields[22].strip()
-        if security_type == "2" or (security_type == "3" and product_type in {"001", "005"}):
+        if security_type == "2" or (security_type == US_ETF_SECURITY_TYPE
+                                    and product_type in US_ETF_PRODUCT_TYPES):
             symbol = fields[4].strip().replace(".", "-")
             name = US_SYMBOL_NAMES.get(symbol) or fields[6].strip() or fields[7].strip()
             if symbol and name:
                 names[symbol] = name
-    return names
+                if security_type == US_ETF_SECURITY_TYPE:
+                    funds.add(symbol)
+    return names, funds
 
 
 def load_universe():
     names = {"KR": {}, "US": {}}
+    UNIVERSE_FUNDS["KR"].clear()
+    UNIVERSE_FUNDS["US"].clear()
     # Tail widths exclude the newline counted by the KIS examples.
     for filename, suffix, width in [
         ("kospi_code.mst", "KS", 227),
         ("kosdaq_code.mst", "KQ", 221),
     ]:
-        instruments = parse_kr_master(load_master(filename), suffix, width)
+        instruments, funds = parse_kr_master(load_master(filename), suffix, width)
         if not instruments:
             raise ValueError(f"종목 목록을 읽을 수 없음: {filename}")
         names["KR"].update(instruments)
+        UNIVERSE_FUNDS["KR"].update(funds)
 
     for filename in ("nasmst.cod", "nysmst.cod", "amsmst.cod"):
-        instruments = parse_us_master(load_master(filename))
+        instruments, funds = parse_us_master(load_master(filename))
         if not instruments:
             raise ValueError(f"종목 목록을 읽을 수 없음: {filename}")
         names["US"].update(instruments)
+        UNIVERSE_FUNDS["US"].update(funds)
     return names
 
 
@@ -681,11 +707,17 @@ def scan_market(market, tickers, benchmark, names=None, prices=None, *,
                 "market": market,
                 "symbol": symbol,
                 "name": names.get(symbol),
+                # The exchange master's own fund classification, not a name pattern: a
+                # US listing such as QQQ ("인베스코 QQQ") carries no fund marker in its
+                # display name, and an unclassified ETF was scored as an operating
+                # company and refused for a statement it never had.
                 "asset_type": (
                     "inverse_etf"
                     if inverse
                     else "leveraged_etf"
                     if symbol in LEVERAGED_ETFS
+                    else "etf"
+                    if symbol in UNIVERSE_FUNDS.get(market, ())
                     else "stock_or_etf"
                 ),
                 "indicators": indicators,
@@ -1004,50 +1036,56 @@ def quality_watch_research(report, at):
 
 
 def quality_watch_line(entry):
-    """One message line for a quality name: the grade, the axes and why.
+    """One compact entry for a quality name: the name, who is buying, the target.
 
-    The message sends only '수급 유입 우량주' entries; a waiting entry still renders with
-    its own label, so a record kept in the report can be read as it was graded. What the
-    whole block is (a buy-candidate review, not a buy signal) is said once in its heading:
-    repeating it under every name was five identical lines in the 2026-11-24 12:34 alert.
+    The owner asked for the short form on 2026-11-25 ("띄울거면 간단하게적어 종목,
+    호재,목표가 이정도만"): a name line, one line of evidence and the target — no grade
+    labels, turnover recap or repeated disclaimers. What the block is (a review, not a
+    buy signal) is said once in its heading.
     """
     name = entry.get('name') or entry.get('symbol')
     code = (entry.get('symbol') or '').split('.')[0]
     label = ('수급 유입 우량주' if entry.get('grade') == 'supply_inflow_quality'
-             else '수급 대기 우량주')
+             else '수급 대기')
     fundamental = entry.get('fundamental_score')
     target = entry.get('analyst_target') or {}
     upside = entry.get('target_upside_pct')
-    turnover = entry.get('average_turnover')
-    lines = [f"• {name} ({code}) · {label} · 펀더멘탈 {fundamental:.0f}/100" if fundamental is not None
-             else f"• {name} ({code}) · {label}"]
+    head = f"• {name} ({code})"
+    if entry.get('grade') != 'supply_inflow_quality':
+        head += f" · {label}"
+    if fundamental is not None:
+        head += f" · 펀더멘탈 {fundamental:.0f}"
     detail = []
-    if turnover:
-        detail.append(f"20일 평균 거래대금 {turnover/1e8:.1f}억")
-    if target.get('target_price') and upside is not None:
-        detail.append(f"증권사 목표 {target['target_price']:,.0f}원 ({upside:+.0f}%)")
-    if detail:
-        lines.append("  " + " · ".join(detail))
     supply_line = entry.get('supply_line')
     if supply_line:
-        lines.append("  " + supply_line)
-    from live_quote import quote_line
-    quote = quote_line(entry.get('live_quote'), entry.get('market'))
-    if quote:
-        lines.append("  " + quote)
-    if entry.get('grade') != 'supply_inflow_quality':
-        # Only the unsent grade needs its own basis label; the inflow block's heading
-        # already carries '매수 후보 검토 · 매수 신호 아님'.
-        lines.append("  수급 미유입 · 관찰 목록 · 매수 신호 아님")
+        # '외인·기관 +25.5억원 · 거래대금 대비 +8.78% · 2일 연속 순매수 · 4/5일 순매수'
+        # keeps only the amount and the streak: the ratio and the second count say the
+        # same thing twice. '외인·기관' itself contains '·', so it is matched, not split.
+        amount = re.search(r"외인·기관\s*[+-][\d.,]+억원", str(supply_line))
+        streak = re.search(r"\d+일 연속 순매수", str(supply_line))
+        if amount:
+            detail.append(amount.group(0).replace('원', ''))
+        if streak:
+            detail.append(streak.group(0))
+    if target.get('target_price') and upside is not None:
+        detail.append(f"목표 {target['target_price']:,.0f}원 ({upside:+.0f}%)")
+    quote = entry.get('live_quote')
+    if isinstance(quote, dict) and quote.get('status') == 'observed':
+        price = quote.get('price')
+        if isinstance(price, (int, float)):
+            detail.append(f"현재 {price:,.0f}원")
+    lines = [head]
+    if detail:
+        lines.append("  " + " · ".join(detail))
     return "\n".join(lines)
 
 
 def telegram_rebound_line(item):
-    """A rebound line: the dip limit, the gap cancel and the 5-session hold, per name.
+    """A rebound entry in the short form: why this name, then the entry rule.
 
     The track is priced from the next session's open, which a preopen report does not
-    have yet. Until the open prints, the line shows the rule and the flat-open reference
-    level; once the open is observed the real limit is shown with it.
+    have yet, so the line carries the dip rule and the flat-open reference level; once
+    the open prints the real limit replaces them.
     """
     plan = item.get('preopen_signal') or {}
     if plan.get('track') != 'rebound':
@@ -1061,32 +1099,27 @@ def telegram_rebound_line(item):
     limit = rebound_track.price_text(plan.get('entry_limit'), item.get('market'))
     flat = rebound_track.price_text(plan.get('flat_open_entry_limit'), item.get('market'))
     if limit:
-        limit_line = (f"눌림 지정가 {limit} ({rebound_track.offset_label(plan['strategy'])})"
-                      " · 시가 확인됨")
+        entry = f"눌림 지정가 {limit} · 시가 확인됨"
     else:
-        limit_line = (f"눌림 지정가 {rebound_track.offset_label(plan['strategy'])}"
-                      + (f" · 갭 없이 열리면 {flat}" if flat else '')
-                      + " · 시가 확인 후 확정")
+        entry = (f"눌림 지정가 {rebound_track.offset_label(plan['strategy'])}"
+                 + (f" · 갭 없이 열리면 {flat}" if flat else ''))
     numbers = []
-    change = values.get('return_1d')
-    volume = values.get('volume_ratio')
     rsi = values.get('rsi14')
+    volume = values.get('volume_ratio')
+    change = values.get('return_1d')
+    if plan.get('strategy') == 'oversold_rebound' and isinstance(rsi, (int, float)):
+        numbers.append(f"RSI {rsi:.1f}")
     if isinstance(change, (int, float)) and not isinstance(change, bool):
         numbers.append(f"당일 {change:+.1%}")
     if isinstance(volume, (int, float)) and not isinstance(volume, bool):
         numbers.append(f"거래량 {volume:.1f}배")
-    if plan.get('strategy') == 'oversold_rebound' and isinstance(rsi, (int, float)):
-        numbers.append(f"RSI {rsi:.1f}")
-    basis = f"  기준 {plan.get('reference_date')} 종가" + (' · ' + ' · '.join(numbers) if numbers else '')
-    return (f"• {name} ({code}) · {plan.get('label')} · 5일 보유\n"
-            f"  {limit_line}\n"
-            "  장전 시가가 전일 종가보다 −1% 아래면 진입 취소\n"
-            f"{basis}\n"
-            "  좁은 −2% 손절 비권장 · 5거래일 보유 후 청산" + quote_note(item) + caveat_note(item))
+    return (f"• {name} ({code}) · {plan.get('label')}\n"
+            + ("  " + " · ".join(numbers) + "\n" if numbers else "")
+            + f"  {entry} · 5일 보유 · 갭하락 −1%면 취소" + quote_note(item))
 
 
 def telegram_early_entry_line(item):
-    """An early-entry line: the open −1% limit, the alignment age and the qualifier.
+    """An early entry in the short form: why this name, then the open −1% limit.
 
     The study's entry is a resting limit 1% under the next session's open (+0.530% over 5
     sessions against +0.069% bought at the open). Until the open prints, the plan carries
@@ -1105,12 +1138,10 @@ def telegram_early_entry_line(item):
     entry = plan.get('entry_limit')
     flat = plan.get('flat_open_entry_limit')
     if entry:
-        limit_line = (f"시가 −1% 지정가 {price_text(entry)} · 시가 확인됨 "
-                      "(미체결 시 추격 매수 없음)")
+        limit_line = f"시가 −1% 지정가 {price_text(entry)} · 시가 확인됨"
     else:
-        limit_line = ("시가 −1% 지정가 진입 권장"
-                      + (f" · 갭 없이 열리면 {price_text(flat)}" if flat else "")
-                      + " · 시가 확인 후 확정 · 미체결 시 추격 매수 없음")
+        limit_line = ("시가 −1% 지정가"
+                      + (f" · 갭 없이 열리면 {price_text(flat)}" if flat else ""))
     evidence = plan.get('evidence') or {}
     numbers = []
     days = evidence.get('alignment_days')
@@ -1121,24 +1152,28 @@ def telegram_early_entry_line(item):
     volume = evidence.get('volume_ratio')
     if isinstance(volume, (int, float)) and not isinstance(volume, bool):
         numbers.append(f"거래량 {volume:.1f}배")
-    above = evidence.get('above_ma20_pct')
-    if isinstance(above, (int, float)) and not isinstance(above, bool):
-        numbers.append(f"MA20 대비 {above:+.1%}")
-    if evidence.get('return_1d') is not None:
-        numbers.append(f"당일 {evidence['return_1d']:+.1%}")
     qualifier = plan.get('qualifier_label')
     if qualifier:
         numbers.append(qualifier)
-    basis = (f"  기준 {plan.get('reference_date')} 종가"
-             + (' · ' + ' · '.join(numbers) if numbers else ''))
     policy = exit_policy_for(item)
-    heading = f"[단기 상승 초입] 조건부 매수 · 종합 {score:.1f}/100" if score is not None else "[단기 상승 초입] 조건부 매수"
-    return (f"• {name} ({code}) · {heading}\n"
-            f"  {limit_line}\n"
-            f"{basis}\n"
-            f"  손절 −{policy.stop_pct:.0%} · 기본 익절 +{policy.take_profit_pct:.0%} · 5거래일 보유 · "
-            "급등 시 트레일링 보유, 거래량 급감·고점 대비 하락 시 청산" + quote_note(item)
-            + caveat_note(item))
+    heading = (f"• {name} ({code}) · 종합 {score:.1f} · 단기 상승 초입" if score is not None
+               else f"• {name} ({code}) · 단기 상승 초입")
+    return (heading + "\n"
+            + ("  " + " · ".join(numbers) + "\n" if numbers else "")
+            + f"  {limit_line} · 5거래일 보유 · 손절 −{policy.stop_pct:.0%} · 미체결 시 추격 없음"
+            + quote_note(item))
+
+
+def reference_note(plan):
+    """'(11/24 종가)' — the close a conditional plan's limit was built from.
+
+    The date was a line of its own under every plan; without it the limit price has no
+    stated basis, so it stays, attached to the price.
+    """
+    value = str((plan or {}).get('reference_date') or '')
+    if len(value) != 10:
+        return ""
+    return f" ({value[5:7]}/{value[8:10]} 종가)"
 
 
 def telegram_candidate_line(item):
@@ -1154,10 +1189,8 @@ def telegram_candidate_line(item):
     score = forecast.get("composite_score")
     advance=item.get('advance_signal',{})
     if advance.get('status')=='advance_candidate' and not conditional and score is not None:
-        return (f"• {item.get('name') or item['symbol']} ({item['symbol'].split('.')[0]}) · 사전 매수 후보 · 종합 {score:.1f}/100\n"
-                f"  예정 재료 {advance['event_window_start']}~{advance['event_window_end']}\n"
-                "  정책 결과 발표 전 수혜 가능성 분석 · 매수 확정 대기" + quote_note(item)
-                + caveat_note(item))
+        return (f"• {item.get('name') or item['symbol']} ({item['symbol'].split('.')[0]}) · 종합 {score:.1f} · 사전 관찰\n"
+                f"  정책 재료 {advance['event_window_start']}~{advance['event_window_end']}")
     if (signal.get("confirmed") is not True and not conditional) or score is None or entry is None:
         return ""
     symbol = item["symbol"]
@@ -1172,46 +1205,30 @@ def telegram_candidate_line(item):
     target_label = "$" + f"{target:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{target:,.0f} / {upside:,.0f}원"
     label = '조건부 매수' if conditional else '매수 확인'
     if conditional and preopen.get('strategy') in ('event_catalyst','earnings_catalyst'):
-        from catalyst_track import MIN_ENTRY_VOLUME_RATIO
         track = preopen.get('strategy')=='earnings_catalyst'
         floor=preopen.get('entry_floor')
         floor_label=(f'${floor:,.2f}' if overseas else f'{floor:,.0f}원') if floor else None
         upper_label=f'${upside:,.2f}' if overseas else f'{upside:,.0f}원'
         entry_zone=f'{floor_label}~{entry_label}' if floor_label else entry_label
-        heading='[실적·호재 촉매] 조건부 매수' if track else '호재형 조건부 매수'
-        # The reason travels with the signal: a catalyst entry is only as good as the
-        # disclosure behind it and whether the session is actually buying it.
-        basis_line=''; guard=''
+        heading='[실적·호재 촉매]' if track else '[호재 촉매]'
+        # 호재 한 줄: the disclosure and when it was made. Without it the name is a chart
+        # with a number, and the reader cannot check what the news was.
+        basis_line=''
         evidence=preopen.get('catalyst') or {}
-        if track and evidence.get('summary'):
+        if evidence.get('summary'):
             when=''
             try:
                 when=datetime.fromisoformat(evidence['observed_at']).astimezone(
-                    ZoneInfo('Asia/Seoul')).strftime('%m/%d %H:%M')
+                    ZoneInfo('Asia/Seoul')).strftime('%m/%d')
             except (KeyError,TypeError,ValueError):when=''
-            basis_line=f"\n  근거 {evidence['summary']}" + (f' · {when}' if when else '')
-            guard=(f'\n  장초반 시가 아래·동시간 거래량 {MIN_ENTRY_VOLUME_RATIO:.1f}배 미달이면 진입하지 않음')
-        # 확정 공시 트랙만 하락장 게이트를 넘을 수 있다. 그 사실을 줄에 적어 두지 않으면
-        # 바로 위의 '하락 국면' 줄과 이 후보가 모순처럼 읽힌다(2026-11-24 지적).
-        if preopen.get('market_regime_lifted'):
-            guard = ('\n  지수 20일선 아래 · 확정 공시 근거로 예외 적용 (시가·거래량 게이트는 그대로)'
-                     + guard)
-        return (f"• {name} ({code}) · {heading} · 종합 {score:.1f}/100{basis_line}\n"
-                f"  매수 구간 {entry_zone} · 눌림 구간 진입 시\n"
-                f"  기준 종가 {preopen['reference_date']} · 상승 시나리오 목표 {upper_label}\n"
-                f"  손절 −{exit_policy.stop_pct:.0%} · 기본 익절 +{exit_policy.take_profit_pct:.0%} · "
-                f"단기 급등 시 {exit_policy.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
-                "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"
-                f"{guard}" + quote_note(item) + caveat_note(item))
-    basis = f" · {preopen['reference_date']} 종가 기준" if conditional else ''
-    caveat = caveat_note(item)
-    return (f"• {name} ({code}) · {label}{kind} · 종합 {score:.1f}/100\n"
-            f"  매수 상한 {entry_label}{basis}\n"
-            f"  5거래일 분석 목표 · 기준/상승 {target_label}\n"
-            f"  손절 −{exit_policy.stop_pct:.0%} · 기본 익절 +{exit_policy.take_profit_pct:.0%} · "
-            f"단기 급등 시 {exit_policy.take_profit_pct:.0%} 매도 대신 트레일링 보유,\n"
-            "  거래량 급감·고점 대비 하락 신호 시 그 가격에 청산 (실제 체결가 기준)"
-            + quote_note(item) + caveat)
+            basis_line=f"  호재: {evidence['summary']}" + (f' ({when})' if when else '') + '\n'
+        return (f"• {name} ({code}) · 종합 {score:.1f} · {heading}{kind}\n"
+                f"{basis_line}"
+                f"  매수 {entry_zone} · 목표 {upper_label} · 손절 −{exit_policy.stop_pct:.0%}"
+                + reference_note(preopen) + quote_note(item))
+    return (f"• {name} ({code}) · {label}{kind} · 종합 {score:.1f}\n"
+            f"  매수 상한 {entry_label} · 목표 {target_label} · 손절 −{exit_policy.stop_pct:.0%}"
+            + reference_note(preopen) + quote_note(item))
 
 
 CAVEAT_LABELS = {
@@ -1224,24 +1241,55 @@ CAVEAT_LABELS = {
 }
 
 
-def caveat_note(item):
-    """Say which evidence is missing instead of hiding a partial assessment."""
-    caveats = [key for key in (item.get('company_forecast', {}).get('caveats')
-                               or item.get('preopen_signal', {}).get('caveats') or []) if key]
-    if not caveats:
-        return ""
-    labels = [CAVEAT_LABELS.get(key, key) for key in dict.fromkeys(caveats)][:3]
-    return "\n  자료 일부 미확보: " + ", ".join(labels) + " (점수에 반영해 감점)"
+def _theme_issue(snapshots):
+    """The first theme's issue line, as the mood header quotes it.
+
+    Used only to drop the duplicate: the same headline was printed once in the mood line
+    and again under theme 1 in the 2026-11-25 07:50 message.
+    """
+    for snapshot in snapshots or []:
+        if not isinstance(snapshot, dict):
+            continue
+        for row in snapshot.get('rows') or []:
+            issue = row.get('issue') if isinstance(row, dict) else None
+            if issue and '뉴스 미확인' not in issue:
+                text = str(issue).strip()
+                return text[len('이슈:'):].strip() if text.startswith('이슈:') else text
+    return None
+
+
+def caveat_summary(report, keys=None):
+    """One line saying which evidence the whole block is thin on, or '' when none.
+
+    ``keys`` reads the per-name forecasts of the rows the message prints; without it the
+    evaluation's own caveat counts are used, so a block of plans and a block of names
+    cannot disagree about what is missing.
+    """
+    counts = {}
+    if keys:
+        for row in keys:
+            for key in (row.get('company_forecast') or {}).get('caveats') or []:
+                counts[key] = counts.get(key, 0) + 1
+    else:
+        counts = dict((report.get('buy_evaluation') or {}).get('caveats') or {})
+    labels = [CAVEAT_LABELS.get(key, key) for key in
+              sorted(counts, key=lambda key: -counts[key])][:3]
+    return (", ".join(labels) + " 자료 미확보 종목은 점수에 감점 반영") if labels else ""
 
 
 def quote_note(item):
-    """The observed live quote of this row, or why there is none (장 마감/자격증명).
+    """The observed live quote of this row, or nothing at all.
 
-    The scan decides on completed sessions; this line is what the market is showing now.
-    It is never an entry confirmation — the quote carries its own time and says so.
+    A closed session, a missing credential and a failed call used to print the same line
+    under every name — twelve identical '장 마감 · 호가 미확인' rows in the 2026-11-25
+    07:50 alert, where the market had not even opened. What matters per name is the
+    quote when it was actually read; the rest is said once, by the block.
     """
     from live_quote import quote_line
-    text = quote_line((item or {}).get('live_quote'), (item or {}).get('market'))
+    quote = (item or {}).get('live_quote')
+    if not isinstance(quote, dict) or quote.get('status') != 'observed':
+        return ""
+    text = quote_line(quote, (item or {}).get('market'))
     return "\n  " + text if text else ""
 
 def benchmark_daily_closes(benchmark):
@@ -1365,20 +1413,49 @@ def sector_flow_snapshot(market, now):
     return rows
 
 
-def market_regime_note(report):
-    """Say when the market itself held candidates back, so a quiet day is not a silent zero."""
+def market_regime_note(report, market=None):
+    """Say when the market itself held candidates back, so a quiet day is not a silent zero.
+
+    ``market`` limits the note to the market the message is for: a Korean preopen alert
+    carrying 'S&P500(SPY) 추세 통과 8종목은 시장 역풍으로 보류' describes a session the
+    reader cannot act on in this message.
+    """
     names = {"KR": "KOSPI", "US": "S&P500(SPY)"}
     lines = []
-    for market, data in sorted((report.get("market_regime") or {}).items()):
-        if not data.get("observed"):
-            lines.append(f"시장 국면({names.get(market, market)}): 지수 확인 불가 · 국면 필터 미적용")
+    for name, data in sorted((report.get("market_regime") or {}).items()):
+        if market and name != market:
+            continue
+        if data is None or not data.get("observed"):
+            lines.append(f"시장 국면({names.get(name, name)}): 지수 확인 불가 · 국면 필터 미적용")
             continue
         state = "상승 국면(지수 > 20일선)" if data.get("above_ma20") else "하락 국면(지수 < 20일선)"
-        note = f"시장 국면({names.get(market, market)}): {state}"
+        note = f"시장 국면({names.get(name, name)}): {state}"
         if data.get("above_ma20") is False and data.get("headwind_skipped"):
             note += f" · 추세 통과 {data['headwind_skipped']}종목은 시장 역풍으로 보류"
         lines.append(note)
     return lines
+
+
+def evaluation_view(report, market=None):
+    """The buy evaluation of the market this message is for.
+
+    A US premarket alert said '판정 완료 39종목' because the merged count carried the
+    Korean pass too; the per-market part is what this message judged.
+    """
+    parts = report.get('buy_evaluation_by_market') or {}
+    if market and isinstance(parts, dict) and isinstance(parts.get(market), dict):
+        return parts[market]
+    return report.get('buy_evaluation') or {}
+
+
+def delivery_regime_market(market=None):
+    """The market a delivery belongs to ('NXT'/'KRX' → KR, 'US*' → US)."""
+    value = str(market or os.getenv('DELIVERY_MARKET') or '').upper()
+    if value.startswith('US'):
+        return 'US'
+    if value in ('NXT', 'KRX'):
+        return 'KR'
+    return None
 
 
 def send_telegram_summary(report):
@@ -1409,10 +1486,18 @@ def send_telegram_summary(report):
     # 세부 테마가 있으면 그것만 보낸다. 대분류 ETF 순위('1위 기계·장비')는 같은 내용을 두 번
     # 말하는 것이고, 세부 테마는 그보다 구체적인 같은 정보다. 테마가 비었을 때만 예전 섹터 폴백.
     theme_block = theme_lines(report.get('theme_sectors'))
+    # 테마 1번의 이슈는 분위기 줄의 '이슈:'로도 들어간다. 같은 문장을 여덟 줄 안에서 두 번
+    # 읽히지 않게, 테마 블록이 그 문장을 실었으면 분위기 줄에서는 뺀다.
+    if theme_block:
+        issue = _theme_issue(report.get('theme_sectors'))
+        if issue:
+            regime_lines = [line.replace(f" · 이슈: {issue}", '').replace(f"이슈: {issue}", '').rstrip(' ·')
+                            for line in regime_lines]
     sector_header = [] if theme_block else list(
         report.get('sector_header_override') or format_sector_header(report.get("sectors", [])))
     lines = ((regime_lines + ['']) if regime_lines else []) + sector_header + theme_block
-    lines.extend(market_regime_note(report))
+    market = delivery_regime_market()
+    lines.extend(market_regime_note(report, market))
     # 미국 장전 요약에는 게이트와 무관한 장전 사전 시그널을 붙인다. 이 블록은 발송 전에
     # preopen_delivery/premarket_signals가 준비해 두고, 발송 시점에는 다시 조회하지 않는다.
     from premarket_signals import format_block as format_premarket_block
@@ -1444,34 +1529,46 @@ def send_telegram_summary(report):
                  and item.get("company_forecast", {}).get("composite_score") is not None]
     confirmed.sort(key=lambda item: -item['company_forecast']['composite_score'])
     # A preopen price plan is not an executable live entry confirmation.
-    heading=('조건부 매수 계획' if any(row.get('preopen_signal',{}).get('status')=='conditional_buy' for row in confirmed)
-             else '사전 관찰 후보' if confirmed else '분석 결과' if (report.get('buy_evaluation',{}).get('completed') is True
-                 or report.get('buy_evaluation',{}).get('decision_completed',0)>0)
-             else '분석 상태')
+    conditional_rows = [row for row in confirmed
+                        if row.get('preopen_signal', {}).get('status') == 'conditional_buy']
+    heading = '조건부 매수 계획' if conditional_rows else '사전 관찰' if confirmed else '분석 결과' if (
+        report.get('buy_evaluation', {}).get('completed') is True
+        or report.get('buy_evaluation', {}).get('decision_completed', 0) > 0) else '분석 상태'
     lines.extend(["", heading])
     if not confirmed:
-        evaluation=report.get('buy_evaluation',{})
+        evaluation=evaluation_view(report, market)
         if rebound:
             # Not a silent zero: the momentum side has nothing, the reversal side does.
-            lines.append(f"정배열 추세 매수 조건 충족 없음 · 반등 눌림 후보 {len(rebound)}종목은 아래")
+            lines.append(f"정배열 매수 조건 충족 없음 · 반등 후보 {len(rebound)}종목은 아래")
         elif evaluation.get('decision_completed',0)>0:
-            lines.append(f"판정 완료 {evaluation['decision_completed']}종목 · 현재 매수 조건 충족 없음")
+            lines.append(f"판정 완료 {evaluation['decision_completed']}종목 · 매수 조건 충족 없음")
             if evaluation.get('data_excluded'):
-                lines.append(f"자료 부족 {evaluation['data_excluded']}종목은 매수 판정에서 제외")
+                lines.append(f"자료 부족 {evaluation['data_excluded']}종목 제외")
             blocked = (evaluation.get('counts') or {}).get('market_headwind')
             if blocked and not (report.get('market_regime') or {}):
                 # Stored preopen reports do not carry the regime block; the count still
                 # says why nothing qualified instead of leaving a silent zero.
-                lines.append(f"시장 역풍으로 보류 {blocked}종목 (지수 < 20일선)")
+                lines.append(f"시장 역풍 보류 {blocked}종목 (지수 < 20일선)")
         elif evaluation.get('completed') is True:
             lines.append("매수 조건 충족 종목 없음")
         else:
             lines.append("매수 판정 보류 · 분석 미완료")
+    # 계획마다 반복되던 안내는 블록에 한 번씩만 쓴다: 같은 문장을 다섯 번 읽히던 줄들
+    # (지수 20일선 아래 예외, 시가·거래량 게이트, 손절·익절 문구)이 2026-11-25 07:50
+    # 메시지의 절반을 차지했다.
+    catalysts = [row for row in conditional_rows
+                 if row['preopen_signal'].get('strategy') in ('event_catalyst', 'earnings_catalyst')]
+    if catalysts:
+        from catalyst_track import MIN_ENTRY_VOLUME_RATIO
+        lifted = any(row['preopen_signal'].get('market_regime_lifted') for row in catalysts)
+        rule = ["확정 공시 근거", f"장초반 시가 아래·거래량 {MIN_ENTRY_VOLUME_RATIO:.1f}배 미달이면 진입 안 함"]
+        if lifted:
+            rule.insert(0, "지수 20일선 아래는 이 종목만 예외")
+        lines.append(" · ".join(rule))
     for item in confirmed[:5]:
         lines.append(telegram_candidate_line(item))
     if rebound:
-        lines.extend(["", "[반등 눌림 후보]",
-                      "하락장에서도 시가 눌림에서만 진입 · 시장 국면 게이트 미적용"])
+        lines.extend(["", "[반등 눌림 후보] · 시장 국면 게이트 미적용"])
         for item in rebound[:5]:
             lines.append(telegram_rebound_line(item))
     # 당일 급등했지만 게이트에 막혀 매수 후보에서 빠진 종목은 별도 참고 블록으로만 나간다.
@@ -1484,6 +1581,10 @@ def send_telegram_summary(report):
         attach_urgent(urgent, datetime.now(timezone.utc))
     except Exception as exc:
         print('Urgent quote lookup unavailable (' + type(exc).__name__ + ')')
+    if market and isinstance(urgent, dict):
+        # A US premarket alert was listing the Korean 긴급 이슈 block as well: the scan
+        # report carries both markets and the message belongs to one of them.
+        urgent = {name: rows for name, rows in urgent.items() if name == market}
     report['urgent_issues'] = urgent
     urgent_lines = urgent_issues.format_urgent_block(urgent)
     if urgent_lines:
@@ -1492,11 +1593,26 @@ def send_telegram_summary(report):
     # 기록으로만 남기고 메시지 본문에는 싣지 않는다
     # (2026-11-24 지시: "수급대기우량주는 안띄워도될듯").
     inflow = [row for row in report.get('quality_watch') or []
-              if row.get('grade') == 'supply_inflow_quality']
+              if row.get('grade') == 'supply_inflow_quality'
+              and (not market or (row.get('market') or 'KR') == market)]
     if inflow:
-        lines.extend(['', '[수급 유입 우량주]',
-                      '외인·기관 순매수 확인 · 매수 후보 검토 대상 · 매수 신호 아님'])
+        lines.extend(['', '[수급 유입 우량주] · 매수 신호 아님'])
         lines.extend(quality_watch_line(row) for row in inflow[:5])
+    # 블록 단위 안내: 매도 규칙 하나, 자료가 얇은 축, 개장 전이라 호가를 못 읽었다는 사실.
+    # 계획마다 반복되던 문단을 여기 한 줄씩으로 모았다.
+    notes = []
+    if conditional_rows:
+        notes.append("※ 익절 +6% · 급등 시 트레일링 보유 · 손절은 실제 체결가 기준")
+    thin = caveat_summary(report, [*confirmed, *rebound, *inflow])
+    if thin:
+        notes.append(f"※ {thin}")
+    quotes = report.get('live_quotes') or {}
+    if isinstance(quotes, dict) and not quotes.get('observed') and (
+            quotes.get('preopen') or quotes.get('market_closed')
+            or quotes.get('credentials_missing')):
+        notes.append("※ 개장 전 호가 미확인 · 위 계획은 조건부")
+    if notes:
+        lines.extend(['', *notes])
     # 중기 +30% 눌림 발굴은 20~60일 보유·−15% 손절 전제의 관찰 목록이다. 알림 본문에는 싣지 않고
     # 분석 자료(`mid_term_watch`·`mid_term_watch_scope`)에만 남긴다(2026-11-24 지시:
     # "매수종목 뽑을 때 분석자료에 포함하라고 한건데").

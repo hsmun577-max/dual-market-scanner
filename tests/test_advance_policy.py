@@ -73,7 +73,7 @@ class AdvanceTests(unittest.TestCase):
         self.assertEqual(result['advance_candidates'],['GENERIC.KS'])
         self.assertEqual(result['recommendations'],[])
         self.assertNotIn('preopen_signal',row)
-        self.assertIn('사전 매수 후보',telegram_candidate_line(row))
+        self.assertIn('사전 관찰',telegram_candidate_line(row))
         self.assertFalse(row['advance_signal']['confirmed'])
 
     def test_policy_index_keeps_first_seen_and_does_not_replace_read_body_with_download_failure(self):

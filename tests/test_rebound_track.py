@@ -253,9 +253,8 @@ class AlertSectionTests(unittest.TestCase):
         self.assertIn("[반등 눌림 후보]", text)
         self.assertIn("R2 바닥반등", text)
         self.assertIn("눌림 지정가 시가 −2%", text)
-        self.assertIn("장전 시가가 전일 종가보다 −1% 아래면 진입 취소", text)
-        self.assertIn("좁은 −2% 손절 비권장", text)
-        self.assertIn("5거래일 보유", text)
+        self.assertIn("갭하락 −1%면 취소", text)
+        self.assertIn("5일 보유", text)
         # The momentum heading must not claim the rebound plan as its own buy.
         self.assertNotIn("조건부 매수 계획", text.split("[반등 눌림 후보]")[0])
 
@@ -263,7 +262,7 @@ class AlertSectionTests(unittest.TestCase):
         item = row(r2_values())
         evaluate_preopen(report(item), "2026-11-20", AT)
         text = self.message(item)
-        self.assertIn("반등 눌림 후보 1종목은 아래", text)
+        self.assertIn("반등 후보 1종목은 아래", text)
         self.assertIn("[반등 눌림 후보]", text)
 
     def test_the_line_states_the_track_and_the_waived_stop(self):
@@ -300,9 +299,8 @@ class ExecutionTests(unittest.TestCase):
         self.assertIsNone(signal["stop_price"])
         self.assertEqual(signal["hold_sessions"], 5)
         text = format_requested_report([], [signal], dict(completed=True), self.at)
-        self.assertIn("반등 눌림", text)
+        self.assertIn("R2 바닥반등", text)
         self.assertIn("눌림 지정가 9,800원", text)
-        self.assertIn("좁은 −2% 손절 비권장", text)
 
     def test_above_the_dip_it_waits_and_on_a_gap_down_it_is_cancelled(self):
         item, quote = self.fixture(ask=10_100.0, bid=10_090.0)

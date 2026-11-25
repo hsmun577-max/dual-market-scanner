@@ -183,7 +183,7 @@ class MarketRegimeAlertTests(unittest.TestCase):
                                           counts={'market_headwind': 9, 'composite_score_below_policy': 3}))
         message = self._send(report)
         self.assertIn('판정 완료 12종목', message)
-        self.assertIn('시장 역풍으로 보류 9종목', message)
+        self.assertIn('시장 역풍 보류 9종목', message)
 
     def test_the_regime_line_is_not_duplicated_when_the_report_carries_it(self):
         report = dict(results=[], sectors=[],
@@ -192,7 +192,7 @@ class MarketRegimeAlertTests(unittest.TestCase):
                       market_regime={'KR': {'above_ma20': False, 'observed': True, 'headwind_skipped': 1}})
         message = self._send(report)
         self.assertIn('시장 국면(KOSPI)', message)
-        self.assertNotIn('시장 역풍으로 보류 1종목', message)
+        self.assertNotIn('시장 역풍 보류 1종목', message)
 
 
 if __name__ == "__main__":

@@ -208,8 +208,11 @@ class QualityWatchResearchTests(unittest.TestCase):
                      supply_line='외인·기관 +1.2억원 · 거래대금 대비 +1.42% · 5일 중 4일 순매수',
                      average_turnover=18.4e8)
         text = scanner.quality_watch_line(entry)
-        self.assertIn('수급 유입 우량주', text)
-        self.assertIn('펀더멘탈 66/100', text)
+        # The block heading already says '수급 유입 우량주', so the name line does not
+        # repeat it (2026-11-25 short form); a waiting row keeps its own label.
+        self.assertIn('롯데정밀화학 (004000)', text)
+        self.assertIn('펀더멘탈 66', text)
+        self.assertIn('외인·기관 +1.2억', text)
         self.assertIn('57,333원', text)
         self.assertNotIn('수급 대기 우량주', text)
         # The block's meaning is said once in its heading; the 12:34 alert repeated
@@ -221,9 +224,10 @@ class QualityWatchResearchTests(unittest.TestCase):
         text = scanner.quality_watch_line(dict(name='관찰종목', symbol='000000.KS',
                                                grade='supply_waiting_quality',
                                                fundamental_score=64.0))
-        self.assertIn('수급 대기 우량주', text)
-        self.assertIn('관찰 목록', text)
-        self.assertIn('매수 신호 아님', text)
+        # The label says which grade it is; the block heading (not every line) says the
+        # whole list is a review and not a buy signal.
+        self.assertIn('수급 대기', text)
+        self.assertNotIn('수급 유입', text)
 
 
 class ReuseSameSessionQualityWatchTests(unittest.TestCase):

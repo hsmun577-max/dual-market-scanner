@@ -27,8 +27,19 @@ class TradableSignalTests(unittest.TestCase):
             r,q=fixture();q.update(changes)
             self.assertFalse(validate_entry(r,q,AT,True)['trade_ready'])
 
-    def test_incomplete_forecast_and_missing_prices_cannot_be_signals(self):
-        for changes in [dict(missing_dimensions=['valuation_outlook']),dict(composite_score=None),dict(base_price=None)]:
+    def test_a_caveat_does_not_block_but_a_withheld_score_does(self):
+        # 2026-11-25: a dimension that was simply not observed (밸류에이션·이벤트) is a
+        # caveat the score already discounts; it no longer refuses a plan the same run
+        # published. What still blocks is a withheld score: the integrity gaps in
+        # company_forecast.BLOCKING_GAPS.
+        r,q=fixture();r['company_forecast'].update(missing_dimensions=['valuation_outlook'],
+                                                   caveats=['valuation_outlook'],
+                                                   assessment_status='partial')
+        signal=validate_entry(r,q,AT,True)
+        self.assertTrue(signal['trade_ready'])
+        for changes in [dict(composite_score=None),
+                        dict(score_withheld_reasons=['current_financial_period']),
+                        dict(base_price=None)]:
             r,q=fixture();r['company_forecast'].update(changes)
             self.assertFalse(validate_entry(r,q,AT,True)['trade_ready'])
 
@@ -61,7 +72,10 @@ class TradableSignalTests(unittest.TestCase):
     def test_only_verified_entry_can_produce_buy_heading(self):
         r,q=fixture();s=validate_entry(r,q,AT,True)
         text=format_requested_report([], [s],dict(completed=True),AT)
-        for phrase in ['매수 신호','매수 상한','예상 손절','기본 익절','분석 목표','11:10:30']:self.assertIn(phrase,text)
+        # Short form (2026-11-25): name, score, price, target, stop, and the 30-second
+        # validity of the quote — the long sell-rule paragraph is gone.
+        for phrase in ['매수 신호','종합 65.0','매수 10,000원','목표 11,000원','손절 −3%','11:10:30']:
+            self.assertIn(phrase,text)
 
     def test_empty_orderbook_is_not_executable(self):
         r,q=fixture();q['ask_size']=0
@@ -86,9 +100,9 @@ class TradableSignalTests(unittest.TestCase):
 
     def test_the_report_names_the_stop_of_each_instrument(self):
         r,q=fixture();s=validate_entry(r,q,AT,True)
-        self.assertIn('손절 −3%·익절 +6%',format_requested_report([],[s],dict(completed=True),AT))
+        self.assertIn('손절 −3%',format_requested_report([],[s],dict(completed=True),AT))
         r,q=fixture();r['asset_type']='etf';s=validate_entry(r,q,AT,True)
-        self.assertIn('손절 −2%·익절 +6%',format_requested_report([],[s],dict(completed=True),AT))
+        self.assertIn('손절 −2%',format_requested_report([],[s],dict(completed=True),AT))
 
     def test_execution_check_preserves_verified_catalyst_policy(self):
         r,q=fixture();r['preopen_signal'].update(strategy='event_catalyst',entry_floor=9900)
@@ -108,12 +122,13 @@ class TradableSignalTests(unittest.TestCase):
             entry_limit=10000,entry_floor=9800,composite_score=65.0,
             catalyst_summary='2026년 3분기 영업이익 전년 대비 +253% (DART 실적 공시)',
             hold_reason='market_closed')])
-        self.assertIn('진입 확인 보류',message)
+        self.assertIn('조건부 계획',message)
         self.assertIn('매수 신호 아님',message)
         self.assertIn('가상 검증종목 (123456)',message)
-        self.assertIn('매수 구간 9,800원~10,000원',message)
-        self.assertIn('종합 65.0/100',message)
-        self.assertIn('장 마감 · 다음 거래일 시가 확인',message)
+        self.assertIn('매수 9,800원~10,000원',message)
+        self.assertIn('종합 65.0',message)
+        # The session state is said once by the block heading, not under every plan.
+        self.assertEqual(message.count('체결 기준 미확인'),1)
         self.assertIn('+253%',message)
 
     def test_a_plan_without_a_korean_label_shows_its_strategy_in_korean(self):
@@ -124,15 +139,17 @@ class TradableSignalTests(unittest.TestCase):
         self.assertIn('[실적·호재 촉매]', text)
         self.assertNotIn('earnings_catalyst', text)
 
-    def test_a_closed_market_is_said_once_per_plan(self):
+    def test_a_plan_line_carries_no_session_note_at_all(self):
+        # The closed session is a fact about the whole block; repeated under five plans
+        # it was the loudest thing in the message.
         from tradable_signal import plan_line
         text = plan_line(dict(symbol='009150.KS', name='삼성전기', market='KR',
                               strategy='earnings_catalyst', entry_limit=778000,
                               entry_floor=732000, composite_score=65.2,
                               live_quote=dict(status='market_closed'),
                               hold_reason='market_closed'))
-        self.assertEqual(text.count('장 마감'), 1)
-        self.assertIn('다음 거래일 시가 확인', text)
+        self.assertEqual(text.count('장 마감'), 0)
+        self.assertIn('매수 732,000원~778,000원', text)
 
     def test_a_bracketed_plan_label_is_not_doubled(self):
         from tradable_signal import plan_line

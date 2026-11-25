@@ -34,6 +34,7 @@ NY = ZoneInfo("America/New_York")
 DEFAULT_LIMIT = 8
 URGENT_LIMIT = 3
 LABELS = {
+    "preopen": "개장 전 · 정규장 호가 아직 없음",
     "market_closed": "장 마감 · 호가 미확인",
     "credentials_missing": "호가 조회 자격증명 없음",
     "unavailable": "호가 확인 실패",
@@ -53,7 +54,10 @@ def _number(value):
 
 
 def session_state(market, at):
-    """``open`` / ``closed`` / ``unknown`` for the row's own market at ``at``.
+    """``open`` / ``preopen`` / ``closed`` / ``unknown`` for the row's own market at ``at``.
+
+    A session that has not opened yet is not a closed market: the 2026-11-25 07:50 alert
+    was built before the 09:00 open and said '장 마감 · 호가 미확인' under every name.
 
     ``unknown`` means the exchange calendar could not answer; the caller then tries the
     quote rather than reporting a session state it did not observe.
@@ -72,7 +76,9 @@ def session_state(market, at):
         closed = calendar.session_close(day).to_pydatetime().astimezone(zone)
     except Exception:
         return "unknown"
-    return "open" if opened <= local < closed else "closed"
+    if local < opened:
+        return "preopen"
+    return "open" if local < closed else "closed"
 
 
 def _client():
@@ -92,6 +98,11 @@ def fetch(market, symbol, at, client=None):
     if state == "closed":
         return {**record, "status": "market_closed",
                 "reason": "outside_the_trading_session"}
+    if state == "preopen":
+        # No regular-session order book exists yet, and a premarket call would be a
+        # different session's price. The row says so and no request is made.
+        return {**record, "status": "preopen",
+                "reason": "before_the_regular_session_open"}
     client = client or _client()[0]
     if client is None:
         return {**record, "status": "credentials_missing",
@@ -144,7 +155,7 @@ def attach(report, at, limit=DEFAULT_LIMIT, client=None):
     targets = _targets(report, limit)
     client, client_reason = (client, None) if client is not None else _client()
     summary = {"checked_at": at.isoformat(), "observed": 0, "market_closed": 0,
-               "credentials_missing": 0, "unavailable": 0, "markets": {}}
+               "preopen": 0, "credentials_missing": 0, "unavailable": 0, "markets": {}}
     for market, rows in sorted(targets.items()):
         if not market:
             continue
@@ -209,6 +220,9 @@ def _rewrite_limitations(report, summary):
                                                     or "VWAP" in row))]
     if summary.get("observed"):
         limitations.append(f"후보 {summary['observed']}종목의 현재 호가는 KIS REST로 조회했고, "
+                           "지표·점수·판정은 완료된 거래일 일봉 종가 기준이며 실시간 매수 확정은 아님")
+    elif summary.get("preopen"):
+        limitations.append("개장 전이라 정규장 호가는 조회하지 않았고, "
                            "지표·점수·판정은 완료된 거래일 일봉 종가 기준이며 실시간 매수 확정은 아님")
     elif summary.get("market_closed"):
         limitations.append("장 마감(또는 휴장)으로 현재 호가는 조회하지 않았고, "

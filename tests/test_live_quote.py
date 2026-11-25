@@ -138,14 +138,22 @@ class QuoteLineTests(unittest.TestCase):
 
     def test_a_fallback_state_is_named(self):
         self.assertEqual(live_quote.quote_line(dict(status="market_closed")), "장 마감 · 호가 미확인")
+        # Before the open the regular session has not run yet: '장 마감' was wrong in the
+        # 2026-11-25 07:50 alert.
+        self.assertEqual(live_quote.quote_line(dict(status="preopen")),
+                         "개장 전 · 정규장 호가 아직 없음")
         self.assertEqual(live_quote.quote_line(dict(status="credentials_missing")),
                          "호가 조회 자격증명 없음")
         self.assertIsNone(live_quote.quote_line(None))
 
     def test_the_candidate_line_carries_the_quote(self):
         row = plan_row()
+        # A closed or not-yet-open market is said once by the block, not under every
+        # name (2026-11-25: twelve identical lines in one alert).
         row["live_quote"] = dict(status="market_closed")
-        self.assertIn("장 마감 · 호가 미확인", telegram_candidate_line(row))
+        self.assertNotIn("장 마감", telegram_candidate_line(row))
+        row["live_quote"] = dict(status="preopen")
+        self.assertNotIn("개장 전", telegram_candidate_line(row))
         row["live_quote"] = dict(status="observed", market="KR", price=81_950, bid=81_900,
                                  ask=82_000, spread_pct=0.12, checked_at=OPEN_AT.isoformat())
         text = telegram_candidate_line(row)
@@ -157,7 +165,7 @@ class QuoteLineTests(unittest.TestCase):
                      fundamental_score=80.3, market="KR",
                      live_quote=dict(status="observed", market="KR", price=45_000, bid=44_950,
                                      ask=45_050, spread_pct=0.22))
-        self.assertIn("현재가 45,000원", quality_watch_line(entry))
+        self.assertIn("현재 45,000원", quality_watch_line(entry))
 
 
 if __name__ == "__main__":
