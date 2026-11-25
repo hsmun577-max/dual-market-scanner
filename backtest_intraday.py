@@ -28,7 +28,8 @@ from pathlib import Path
 
 from exit_policy import DEFAULT_EXIT_POLICY, ExitTracker
 from kis_intraday import (BAR_SECONDS, DECISION_MINUTES, breakout_v2, candidate_metrics,
-                          evaluate_first_pullback, protective_stop, price_projection, volume_reference)
+                          evaluate_first_pullback, intraday_asset_class, protective_stop, price_projection,
+                          volume_reference)
 from signal_context import context_status
 
 # (strategy name, replay arguments, needs the context check)
@@ -136,7 +137,10 @@ def replay(row, fee_bps, *, strict=False, use_support_stop=False, exit_mode="fix
     basis = volume_reference(dict(enumerate(bars)), volume_baseline)[1]
     indexed_bars = dict(enumerate(bars))
     if confirm_pullback:
-        status, _, limit = evaluate_first_pullback(indexed_bars, signal_quote, signal_at, volume_baseline)
+        overseas = row['market'].startswith('US')
+        asset_class = row.get('asset_class') or intraday_asset_class(row.get('symbol', ''), overseas)
+        status, _, limit = evaluate_first_pullback(indexed_bars, signal_quote, signal_at, volume_baseline,
+                                                   overseas=overseas, fund=asset_class == 'fund')
         if limit is None:
             return {"status": status, "volume_basis": basis}
         decision = row.get("entry_decision")

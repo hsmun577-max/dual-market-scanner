@@ -7,7 +7,9 @@ import pandas as pd
 
 from candidate_selection import candidate_rejection_reason
 from economic_graph import select_analysis_candidates
-from kis_intraday import evaluate_first_pullback, update_bar
+from backtest_intraday import replay
+from kis_intraday import evaluate_first_pullback, format_notification, update_bar
+from tradable_signal import floor_order_price
 from scanner import attach_inverse_regime, completed_daily_prices
 
 
@@ -88,6 +90,42 @@ class FirstPullbackTests(unittest.TestCase):
         self.assertEqual(status, "first_pullback_confirmed")
         self.assertEqual(metrics[0], 2)
         self.assertAlmostEqual(limit, 10050)
+
+    def scaled_entry(self):
+        tape = self.bars
+        for bar in tape.values():
+            for field in ('open', 'high', 'low', 'close'):
+                bar[field] = bar[field] * 10 + 1000
+            bar['trade_value'] = bar['trade_value'] * 10 + 1000 * bar['volume']
+        quote = dict(self.quote, bid=101100, ask=101200)
+        status, metrics, limit = evaluate_first_pullback(tape, quote, self.at, 100)
+        self.assertEqual(status, 'first_pullback_confirmed')
+        return tape, quote, metrics, limit
+
+    def test_stock_signal_and_replay_use_the_same_rounded_cap(self):
+        tape, quote, metrics, limit = self.scaled_entry()
+        self.assertEqual(limit, 101500)
+        forecast = dict(composite_score=70, base_price=107000, bull_price=110000)
+        line = format_notification('KRX', [('005930', *metrics, limit, 98500, None)],
+                                   self.at, {'005930': {'forecast': forecast}})
+        self.assertIn('매수 상한 101,500원', line)
+        before = dict(at=quote['event_time'], bid=quote['bid'], ask=quote['ask'])
+        after = dict(at=(self.at + timedelta(seconds=8)).isoformat(), bid=101400, ask=101501)
+        bars = [dict(bar, start=(self.opens + timedelta(minutes=slot * 5)).isoformat())
+                for slot, bar in sorted(tape.items())]
+        sample = dict(market='KRX', symbol='005930', asset_class='stock', bars=bars, quotes=[before, after],
+                      daily_eligible=True, signal_at=self.at.isoformat(), entry_decision='buy_signal',
+                      volume_baseline=100)
+        self.assertEqual(replay(sample, 10, confirm_pullback=True)['status'], 'missing_entry_quote')
+
+    def test_exchange_price_grid_for_korean_stocks_funds_and_us(self):
+        self.assertEqual(floor_order_price(101504.99), 101500)
+        self.assertEqual(floor_order_price(101504.99, fund=True), 101500)
+        self.assertEqual(floor_order_price(101509.99, fund=True), 101505)
+        self.assertEqual(floor_order_price(1999.99, fund=True), 1999)
+        self.assertEqual(floor_order_price(199999.99), 199900)
+        self.assertEqual(floor_order_price(200499.99), 200000)
+        self.assertEqual(floor_order_price(124.237, overseas=True), 124.23)
 
     def test_an_opening_breakout_alone_is_not_a_buy(self):
         before_pullback = {slot: self.bars[slot] for slot in range(3)}

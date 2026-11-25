@@ -441,16 +441,16 @@ class QuoteEvidenceTests(unittest.TestCase):
                                  askp_rsqn1="100", bidp_rsqn1="100"),
                     output2=dict(vi_cls_code="N"))
         minutes = dict(output2=[
-            dict(stck_bsop_date="20261112", stck_cntg_hour="090000", stck_prpr="26500",
-                 stck_oprc="26500", cntg_vol="120"),
-            dict(stck_bsop_date="20261112", stck_cntg_hour="090600", stck_prpr="26100",
-                 stck_oprc="26550", cntg_vol="80"),
-            dict(stck_bsop_date="20261111", stck_cntg_hour="090000", stck_prpr="25000",
-                 stck_oprc="25000", cntg_vol="50"),
-            dict(stck_bsop_date="20261111", stck_cntg_hour="090600", stck_prpr="25100",
-                 stck_oprc="25000", cntg_vol="50"),
+            dict(stck_bsop_date="20261112", stck_cntg_hour=f"09{minute:02d}00",
+                 stck_prpr="26500" if minute == 0 else "26100",
+                 stck_oprc="26500" if minute == 0 else "26550", cntg_vol="20")
+            for minute in range(10)
         ])
-        quote = parse_execution_quote(book, minutes, at)
+        prior = dict(output2=[
+            dict(stck_bsop_date="20261111", stck_cntg_hour=f"09{minute:02d}00", cntg_vol="10")
+            for minute in range(10)
+        ])
+        quote = parse_execution_quote(book, minutes, at, previous_minutes=prior)
         self.assertEqual(quote["day_open"], 26500)
         self.assertEqual(quote["last_price"], 26100)
         self.assertEqual(quote["cumulative_volume"], 200)
