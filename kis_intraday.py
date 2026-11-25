@@ -973,7 +973,6 @@ def company_quality_metrics(ticker, snapshot, now):
                 if target in ('trailing_pe','forward_pe','price_to_book'):
                     # Per-field source so a KIS trailing PE cannot be compared with this one.
                     result[target+'_source'] = 'Yahoo Finance observed multiples'
-        num_fin = None
         for source, target, scale in (("heldPercentInstitutions", "institutional_holding_pct", 100),):
             value = info.get(source)
             if isinstance(value, (int, float)) and math.isfinite(value):
@@ -2434,7 +2433,7 @@ def event_watch_symbols(market, at, registry=None, events=None, limit=6, turnove
     if turnover is None:
         turnover={}
         try:
-            from candidate_selection import INVERSE_BENCHMARKS, is_inverse, market_headwind_reason, average_turnover
+            from candidate_selection import average_turnover
             report=json.loads(Path('opening-scan/latest.json').read_text(encoding='utf-8-sig'))
             for row in report['results']:
                 turnover[row['symbol']]=average_turnover(row['indicators'])

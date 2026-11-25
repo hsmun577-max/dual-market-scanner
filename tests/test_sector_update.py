@@ -19,8 +19,9 @@ class SectorAndRecoveryTests(unittest.TestCase):
         self.assertNotIn('없음',text)
 
     def test_missing_sector_data_is_never_no_money_flow(self):
+        # Nothing observed is an empty block, never the claim that money did not flow.
         text='\n'.join(format_sector_header([],'KR'))
-        self.assertIn('확인 불가',text)
+        self.assertEqual(text,'')
         self.assertNotIn('없음',text)
 
     def frames(self):
