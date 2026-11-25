@@ -65,9 +65,6 @@ CATALYST_FRESH_HOURS_BY_KIND = {
     "confirmed_contract": CATALYST_FRESH_HOURS,
     "confirmed_news": CATALYST_FRESH_HOURS,
 }
-# A lifted name still needs a composite score that is not net negative: a catalyst cannot
-# carry an issuer whose own evidence points the other way.
-MIN_CATALYST_COMPOSITE_SCORE = 45.0
 # Same-time volume expansion required before an entry on a catalyst name; the same 1.2x
 # demand floor the daily selection uses.
 MIN_ENTRY_VOLUME_RATIO = MIN_DEMAND_VOLUME_RATIO

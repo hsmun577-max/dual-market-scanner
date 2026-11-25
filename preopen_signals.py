@@ -8,8 +8,8 @@ from candidate_selection import (liquidity_rejection_reason,candidate_rejection_
 import rebound_track
 import early_entry_track
 from advance_policy import advance_context,eligible_for_advance_research
-from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE,confirmed_catalyst,liftable_reason,stamp
-from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
+from catalyst_track import confirmed_catalyst,liftable_reason,stamp
+from entry_policy import entry_policy_snapshot, reward_check, score_floor
 from exit_policy import (DEFAULT_EXIT_POLICY, FUND_STOP_PCT, STOCK_STOP_PCT, exit_policy_for,
                          policy_snapshot, stop_basis)
 
@@ -68,6 +68,9 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
     if forecast['bull_price'] / 1.06 < price:
         return 'insufficient_catalyst_upside_room',None
     entry_limit = floor_order_price(price, **order_type)
+    reward = reward_check(row, entry_limit, forecast['base_price'])
+    if not reward['allowed']:
+        return 'insufficient_expected_reward', None
     entry_floor=None
     atr=values.get('atr14_pct')
     if isinstance(atr,(int,float)) and not isinstance(atr,bool) and math.isfinite(atr) and atr>0:
@@ -76,6 +79,7 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
         entry_floor=entry_floor,strategy=strategy,
         reference_price=price,reference_date=reference_date,
         generated_at=at.isoformat(),composite_score=score,
+        entry_requirements=dict(min_score=score_floor(row, strategy), **reward),
         caveats=list(forecast.get('caveats',[])),
         entry_basis='source_dated_catalyst_pullback_band',fresh_execution_quote_required=True,
         target_basis='upside_scenario_not_expected_return',expires_session=expires_session,
@@ -172,7 +176,12 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         # observation log needs the catalysts the screen never had a chance to lift.
         catalyst_evidence=confirmed_catalyst(company,at,row.get('market'))
         ready_evidence=catalyst_evidence.get('eligible') is True
-        entry_limit=price; entry_floor=None; strategy='trend'; plan=None
+        strategy='trend'; plan=None
+        from tradable_signal import floor_order_price
+        policy=exit_policy_for(row)
+        entry_limit = (floor_order_price(price, overseas=row.get('market') == 'US',
+                                         fund=policy.stop_pct == FUND_STOP_PCT) if not reason else None)
+        reward = reward_check(row, entry_limit, forecast.get('base_price'))
         reference_date=_expected_session(previous_session,row.get('market'))
         # The reversal tracks read their own candle and are never lifted by the momentum
         # gate; they are also refused by its safety blocks (liquidity, breakdown, an
@@ -193,7 +202,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         elif values.get('breakdown'): status='breakdown'
         elif not catalyst and (values.get('overheated') or values.get('return_5d',0)>.12 or price/values['ma20']>1.08):
             status='extended_price'
-        elif lift_reason and ready_evidence and score<MIN_CATALYST_COMPOSITE_SCORE:
+        elif lift_reason and ready_evidence and score<score_floor(row, 'earnings_catalyst'):
             status='catalyst_score_below_policy'
         elif lift_reason and ready_evidence:
             status,plan=catalyst_plan(row,forecast,catalyst_evidence,at,reference_date,
@@ -213,21 +222,22 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             # The chart alone carried no edge in the study; without a measured inflow or a
             # 61+ fundamental score there is no early entry to plan.
             status='early_entry_qualifier_missing'
-        elif early and (not isinstance(score,(int,float)) or not math.isfinite(score)
-                        or score<MIN_COMPOSITE_SCORE):
+        elif early and score<score_floor(row, 'early_ma_alignment'):
             status='composite_score_below_policy'
-        elif early and (not isinstance(forecast.get('base_price'),(int,float))
-                        or isinstance(forecast.get('base_price'),bool)
-                        or not math.isfinite(forecast['base_price'])
-                        or forecast['base_price']/price-1<MIN_BASE_REWARD_PCT/100):
-            status='insufficient_expected_reward'
         elif early:
             status,plan=early_entry_track.entry_plan(row,forecast,reference_date,
                 report.get('preopen_session'),at,row.get('market') or market or 'KR',
                 next_open=early_entry_track.observed_open(values),
                 qualifier_reason=early_entry_track.qualifier(row),
                 caveats=forecast.get('caveats',[]))
-            if plan: strategy=plan['strategy']
+            if plan:
+                planned_price = plan.get('entry_limit') or plan.get('flat_open_entry_limit')
+                early_reward = reward_check(row, planned_price, forecast.get('base_price'))
+                if early_reward['allowed']:
+                    strategy = plan['strategy']
+                    plan['entry_requirements'] = dict(min_score=score_floor(row, strategy), **early_reward)
+                else:
+                    status, plan = 'insufficient_expected_reward', None
         elif headwind and (event_support or not trend_reason):
             # Event support may soften the chart (it can plan a name before the 60-day
             # average turns up), but it may not walk a plan through a market headwind. The
@@ -241,12 +251,12 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             # (catalyst_track.LIFTABLE_REASONS).
             status=headwind
         elif trend_reason and (trend_reason == 'market_headwind' or not event_support): status=trend_reason
-        elif score<MIN_COMPOSITE_SCORE: status='composite_score_below_policy'
+        elif score<score_floor(row): status='composite_score_below_policy'
         elif catalyst:
             status,plan=catalyst_plan(row,forecast,forecast.get('catalyst_context',{}),at,
                 reference_date,report.get('preopen_session'),score,'event_catalyst')
             if plan: strategy='event_catalyst'
-        elif not math.isfinite(forecast.get('base_price',float('nan'))) or forecast['base_price']/price-1<MIN_BASE_REWARD_PCT/100:
+        elif not reward['allowed']:
             status='insufficient_expected_reward'
         else:
             status='conditional_buy'
@@ -257,12 +267,8 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             elif plan.get('track')=='early_entry': early_picks.append(row['symbol'])
             elif plan.get('track')=='rebound': rebound_picks.append(row['symbol'])
         elif status=='conditional_buy':
-            from tradable_signal import floor_order_price
-            policy=exit_policy_for(row)
-            entry_limit = floor_order_price(entry_limit, overseas=row.get('market') == 'US',
-                                            fund=policy.stop_pct == FUND_STOP_PCT)
             row['preopen_signal']=dict(status=status,confirmed=False,entry_limit=entry_limit,
-                entry_floor=entry_floor,strategy=strategy,
+                entry_floor=None,strategy=strategy,entry_requirements=dict(min_score=score_floor(row), **reward),
                 reference_price=price,reference_date=_expected_session(previous_session,row.get('market')),
                 generated_at=at.isoformat(),composite_score=score,
                 caveats=list(forecast.get('caveats',[])),
@@ -291,7 +297,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         catalyst_observation=observations,
         early_entry_candidates=early_picks,
         rebound_candidates=rebound_picks,
-        policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
+        policy=dict(**entry_policy_snapshot(),
                     stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                     take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
                     early_entry=dict(entry_offset_pct=early_entry_track.ENTRY_OFFSET_PCT,
@@ -359,7 +365,7 @@ def evaluate_preopen_markets(report, at=None):
             previous_session={},markets=[],generated_at=at.isoformat(),evaluated=0,
             counts={},missing_dimensions={},caveats={},recommendations=[],advance_candidates=[],
             catalyst_candidates=[],early_entry_candidates=[],rebound_candidates=[],
-            catalyst_observation=[],policy=dict(min_composite=MIN_COMPOSITE_SCORE,min_base_reward_pct=MIN_BASE_REWARD_PCT,
+            catalyst_observation=[],policy=dict(**entry_policy_snapshot(),
                         stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                         take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
                         early_entry=dict(entry_offset_pct=early_entry_track.ENTRY_OFFSET_PCT,

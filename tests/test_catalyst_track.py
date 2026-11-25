@@ -13,7 +13,8 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from catalyst_track import (MIN_CATALYST_COMPOSITE_SCORE, confirmed_catalyst, entry_gate,
+from entry_policy import MIN_CATALYST_COMPOSITE_SCORE
+from catalyst_track import (confirmed_catalyst, entry_gate,
                             liftable_reason, quantified_catalyst)
 from execution_quotes import parse_execution_quote
 from preopen_signals import evaluate_preopen
@@ -56,7 +57,7 @@ def row(**extra):
                 company_analysis=company(),
                 company_forecast=dict(generated_at=AT.isoformat(), composite_score=51.5,
                                       assessment_status="complete", missing_dimensions=[],
-                                      caveats=[], base_price=27000.0, bull_price=30500.0,
+                                      caveats=[], base_price=27400.0, bull_price=30500.0,
                                       catalyst_context=dict(eligible=False)))
     base.update(extra)
     return base
@@ -98,6 +99,13 @@ class JinianceRegressionTests(unittest.TestCase):
         # The entry is a prior-close band: no gap-up chase.
         self.assertLessEqual(signal["entry_limit"], 25900)
         self.assertLess(signal["entry_floor"], signal["entry_limit"])
+
+    def test_the_bull_case_alone_cannot_cover_the_catalyst_reward_floor(self):
+        item = row()
+        item['company_forecast']['base_price'] = 27000.0
+        result = evaluate_preopen(report(item), '2026-11-11', AT)
+        self.assertEqual(result['recommendations'], [])
+        self.assertEqual(item['preopen_decision'], 'insufficient_expected_reward')
 
     def test_the_alert_names_the_track_and_carries_its_evidence(self):
         item = row()
@@ -399,7 +407,7 @@ class ExecutionCheckTests(unittest.TestCase):
             company_forecast=dict(assessment_status="complete", missing_dimensions=[],
                                   composite_score=51.5,
                                   generated_at=(self.at - timedelta(minutes=1)).isoformat(),
-                                  base_price=27000, bull_price=30500))
+                                  base_price=27400, bull_price=30500))
         quote = dict(ask=25900, bid=25890, ask_size=100, bid_size=100,
                      observed_at=self.at.isoformat(),
                      trade_at=(self.at - timedelta(seconds=30)).isoformat(),
@@ -500,7 +508,7 @@ class MarketMergeTests(unittest.TestCase):
                                         news=[], event_analysis=dict(economic_graph={})),
                   company_forecast=dict(generated_at=AT.isoformat(), composite_score=50.0,
                                         assessment_status="complete", missing_dimensions=[],
-                                        caveats=[], base_price=104.0, bull_price=112.0,
+                                        caveats=[], base_price=106.0, bull_price=112.0,
                                         catalyst_context=dict(eligible=False)))
         kr = row()
         merged, parts = evaluate_preopen_markets(dict(results=[kr, us], sectors=[]), AT)

@@ -8,7 +8,7 @@ def fixture():
     row=dict(symbol='123456.KS',name='가상 검증종목',preopen_signal=dict(status='conditional_buy',
         expires_session='2026-11-20',entry_limit=10000,reference_price=10000,reference_date='2026-11-19'),
         company_forecast=dict(assessment_status='complete',missing_dimensions=[],composite_score=65,
-            generated_at=(AT-timedelta(minutes=1)).isoformat(),base_price=10500,bull_price=11000))
+            generated_at=(AT-timedelta(minutes=1)).isoformat(),base_price=10600,bull_price=11000))
     quote=dict(ask=10000,bid=9990,ask_size=100,bid_size=100,observed_at=AT.isoformat(),trade_at=(AT-timedelta(seconds=30)).isoformat())
     return row,quote
 
@@ -83,7 +83,7 @@ class TradableSignalTests(unittest.TestCase):
 
     def test_stop_and_take_profit_use_destination_price_tick(self):
         r,q=fixture();r['preopen_signal']['entry_limit']=19950
-        r['company_forecast'].update(base_price=21000,bull_price=22000)
+        r['company_forecast'].update(base_price=21200,bull_price=22000)
         q.update(ask=19950,bid=19940)
         signal=validate_entry(r,q,AT,True)
         self.assertEqual(signal['stop_price'],19360)
@@ -106,7 +106,7 @@ class TradableSignalTests(unittest.TestCase):
 
     def test_execution_check_preserves_verified_catalyst_policy(self):
         r,q=fixture();r['preopen_signal'].update(strategy='event_catalyst',entry_floor=9900)
-        r['company_forecast'].update(base_price=10100,bull_price=10700,catalyst_context=dict(eligible=True))
+        r['company_forecast'].update(base_price=10600,bull_price=10700,catalyst_context=dict(eligible=True))
         self.assertTrue(validate_entry(r,q,AT,True)['trade_ready'])
         r['company_forecast']['catalyst_context']['eligible']=False
         self.assertFalse(validate_entry(r,q,AT,True)['trade_ready'])

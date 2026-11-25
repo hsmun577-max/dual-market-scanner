@@ -23,7 +23,8 @@ from kis_feed_probe import FEEDS, FEED_URL, KST, connect, parse_records, request
 _DART_CODE_CACHE = {}
 from json_utils import dump, dumps
 from signal_context import context_status
-from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE, build_company_forecast
+from company_forecast import build_company_forecast
+from entry_policy import reward_check, score_floor
 from delivery_policy import delivery_status
 from event_impact_analysis import article_text, world_events, analyze_events, company_news_events
 from candidate_selection import (INVERSE_BENCHMARKS, instrument_rejection_reason, is_inverse,
@@ -1718,11 +1719,13 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     company["forecast"] = forecast
     if forecast["composite_score"] is None:
         return "composite_assessment_incomplete", None
-    if forecast["composite_score"] < MIN_COMPOSITE_SCORE or forecast["base_price"] <= limit:
+    required = score_floor(instrument)
+    if forecast["composite_score"] < required or forecast["base_price"] <= limit:
         return "composite_outlook_not_positive", None
-    # Require the base scenario to cover 2% risk at 1.5:1, plus 0.3% friction.
-    # This is a risk policy, not a historically optimized profitability claim.
-    if forecast["base_price"] / limit - 1 < MIN_BASE_REWARD_PCT / 100:
+    reward = reward_check(instrument, limit, forecast["base_price"],
+                          limit * (quote["bid"] / quote["ask"]))
+    forecast["entry_requirements"] = dict(min_score=required, **reward)
+    if not reward["allowed"]:
         return "insufficient_expected_reward", None
     # The fixed stop is the instrument's own: −2% on a listed fund, −3% on a single stock.
     stop_pct = exit_policy_for(instrument).stop_pct
