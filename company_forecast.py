@@ -5,15 +5,12 @@ These are uncalibrated scenarios. Data coverage is not a probability of profit.
 
 import math
 from datetime import datetime, timedelta
-from catalyst_policy import SECTOR_PROXIES,catalyst_context
-from research_asset import is_fund_company
 import re
 
+from catalyst_policy import SECTOR_PROXIES,catalyst_context
+from entry_policy import entry_policy_snapshot
+from research_asset import is_fund_company
 
-# Entry policy: the five-session base scenario must cover this much before a candidate
-# is worth the 2% stop. Both entry paths (live intraday and preopen) read it from here so
-# the floor and the scenario formula below cannot drift apart again.
-MIN_BASE_REWARD_PCT = 3.3
 # Evidence gaps that withhold a score. They are integrity or completeness failures of the
 # financial statements themselves: a newer filing than the quarter scored, statements too
 # old for the period, or evidence stamped in the future. A missing supporting dimension
@@ -21,10 +18,6 @@ MIN_BASE_REWARD_PCT = 3.3
 # reduces the edge, not a reason to discard the whole issuer.
 BLOCKING_GAPS = frozenset({"current_financial_period", "latest_report_not_in_financials",
                            "future_company_evidence"})
-# One composite threshold for every entry path (live intraday, preopen plan and the
-# execution check), so a candidate cannot alert and then be refused. Lowered from 60 to 53
-# by the user's policy decision; the 3.3% base-reward floor still gates every entry.
-MIN_COMPOSITE_SCORE = 53.0
 # A revenue growth rate beyond this is a period-basis or unit mix-up, not growth.
 MAX_VERIFIED_REVENUE_GROWTH_PCT = 300.0
 # Scenario shape. One five-session sigma at this calibration score, growing with the
@@ -32,7 +25,7 @@ MAX_VERIFIED_REVENUE_GROWTH_PCT = 300.0
 # 0.6 x (daily volatility x sqrt(5)) x bias coefficient left a candidate at this score at
 # about 0.7%, so no realistic quality candidate could ever reach the 3.3% floor.
 # This is the scenario calibration anchor, not the entry gate: it stays at 60 so lowering
-# MIN_COMPOSITE_SCORE does not inflate every candidate's base/bear/bull prices.
+# Entry score floors do not inflate the base/bear/bull scenarios.
 SCENARIO_THRESHOLD_SCORE = 60.0
 # A listed fund has no issuer income statement: growth, earnings quality and balance sheet
 # are not missing evidence for it, they do not exist. What the instrument is priced from
@@ -484,7 +477,7 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         "composite_score":round(max(0,min(100,50+50*after_pricing)),1) if not blocking else None,
         "volatility_source":volatility_source,"direction_score":round(composite,6),
         "scenario_sigma_multiple":round(sigma_multiple,4),
-        "min_base_reward_pct":MIN_BASE_REWARD_PCT,
+        "entry_policy":entry_policy_snapshot(),
         "base_return_pct":round(drift*100,4),"bear_price":round(max(price*.01,price*(1+drift-width)),4),
         "base_price":round(price*(1+drift),4),"bull_price":round(price*(1+drift+width),4),
         "interpretation":"positive scenario bias" if drift>0 else "negative scenario bias" if drift<0 else "insufficient direction evidence",

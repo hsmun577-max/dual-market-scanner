@@ -120,26 +120,21 @@ class PreopenTests(unittest.TestCase):
         row['indicators']['overheated']=True
         self.assertEqual(evaluate_preopen(self.report(row),'2026-11-18',AT)['recommendations'],[])
         self.assertNotIn('preopen_signal',row)
-    def test_score_gate_is_53_and_the_reward_floor_still_binds(self):
-        from company_forecast import MIN_COMPOSITE_SCORE,MIN_BASE_REWARD_PCT
-        # The user moved the conditional-buy score gate from 60 to 53 on 2026-11-21.
-        self.assertEqual(MIN_COMPOSITE_SCORE,53.0)
-        row=self.row();row['company_forecast']['composite_score']=55
-        result=evaluate_preopen(self.report(row),'2026-11-18',AT)
-        self.assertEqual(result['recommendations'],['352820.KS'])
-        self.assertEqual(result['policy']['min_composite'],53.0)
-        # Below the new gate the score still refuses the candidate.
-        row=self.row();row['company_forecast']['composite_score']=52.9
-        result=evaluate_preopen(self.report(row),'2026-11-18',AT)
-        self.assertEqual(result['recommendations'],[])
-        self.assertEqual(row['preopen_decision'],'composite_score_below_policy')
-        # And the 3.3% base-reward floor still refuses a low-score band candidate
-        # whose scenario does not cover it.
-        row=self.row();row['company_forecast'].update(composite_score=55,base_price=10300)
-        result=evaluate_preopen(self.report(row),'2026-11-18',AT)
-        self.assertEqual(result['recommendations'],[])
-        self.assertEqual(row['preopen_decision'],'insufficient_expected_reward')
-        self.assertGreater(MIN_BASE_REWARD_PCT,3.0)
+    def test_stock_score_floor_and_net_reward_are_separate(self):
+        row = self.row()
+        row['company_forecast']['composite_score'] = 56
+        result = evaluate_preopen(self.report(row), '2026-11-18', AT)
+        self.assertEqual(result['recommendations'], ['352820.KS'])
+        self.assertEqual(result['policy']['score_floors']['stock_trend'], 56)
+        self.assertEqual(result['policy']['minimum_gross_reward_pct']['stock'], 5.25)
+
+        row['company_forecast']['composite_score'] = 55.9
+        self.assertEqual(evaluate_preopen(self.report(row), '2026-11-18', AT)['recommendations'], [])
+        self.assertEqual(row['preopen_decision'], 'composite_score_below_policy')
+
+        row['company_forecast'].update(composite_score=56, base_price=10520)
+        self.assertEqual(evaluate_preopen(self.report(row), '2026-11-18', AT)['recommendations'], [])
+        self.assertEqual(row['preopen_decision'], 'insufficient_expected_reward')
 
 
 class MarketHeadwindGateTests(unittest.TestCase):

@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 import kis_intraday as k
 from backtest_intraday import replay
-from company_forecast import MIN_COMPOSITE_SCORE
+from entry_policy import MIN_COMPOSITE_SCORE
 from signal_context import context_status
 
 KST = k.KST
@@ -189,7 +189,7 @@ class OneCompositeThreshold(unittest.TestCase):
             return k.evaluate_candidate(bars, quote, DECISION, "KRX", "005930", evidence, False,
                                         company={}, sectors=[], volume_baseline=140.0)[0]
 
-    def test_a_candidate_below_sixty_points_is_refused_intraday_too(self):
+    def test_a_candidate_below_the_stock_floor_is_refused_intraday(self):
         self.assertEqual(self.evaluate(MIN_COMPOSITE_SCORE - 5), "composite_outlook_not_positive")
 
     def test_a_candidate_at_the_threshold_can_be_bought(self):

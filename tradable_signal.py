@@ -3,8 +3,8 @@ from datetime import datetime,timedelta
 import math
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import asset_regime
-from company_forecast import MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE
-from catalyst_track import MIN_CATALYST_COMPOSITE_SCORE, entry_gate
+from entry_policy import reward_check, score_floor
+from catalyst_track import entry_gate
 from exit_policy import classify_asset, exit_policy_for
 from rebound_track import entry_state as rebound_entry_state
 from early_entry_track import entry_state as early_entry_state
@@ -77,7 +77,7 @@ def rebound_entry(plan,quote,at,result,seen,market='KR'):
         filled=False)
 
 
-def early_entry(plan,quote,at,result,seen,market='KR',score=None):
+def early_entry(plan,quote,at,result,seen,market='KR',score=None,requirements=None):
     """An early-entry plan is priced from the observed open less 1%, never from a close.
 
     The study's edge came from the resting limit (-1% under the open, filled 83.4%): a
@@ -95,7 +95,7 @@ def early_entry(plan,quote,at,result,seen,market='KR',score=None):
                             'name':result.get('name')})
     return dict(result,trade_ready=True,reason='entry_conditions_met',track='early_entry',
         strategy=plan.get('strategy'),label=plan.get('label'),score=score,
-        hold_sessions=plan.get('hold_sessions'),
+        hold_sessions=plan.get('hold_sessions'),entry_requirements=requirements,
         reference_price=number(plan.get('reference_price')),reference_date=plan.get('reference_date'),
         indicative_entry=ask,entry_limit=limit,entry_floor=None,bid=bid,
         day_open=number(quote.get('day_open')),entry_offset_pct=plan.get('entry_offset_pct'),
@@ -143,10 +143,8 @@ def validate_entry(row,quote,at,session_open):
     if plan.get('track')=='rebound':
         return rebound_entry(plan,quote,at,result,seen,row.get('market') or 'KR')
     score=number(forecast.get('composite_score'));created=stamp(forecast.get('generated_at'))
-    # The catalyst track's own floor is lower than the momentum gate (its evidence is the
-    # disclosure), so the execution check must read the same floor the plan was made on.
-    required=(MIN_CATALYST_COMPOSITE_SCORE if plan.get('strategy')=='earnings_catalyst'
-              else MIN_COMPOSITE_SCORE)
+    strategy=plan.get('strategy') or ('early_ma_alignment' if plan.get('track')=='early_entry' else 'trend')
+    required=score_floor(row, strategy)
     if score is None or score<required:return reject('score_below_policy')
     if created is None or not at-timedelta(minutes=30)<=created<=at:return reject('stale_analysis')
     ask=number(quote.get('ask'));bid=number(quote.get('bid'))
@@ -156,7 +154,10 @@ def validate_entry(row,quote,at,session_open):
     if (ask-bid)/ask>.005:return reject('spread_too_wide')
     if plan.get('track')=='early_entry':
         # Priced from this session's own open, so it sits before the previous-close limit.
-        return early_entry(plan,quote,at,result,seen,row.get('market') or 'KR',score)
+        reward = reward_check(row, ask, forecast.get('base_price'), bid)
+        if not reward['allowed']:return reject('insufficient_expected_reward')
+        return early_entry(plan,quote,at,result,seen,row.get('market') or 'KR',score,
+                           dict(min_score=required, **reward))
     limit=number(plan.get('entry_limit'));floor=number(plan.get('entry_floor'))
     if limit is None or limit<=0:return reject('entry_limit_missing')
     limit = floor_order_price(limit, overseas=row.get('market') == 'US',
@@ -182,10 +183,12 @@ def validate_entry(row,quote,at,session_open):
                 return dict(reject(tone['reason']),detail=tone['detail'],
                     session_price=quote.get('last_price'),day_open=quote.get('day_open'),
                     volume_ratio=quote.get('volume_ratio'),catalyst=plan.get('catalyst'))
-    elif base/ask-1<MIN_BASE_REWARD_PCT/100:return reject('insufficient_expected_reward')
+    reward = reward_check(row, ask, base, bid)
+    if not reward['allowed']:return reject('insufficient_expected_reward')
     # The stop follows the instrument the row is: −2% on a fund, −3% on a single stock.
     policy=exit_policy_for(row)
     return dict(result,trade_ready=True,reason='entry_conditions_met',score=score,
+        entry_requirements=dict(min_score=required, **reward),
         reference_price=plan.get('reference_price'),reference_date=plan.get('reference_date'),
         indicative_entry=ask,entry_limit=limit,entry_floor=floor,bid=bid,
         stop_price=round_trigger(Decimal(str(ask))*Decimal(str(1-policy.stop_pct))),
@@ -210,6 +213,7 @@ HOLD_REASON_LABELS = {
     'analysis_incomplete': '분석 자료 부족',
     'stale_analysis': '분석이 오래됨',
     'score_below_policy': '종합점수 미달',
+    'insufficient_expected_reward': '비용 차감 후 손익비 미달',
 }
 
 

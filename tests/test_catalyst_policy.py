@@ -1,7 +1,8 @@
 import unittest
 from datetime import datetime,timedelta,timezone
 from catalyst_policy import catalyst_context
-from company_forecast import MIN_COMPOSITE_SCORE, build_company_forecast
+from entry_policy import MIN_COMPOSITE_SCORE
+from company_forecast import build_company_forecast
 from preopen_signals import evaluate_preopen
 from event_publication import publication_metadata
 

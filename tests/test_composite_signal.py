@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta
 import math
 import unittest
-from company_forecast import (MIN_BASE_REWARD_PCT, MIN_COMPOSITE_SCORE,
+from entry_policy import MIN_COMPOSITE_SCORE, entry_policy_snapshot
+from company_forecast import (
                               SCENARIO_SIGMA_CAP, SCENARIO_THRESHOLD_SCORE, build_company_forecast)
 from kis_intraday import evaluate_candidate, format_notification, KST
 
@@ -118,13 +119,14 @@ class CompositeSignalTests(unittest.TestCase):
         evidence=[dict(kind=kind,market='KRX',symbol='*',assessment=grade,
                        available_at=(AT-timedelta(minutes=1)).isoformat())
                   for kind,grade in [('market','supportive'),('event','clear')]]
+        indicators['volatility_20d'] = .04
         # The real scenario formula, not a patched base price, must carry the candidate.
         status,candidate=evaluate_candidate(bars,quote,AT,'KRX','005930',evidence,False,
                                             company=company,sectors=sectors)
         self.assertEqual(status,'buy_signal')
         forecast=company['forecast']
         self.assertGreaterEqual(forecast['composite_score'],MIN_COMPOSITE_SCORE)
-        self.assertGreaterEqual(forecast['base_price']/candidate[4]-1,MIN_BASE_REWARD_PCT/100)
+        self.assertGreaterEqual(forecast['base_price']/candidate[4]-1,.0525)
         text=format_notification('KRX',[candidate],AT,{'005930':company},sectors)
         self.assertIn('종합 ',text)
         # The score is one compact figure now, not '종합 66.2/100'.
@@ -150,7 +152,7 @@ class CompositeSignalTests(unittest.TestCase):
         status,candidate=evaluate_candidate(bars,quote,AT,'KRX','005930',evidence,False,
                                             company=company,sectors=sectors)
         self.assertGreaterEqual(company['forecast']['composite_score'],MIN_COMPOSITE_SCORE)
-        self.assertLess(company['forecast']['base_return_pct'],MIN_BASE_REWARD_PCT)
+        self.assertLess(company['forecast']['base_return_pct'],5.25)
         self.assertEqual(status,'insufficient_expected_reward')
         self.assertIsNone(candidate)
 
@@ -161,16 +163,11 @@ class CompositeSignalTests(unittest.TestCase):
             forecast=build_company_forecast(company,indicators,100.,AT,sectors=sectors)
             self.assertAlmostEqual(forecast['scenario_sigma_multiple'],
                                    math.sqrt((forecast['composite_score']-50)/10),places=2)
-            # A candidate at the scenario anchor (``SCENARIO_THRESHOLD_SCORE``=60) clears the
-            # 3.3% floor from 1.5% daily volatility upward, using the real formula. The entry
-            # gate is lower (``MIN_COMPOSITE_SCORE``=53), so this score still passes it.
-            self.assertGreaterEqual(forecast['composite_score'],MIN_COMPOSITE_SCORE)
-            self.assertGreaterEqual(forecast['composite_score'],SCENARIO_THRESHOLD_SCORE)
-            self.assertGreaterEqual(forecast['base_return_pct'],MIN_BASE_REWARD_PCT)
+            self.assertGreaterEqual(forecast['composite_score'], SCENARIO_THRESHOLD_SCORE)
             self.assertLessEqual(forecast['scenario_sigma_multiple'],SCENARIO_SIGMA_CAP)
             self.assertLessEqual(forecast['bear_price'],100.)
             self.assertGreaterEqual(forecast['bull_price'],100.)
-        self.assertEqual(forecast['min_base_reward_pct'],MIN_BASE_REWARD_PCT)
+        self.assertEqual(forecast['entry_policy'], entry_policy_snapshot())
 
 
 if __name__=='__main__':

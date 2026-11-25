@@ -52,7 +52,7 @@ class ExitPolicyNumbers(unittest.TestCase):
                                        reference_date="2026-11-19"),
                    company_forecast=dict(assessment_status="complete", missing_dimensions=[],
                                          composite_score=65, generated_at=minutes(-1).isoformat(),
-                                         base_price=10500, bull_price=11000))
+                                         base_price=10600, bull_price=11000))
         quote = dict(ask=10000, bid=9990, ask_size=100, bid_size=100,
                      observed_at=T0.isoformat(), trade_at=minutes(-1).isoformat())
         signal = validate_entry(row, quote, T0, True)
