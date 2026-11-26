@@ -48,6 +48,8 @@ KR_THEMES = (
         ("009150.KS", "삼성전기"), ("353200.KS", "대덕전자"), ("222800.KQ", "심텍"),
         ("195870.KS", "해성디에스"), ("007810.KS", "코리아써키트"), ("007660.KS", "이수페타시스"),
         ("036540.KQ", "SFA반도체"), ("489500.KQ", "엘케이켐"),
+        # 2026-11-26: 증권사 거래대금 상위 섹터에 FC-BGA로 오르는데 이 바스켓에 없던 두 종목.
+        ("323280.KQ", "태성"), ("090460.KS", "비에이치"),
     )),
     ("2차전지·전고체", (
         ("247540.KQ", "에코프로비엠"), ("086520.KQ", "에코프로"), ("003670.KS", "포스코퓨처엠"),
@@ -83,10 +85,15 @@ KR_THEMES = (
         ("047810.KS", "한국항공우주"), ("099320.KQ", "쎄트렉아이"), ("451760.KQ", "컨텍"),
         ("211270.KQ", "AP위성"), ("462350.KQ", "이노스페이스"),
     )),
-    ("AI 소프트웨어·보안", (
+    ("AI 소프트웨어", (
         ("018260.KS", "삼성에스디에스"), ("304100.KQ", "솔트룩스"), ("047560.KQ", "이스트소프트"),
-        ("263860.KQ", "지니언스"), ("053800.KQ", "안랩"), ("108860.KQ", "셀바스AI"),
-        ("079940.KQ", "가비아"),
+        ("108860.KQ", "셀바스AI"), ("079940.KQ", "가비아"),
+    )),
+    # 보안은 증권사 화면에서 독립 섹터로 오른다(2026-11-26 10:45 거래대금 1위 '보안주·사이버보안').
+    # AI 소프트웨어와 섮여 있으면 테마 평균이 희석되고 이름도 안 맞는다.
+    ("보안·사이버보안", (
+        ("053800.KQ", "안랩"), ("263860.KQ", "지니언스"), ("150900.KQ", "파수AI"),
+        ("067920.KQ", "이글루"),
     )),
     ("엔터·미디어", (
         ("352820.KS", "하이브"), ("035900.KQ", "JYP Ent."), ("041510.KQ", "에스엠"),
@@ -181,12 +188,19 @@ MARKET_LABELS = {"KR": "KOSPI", "US": "S&P500"}
 BENCHMARK_SYMBOLS = {"KR": "^KS11", "US": "SPY"}
 # 마지막 봉이 오늘 것이어도 정규장 마감 전이어야 '장중'이다(마감 뒤에는 완성된 당일 종가).
 SESSION_CLOSE = {"KR": time(15, 30), "US": time(16, 0)}
+SESSION_OPEN = {"KR": time(9, 0), "US": time(9, 30)}
+SESSION_MINUTES = {"KR": 390, "US": 390}
 MINIMUM_MEMBERS = 2
 DEFAULT_LIMIT = 5
 TELEGRAM_LIMIT = 3
 
 # 순위 가중치: 상대강도(지수 대비) > 확산도(상승 종목 비율) > 거래대금 배수.
 LEADERSHIP_WEIGHTS = {"market_excess_pct": 0.45, "breadth_pct": 0.30, "turnover_ratio": 0.25}
+# 장중 순위: 당일 등락(실시간) + 거래대금 페이스(경과시간 대비) + 지수 대비 + 확산도.
+# 종전에는 장중에도 전일 종가 기준 순위를 그대로 찍었다(2026-11-26 지시: "장중에는 당일
+# 장중 실시간 등락률·거래대금 기준으로 상위 섹터"). 장전은 LEADERSHIP_WEIGHTS 그대로 둔다.
+INTRADAY_LEADERSHIP_WEIGHTS = {"return_pct": 0.40, "turnover_pace_ratio": 0.30,
+                               "market_excess_pct": 0.15, "breadth_pct": 0.15}
 NEWS_LOOKUPS_PER_RUN = 6
 NEWS_LOOKUPS_PER_THEME = 2
 # 기사가 없을 때 이슈 줄 대신 붙는 수급 요약의 머리표. 메시지에서는 위 테마 줄과 숫자가
@@ -329,8 +343,12 @@ def _frame(prices, symbol):
     return None if getattr(frame, "empty", True) else frame
 
 
-def theme_rows(market, themes, metrics, benchmark_return_pct=None):
+def theme_rows(market, themes, metrics, benchmark_return_pct=None, session_progress=None):
     """테마별 집계. 등락률은 구성종목 동일가중, 거래대금 배수는 금액가중(합계/합계기준)이다.
+
+    `session_progress`(장중 경과 비율)를 주면 `turnover_pace_ratio`를 함께 낸다 — 아직
+    반나절인 당일 누적 거래대금을 하루 평균으로 그대로 나누면 0.3배처럼 작게 보이고,
+    장중 순위가 "거래대금 급증"을 놓친다(2026-11-26 지시).
 
     `metrics`를 직접 만들어 넘기는 호출부(과거 리포트 재계산 등)도 있으므로 시세 오류 행은
     여기서 한 번 더 거른다. 뺀 종목 수는 `excluded`로 남겨 조용히 사라지지 않게 한다.
@@ -357,6 +375,9 @@ def theme_rows(market, themes, metrics, benchmark_return_pct=None):
         baseline = sum(metric["turnover"] / metric["turnover_ratio"] for _, _, metric in present
                        if metric.get("turnover") and metric.get("turnover_ratio"))
         ratio = turnover / baseline if baseline > 0 else None
+        pace = (round(ratio / session_progress, 2)
+                if ratio is not None and session_progress and 0.05 <= session_progress <= 1
+                else None)
         leaders = sorted(present, key=lambda item: (-item[2]["return_pct"], item[1]))[:3]
         excess = None if benchmark_return_pct is None else move - benchmark_return_pct
         state = ("주도" if move > 0 and (excess is None or excess > 0)
@@ -371,6 +392,7 @@ def theme_rows(market, themes, metrics, benchmark_return_pct=None):
             "breadth_pct": round(100 * up / len(present), 1),
             "turnover": turnover or None,
             "turnover_ratio": None if ratio is None else round(ratio, 2),
+            "turnover_pace_ratio": pace,
             "leaders": [dict(symbol=symbol, name=label, return_pct=metric["return_pct"],
                              alias=aliases.get(symbol))
                         for symbol, label, metric in leaders],
@@ -393,15 +415,17 @@ def _percentile_rank(rows, key):
     return rank
 
 
-def rank_theme_sectors(rows, limit=DEFAULT_LIMIT, minimum_members=MINIMUM_MEMBERS):
+def rank_theme_sectors(rows, limit=DEFAULT_LIMIT, minimum_members=MINIMUM_MEMBERS,
+                       weights=None):
     """상대강도·상승비율·거래대금 백분위 가중합으로 정렬한다. 지수가 빠져도 1등은 나온다."""
     ranked = [dict(row) for row in rows or [] if (row.get("total") or 0) >= minimum_members]
     if not ranked:
         return []
-    ranks = {key: _percentile_rank(ranked, key) for key in LEADERSHIP_WEIGHTS}
+    weights = weights or LEADERSHIP_WEIGHTS
+    ranks = {key: _percentile_rank(ranked, key) for key in weights}
     for row in ranked:
         row["leadership_score"] = round(
-            sum(weight * ranks[key](row) for key, weight in LEADERSHIP_WEIGHTS.items()), 4)
+            sum(weight * ranks[key](row) for key, weight in weights.items()), 4)
     ranked.sort(key=lambda row: (-row["leadership_score"],
                                  -(row["market_excess_pct"] if row["market_excess_pct"] is not None else -999),
                                  row["name"]))
@@ -505,15 +529,39 @@ def _download(symbols, market, downloader):
                        timeout=12, multi_level_index=True)
 
 
-def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
-                          headlines=None, with_news=True):
-    """한 시장의 세부 테마 스냅샷. 시세가 없으면 지어내지 않고 error로 남긴다."""
+def session_progress(now, market):
+    """정규장이 얼마나 지났는지(0~1). 개장 전·마감 뒤·휴장이면 None."""
     market = "US" if str(market).upper().startswith("US") else "KR"
+    clock = now.time()
+    if clock < SESSION_OPEN[market] or clock >= SESSION_CLOSE[market]:
+        return None
+    elapsed = ((clock.hour - SESSION_OPEN[market].hour) * 60
+               + clock.minute - SESSION_OPEN[market].minute)
+    return max(0.0, min(1.0, elapsed / SESSION_MINUTES[market]))
+
+
+def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
+                          headlines=None, with_news=True, mode=None):
+    """한 시장의 세부 테마 스냅샷. 시세가 없으면 지어내지 않고 error로 남긴다.
+
+    `mode`는 어느 세션을 읽을지 정한다.
+
+    * ``previous`` — **전일 마감(마지막 완료 세션)** 만 읽는다. 장전 알림은 이 값으로 보낸다
+      (2026-11-26 지시: "장전에는 전날마감기준으로 섹터 분석해서 보내").
+    * ``intraday`` — 당일 장중 봉을 포함해 실시간 등락·거래대금 페이스로 순위를 낸다.
+    * ``None`` — 지금이 정규장이면 ``intraday``, 아니면 ``previous``가 아닌 **있는 그대로**
+      (마감 뒤에는 당일 종가가 이미 완성본이라 그것을 쓴다).
+    """
+    market = "US" if str(market).upper().startswith("US") else "KR"
+    live = (mode == "intraday") if mode else (session_progress(now, market) is not None)
+    if mode == "previous":
+        live = False
     themes = THEME_UNIVERSE[market]
     symbols = [member[0] for _, members in themes for member in members]
     benchmark = BENCHMARK_SYMBOLS[market]
     snapshot = dict(market=market, benchmark=benchmark, benchmark_return_pct=None,
                     benchmark_date=None, data_date=None, intraday=False, rows=[], quoted=0,
+                    mode=mode or ("intraday" if live else "latest"),
                     members=len(set(symbols)), source="theme_member_daily_aggregate",
                     excluded=[], unaligned=[], error=None, checked_at=now.isoformat())
     try:
@@ -525,14 +573,18 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
         snapshot["error"] = "시세 미확보"
         return snapshot
     today = now.date()
-    # 기준지수의 세션별 등락을 먼저 만들고, 구성종목은 그 지수가 가진 세션까지 읽는다.
+    # 장전(mode='previous')은 오늘(아직 끝나지 않은 세션) 봉을 읽지 않는다.
+    through = (today - timedelta(days=1)).isoformat() if mode == "previous" else None
+    # 기준지수의 세션별 등락: 구성종목의 기준 세션과 견줄 값. 지수가 세션을 건너뛰었으면
+    # 그 사실을 따로 남기고 상대강도는 계산하지 않는다(아래).
     benchmark_moves = benchmark_session_moves(_frame(prices, benchmark))
+    if through:
+        benchmark_moves = {day: move for day, move in benchmark_moves.items() if day <= through}
     metrics = {}
     for symbol in dict.fromkeys(symbols):
         frame = _frame(prices, symbol)
-        session = last_common_session(frame, benchmark_moves)
         try:
-            metric = member_metric(frame, today, market, session=session)
+            metric = member_metric(frame, today, market, session=through)
         except price_sanity.PriceError as exc:
             # 티커 혼동·액면병합·극저가: 테마 등락률·대표주·상승 비율에 넣지 않는다.
             snapshot["excluded"].append(dict(symbol=symbol, reason=exc.reason,
@@ -542,9 +594,13 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
         except (ValueError, TypeError, KeyError):
             continue
         metrics[symbol] = metric
-    # 구성종목과 기준지수가 같은 세션에서 읽히도록 기준 세션을 정하고, 그 세션 봉이 없는
-    # 종목은 테마 평균에서 뺀다(다른 세션 값을 섞으면 상대강도가 다시 어긋난다).
+    # 구성종목이 공유하는 기준 세션(가장 많은 종목이 가진 최신 세션)을 정하고, 그 세션 봉이
+    # 없는 종목은 테마 평균에서 뺀다(다른 세션 값을 섞으면 등락률·상승비율이 어긋난다).
     reference = aligned_session(metrics)
+    # 구성종목이 가진 세션들: 지수가 몇 세션 밀렸는지 세는 기준(지수에 구멍이 있으면 그 날은
+    # 지수 쪽에 없으므로 지수 세션만으로는 셀 수 없다).
+    member_sessions = sorted({metric.get("data_date") for metric in metrics.values()
+                              if metric.get("data_date")})
     if reference:
         aligned = {symbol: metric for symbol, metric in metrics.items()
                    if metric.get("data_date") == reference}
@@ -553,21 +609,101 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
                                  if metric.get("data_date") != reference]
         metrics = aligned
     snapshot["quoted"] = len(metrics)
-    snapshot["benchmark_date"] = reference if reference in benchmark_moves else None
-    snapshot["benchmark_return_pct"] = benchmark_moves.get(reference) if reference else None
-    ranked = rank_theme_sectors(theme_rows(market, themes, metrics, snapshot["benchmark_return_pct"]), limit)
+    # 지수가 그 세션 봉을 갖고 있으면 같은 세션에서 상대강도를 낸다. 없으면(^KS11이 11/25를
+    # 건너뛴 2026-11-26처럼) 지수의 마지막 세션을 적고 몇 세션 밀렸는지 남긴다 — 다른 세션
+    # 등락을 '오늘 지수'로 붙이지 않고, 상대강도는 계산하지 않는다.
+    if reference and reference in benchmark_moves:
+        benchmark_date = reference
+    elif reference and benchmark_moves:
+        earlier = [day for day in benchmark_moves if day <= reference]
+        benchmark_date = max(earlier) if earlier else None
+    else:
+        benchmark_date = None
+    snapshot["benchmark_date"] = benchmark_date
+    snapshot["benchmark_return_pct"] = (benchmark_moves.get(benchmark_date)
+                                        if benchmark_date else None)
+    snapshot["benchmark_aligned"] = bool(benchmark_date and reference == benchmark_date)
+    snapshot["benchmark_lag_sessions"] = (
+        sum(1 for day in member_sessions if benchmark_date < day <= reference)
+        if benchmark_date and reference else 0)
+    # 장중이면 당일 등락·거래대금 페이스로 순위를 낸다. 전일 마감 자료에는 페이스가 없다.
+    progress = session_progress(now, market)
+    # 장중 집계는 '지금 정규장이 돌고 있고, 기준 세션이 오늘'일 때만이다.
+    intraday_now = bool(live and reference == today.isoformat() and progress is not None)
+    excess_return = (snapshot["benchmark_return_pct"]
+                     if snapshot.get("benchmark_aligned") else None)
+    ranked = rank_theme_sectors(
+        theme_rows(market, themes, metrics, excess_return,
+                   session_progress=progress if intraday_now else None), limit,
+        weights=INTRADAY_LEADERSHIP_WEIGHTS if intraday_now else LEADERSHIP_WEIGHTS)
     if with_news and ranked:
         budget = [NEWS_LOOKUPS_PER_RUN]
         for row in ranked:
             row["issue"] = issue_line(row, market, now, headlines, budget)
     dates = [row.get("data_date") for row in ranked if row.get("data_date")]
     snapshot["data_date"] = max(dates) if dates else None
+    # '장중'은 시계가 정규장 안일 때만이다. 마감 뒤에 남은 당일 봉은 완성된 종가다.
     snapshot["intraday"] = bool(snapshot["data_date"] == today.isoformat()
-                                 and now.time() < SESSION_CLOSE[market])
+                                 and progress is not None)
+    snapshot["session_progress"] = progress
+    if snapshot["intraday"]:
+        snapshot["mode"] = "intraday"
+    elif mode == "previous" or snapshot["data_date"] != today.isoformat():
+        snapshot["mode"] = "previous"
     snapshot["rows"] = ranked
     if not ranked:
         snapshot["error"] = "테마 구성종목 시세 부족"
     return snapshot
+
+
+def _turnover_text(value, market):
+    """거래대금을 읽는 사람 단위로: 국내는 억원, 미국은 백만 달러."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        return None
+    if str(market).upper().startswith("US"):
+        return f"${value / 1e6:,.0f}M"
+    return f"{value / 1e8:,.0f}억"
+
+
+def _previous_session(day, market):
+    """그 날짜의 직전 거래 세션(XKRX/XNYS). 달력이 없으면 None."""
+    if not day:
+        return None
+    try:
+        from exchange_calendars import get_calendar
+        calendar = get_calendar("XKRX" if str(market).upper() != "US" else "XNYS")
+        return calendar.previous_session(str(day)).date().isoformat()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _theme_stamp(snapshot, market):
+    """`전일(11/25) 마감 기준` 또는 `장중 11/26 10:45 기준` — 어느 세션의 숫자인지 머리에 쓴다.
+
+    장전 알림은 전일 마감, 장중 알림은 당일 실시간이다(2026-11-26 지시). 두 숫자가 같은
+    메시지 안에서 섞이지 않도록 기준을 머리줄에 박아 둔다.
+    """
+    day = str(snapshot.get("data_date") or "")
+    short = day[5:].replace("-", "/") if len(day) == 10 else None
+    if snapshot.get("intraday"):
+        clock = ""
+        try:
+            stamp = datetime.fromisoformat(str(snapshot.get("checked_at") or ""))
+            clock = f" {stamp:%H:%M}"
+        except (TypeError, ValueError):
+            clock = ""
+        return f"장중{clock} 기준" + (" · 당일 등락·거래대금" if snapshot.get("mode") == "intraday" else "")
+    if short:
+        # 마감 뒤에 돌린 스캔은 오늘 종가가 완성본이다. 그때는 '당일'이라고 쓴다.
+        today = str(snapshot.get("checked_at") or "")[:10]
+        if day == today:
+            return f"당일({short}) 마감 기준"
+        # '전일'은 직전 거래 세션일 때만이다. 지수가 세션을 건너뛰어 그보다 오래됐으면 '직전'.
+        previous = _previous_session(today, market)
+        if previous and day != previous:
+            return f"직전({short}) 마감 기준"
+        return f"전일({short}) 마감 기준"
+    return "직전 세션 기준"
 
 
 def format_theme_block(snapshot, market=None, limit=4):
@@ -578,15 +714,30 @@ def format_theme_block(snapshot, market=None, limit=4):
         return [f"세부 테마: {snapshot['error']}"] if snapshot.get("error") else []
     market = market or snapshot.get("market")
     label = MARKET_LABELS.get(market, market or "시장")
-    stamp = "장중" if snapshot.get("intraday") else (
-        snapshot["data_date"][5:].replace("-", "/") + " 종가" if snapshot.get("data_date") else "직전 세션")
-    head = f"세부 테마 · {stamp}"
+    head = f"세부 테마 · {_theme_stamp(snapshot, market)}"
     if snapshot.get("benchmark_return_pct") is not None:
-        head += f" · {label} {snapshot['benchmark_return_pct']:+.2f}% 대비 상대강도"
+        pct = snapshot["benchmark_return_pct"]
+        if snapshot.get("benchmark_aligned", True):
+            head += f" · {label} {pct:+.2f}% 대비 상대강도"
+        else:
+            # 지수가 그 세션 봉을 건너뛰었으면 그 날짜와 지연을 적는다(상대강도는 계산하지 않음).
+            day = str(snapshot.get("benchmark_date") or "")[5:].replace("-", "/")
+            lag = snapshot.get("benchmark_lag_sessions")
+            head += (f" · {label} {day} {pct:+.2f}%"
+                     + (f" (지수 {lag}세션 지연)" if isinstance(lag, int) and lag > 0 else ""))
     lines = [head]
+    live = bool(snapshot.get("intraday"))
     for index, row in enumerate(rows, 1):
         parts = [f"{row.get('return_pct', 0):+.1f}%"]
-        if row.get("turnover_ratio"):
+        if live:
+            # 장중에는 증권사 화면과 같은 '거래대금 금액 + 경과시간 대비 배수'를 쓴다.
+            amount = _turnover_text(row.get("turnover"), market)
+            pace = row.get("turnover_pace_ratio")
+            if amount:
+                parts.append(f"거래대금 {amount}" + (f"({pace:.1f}배)" if isinstance(pace, (int, float)) else ""))
+            elif row.get("turnover_ratio"):
+                parts.append(f"거래대금 {row['turnover_ratio']:.1f}배")
+        elif row.get("turnover_ratio"):
             parts.append(f"거래대금 {row['turnover_ratio']:.1f}배")
         if row.get("total"):
             parts.append(f"상승 {row.get('up', 0)}/{row['total']}")

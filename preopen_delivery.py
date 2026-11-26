@@ -62,7 +62,8 @@ def main():
                          if isinstance(row,dict) and str(row.get('market') or '').upper().startswith('US')]
     try:
         from theme_sectors import theme_sector_snapshot
-        report['theme_sectors']=[theme_sector_snapshot(market,local)]
+        # 장전은 전날 마감 기준이다(2026-11-26 지시). 당일 장중 봉은 읽지 않는다.
+        report['theme_sectors']=[theme_sector_snapshot(market,local,mode='previous')]
     except Exception as exc:  # 테마 집계 실패가 장전 알림 자체를 막지 않는다
         print('Theme sectors unavailable: '+type(exc).__name__,flush=True)
     scanner.prepare_selected_analysis(report)

@@ -123,11 +123,25 @@ class BlockTests(unittest.TestCase):
     def test_flow_line_names_the_groups_in_uptrend_by_strength(self):
         block = self.build(data=market_series(falling_symbols={'TLT', 'IEF', 'USO', 'CPER', 'DBA'}))
         line = block['header'][0]
-        self.assertTrue(line.startswith('📈 지금 상승 흐름: '))
+        self.assertTrue(line.startswith('📈 글로벌 자산 흐름(간밤 · 국내 포함): '))
         self.assertIn('국내주식(', line)
         self.assertIn('금·은(', line)
         self.assertNotIn('미국채', line)
         self.assertNotIn('원자재', line)
+
+    def test_a_global_only_uptrend_is_named_as_an_asset_block_not_a_domestic_theme(self):
+        # 2026-11-26 지시: 맨 위 줄이 국내 테마 순위로 읽혔다. 자산군 흐름임을 제목에 적는다.
+        block = self.build(data=market_series(falling_symbols={'^KS11', '^KQ11'}))
+        line = block['header'][0]
+        self.assertTrue(line.startswith('📈 글로벌 자산 흐름(간밤): '))
+        self.assertNotIn('국내주식', line)
+
+    def test_a_domestic_only_uptrend_says_domestic_and_drops_global(self):
+        symbols = [symbol for spec in asset_regime.GROUPS for symbol, _label in spec['instruments']]
+        block = self.build(data=market_series(falling_symbols=set(symbols) - {'^KS11', '^KQ11'}))
+        line = block['header'][0]
+        self.assertTrue(line.startswith('📈 자산군 흐름(간밤 · 국내): '))
+        self.assertIn('국내주식(', line)
 
     def test_flow_line_percentage_is_the_twenty_day_return(self):
         data = market_series()
@@ -141,17 +155,17 @@ class BlockTests(unittest.TestCase):
         symbols = [symbol for spec in asset_regime.GROUPS for symbol, _label in spec['instruments']]
         block = self.build(data=market_series(falling_symbols=set(symbols) - {'GLD'}, mixed={'GLD'}))
         line = block['header'][0]
-        self.assertTrue(line.startswith('📉 전 자산 조정 구간 (현금·단기채 유리'))
+        self.assertTrue(line.startswith('📉 자산군 일제 조정 구간 (현금·단기채 유리'))
         self.assertIn('단기 반등: 금', line)
 
     def test_all_adjusting_without_rebound_has_no_note(self):
         symbols = [symbol for spec in asset_regime.GROUPS for symbol, _label in spec['instruments']]
         block = self.build(data=market_series(falling_symbols=set(symbols)))
-        self.assertEqual(block['header'][0], '📉 전 자산 조정 구간 (현금·단기채 유리)')
+        self.assertEqual(block['header'][0], '📉 자산군 일제 조정 구간 (현금·단기채 유리)')
 
     def test_missing_prices_say_unavailable_instead_of_inventing_flows(self):
         block = self.build(data={})
-        self.assertTrue(block['header'][0].startswith('❔ 지금 상승 흐름: 확인 불가'))
+        self.assertTrue(block['header'][0].startswith('❔ 글로벌 자산 흐름: 확인 불가'))
         self.assertTrue(block['errors'])
 
     def test_one_failed_symbol_does_not_break_the_block(self):
@@ -300,7 +314,7 @@ class HeaderWiringTests(unittest.TestCase):
             None, [dict(market='KR', rank=1, name='반도체', return_pct=1.2)], None,
             regime=self.block())
         lines = text.split('\n')
-        self.assertTrue(lines[0].startswith('📈 지금 상승 흐름: '))
+        self.assertTrue(lines[0].startswith('📈 글로벌 자산 흐름'))
         self.assertTrue(lines[1].startswith('🌡️ 시장 분위기: '))
         self.assertIn('오늘의 주요 섹터', text)
 
@@ -314,7 +328,7 @@ class HeaderWiringTests(unittest.TestCase):
         text = kis_intraday.format_exit_watch(
             'KRX', [], datetime(2026, 11, 24, 9, 30, tzinfo=kis_intraday.KST),
             regime=self.block())
-        self.assertTrue(text.startswith('📈 지금 상승 흐름: '))
+        self.assertTrue(text.startswith('📈 글로벌 자산 흐름'))
         self.assertIn('매도 규칙 점검', text)
 
     def test_daily_summary_starts_with_the_regime_block(self):
@@ -339,7 +353,7 @@ class HeaderWiringTests(unittest.TestCase):
                 patch('scanner.requests.post', side_effect=post):
             result = scanner.send_telegram_summary(report)
         self.assertTrue(result['sent'])
-        self.assertTrue(sent['text'].startswith('📈 지금 상승 흐름: '))
+        self.assertTrue(sent['text'].startswith('📈 글로벌 자산 흐름'))
         self.assertIn('오늘의 주요 섹터', sent['text'])
 
     def test_daily_summary_without_a_block_keeps_the_sector_header_first(self):
@@ -367,7 +381,7 @@ class HeaderWiringTests(unittest.TestCase):
     def test_requested_report_starts_with_the_regime_block(self):
         text = tradable_signal.format_requested_report(
             ['오늘의 주요 섹터'], [], dict(completed=True), NOW, regime=self.block())
-        self.assertTrue(text.startswith('📈 지금 상승 흐름: '))
+        self.assertTrue(text.startswith('📈 글로벌 자산 흐름'))
         self.assertIn('오늘의 주요 섹터', text)
 
     def test_attach_stores_the_block_on_the_report(self):

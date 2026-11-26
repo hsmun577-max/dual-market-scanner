@@ -155,13 +155,20 @@ class BlockFormatTests(unittest.TestCase):
 
     def test_theme_line_carries_name_move_turnover_and_breadth(self):
         lines = format_theme_block(self.snapshot(), 'KR')
-        self.assertEqual(lines[0], '세부 테마 · 11/23 종가 · KOSPI -3.31% 대비 상대강도')
+        self.assertEqual(lines[0], '세부 테마 · 전일(11/23) 마감 기준 · KOSPI -3.31% 대비 상대강도')
         self.assertEqual(lines[1], '1. 휴머노이드·로봇·액추에이터 +4.4% · 거래대금 2.9배 · 상승 5/8')
         self.assertEqual(lines[2], '   주도 휴림로봇 +30.0% · 로보티즈 +5.4%')
         self.assertEqual(lines[3], '   이슈: 로봇 공급 계약 체결')
 
     def test_intraday_block_says_so(self):
-        self.assertIn('장중', format_theme_block(self.snapshot(intraday=True), 'KR')[0])
+        head = format_theme_block(self.snapshot(intraday=True), 'KR')[0]
+        self.assertIn('장중', head)
+        self.assertIn('기준', head)
+
+    def test_the_close_block_says_it_is_the_previous_session(self):
+        head = format_theme_block(self.snapshot(), 'KR')[0]
+        self.assertIn('전일(11/23) 마감 기준', head)
+        self.assertNotIn('종가', head)
 
     def test_missing_theme_data_is_reported_not_hidden(self):
         self.assertEqual(format_theme_block(dict(market='KR', rows=[], error='시세 미확보'), 'KR'),
@@ -316,8 +323,9 @@ class MessageIntegrationTests(unittest.TestCase):
 class SessionAlignmentTests(unittest.TestCase):
     """2026-11-26: 11/25 구성종목 등락에 11/24 지수 등락(+6.32%)이 붙었다.
 
-    Yahoo에 11/25 지수 봉이 없었는데 테마 경로만 두 날짜를 맞추지 않고 각자의 마지막 봉을
-    읽었다. `sector_metrics()`처럼 교집합의 마지막 세션에서 두 값을 함께 읽어야 한다.
+    Yahoo에 11/25 지수 봉이 없었는데 테마 경로는 두 날짜를 맞추지 않고 각자의 마지막 봉을
+    읽었다. 이제 구성종목은 자기 세션(최빈값)으로 집계하고, 지수가 그 세션 봉을 갖고 있을
+    때만 상대강도를 내며, 없으면 지수의 마지막 세션과 지연을 밝히고 상대강도는 비운다.
     """
 
     NOW_26 = datetime(2026, 11, 26, 6, 38)
@@ -335,16 +343,23 @@ class SessionAlignmentTests(unittest.TestCase):
         snapshot = theme_sector_snapshot('KR', self.NOW_26,
                                          downloader=lambda symbols, market: self.rendered(robots),
                                          headlines=lambda *args: [])
-        # 지수가 11/25 봉을 갖지 않으므로 두 값 모두 11/24에서 읽는다.
-        self.assertEqual(snapshot['data_date'], '2026-11-24')
+        # 구성종목은 11/25(자기 마지막 봉)로 집계하고, 지수는 11/24 봉까지밖에 없다.
+        self.assertEqual(snapshot['data_date'], '2026-11-25')
         self.assertEqual(snapshot['benchmark_date'], '2026-11-24')
+        self.assertEqual(snapshot['benchmark_lag_sessions'], 1)
+        self.assertFalse(snapshot['benchmark_aligned'])
         self.assertAlmostEqual(snapshot['benchmark_return_pct'], -3.31, places=2)
         row = snapshot['rows'][0]
-        self.assertAlmostEqual(row['return_pct'], 9.0, places=2)  # 11/24: +24 · +5 · -2
-        self.assertNotAlmostEqual(row['return_pct'], 3.54, places=2)  # 11/25: +9.68 · +0.95 · 0
-        self.assertAlmostEqual(row['benchmark_return_pct'], -3.31, places=2)
-        self.assertEqual(row['data_date'], '2026-11-24')
-        self.assertEqual(snapshot['rows'][0]['state'], '주도')
+        self.assertAlmostEqual(row['return_pct'], 3.54, places=2)  # 11/25: +9.68 · +0.95 · 0
+        self.assertNotAlmostEqual(row['return_pct'], 9.0, places=2)  # 11/24 값이 섞이면 안 된다
+        # 다른 세션의 지수 등락으로 상대강도를 만들지 않는다.
+        self.assertIsNone(row['benchmark_return_pct'])
+        self.assertIsNone(row['market_excess_pct'])
+        self.assertEqual(row['data_date'], '2026-11-25')
+        head = format_theme_block(snapshot, 'KR')[0]
+        self.assertIn('KOSPI 11/24 -3.31%', head)
+        self.assertIn('지수 1세션 지연', head)
+        self.assertNotIn('상대강도', head)
 
     def test_a_member_without_the_session_bar_is_left_out_of_the_average(self):
         robots = dict(THEME_UNIVERSE['KR'])['휴머노이드·로봇·액추에이터']
@@ -356,7 +371,7 @@ class SessionAlignmentTests(unittest.TestCase):
                                          headlines=lambda *args: [])
         row = snapshot['rows'][0]
         self.assertEqual((row['total'], row['up']), (2, 2))
-        self.assertAlmostEqual(row['return_pct'], 14.5, places=2)  # (+24 +5) / 2
+        self.assertAlmostEqual(row['return_pct'], 5.31, places=2)  # 11/25: (+9.68 +0.95) / 2
         self.assertEqual(snapshot['unaligned'],
                          [dict(symbol=robots[2][0], data_date='2026-11-20')])
 
@@ -374,3 +389,86 @@ class SessionAlignmentTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SessionModeTests(unittest.TestCase):
+    """2026-11-26 지시: 장전은 전일 마감 기준, 장중은 당일 실시간 등락·거래대금 기준.
+
+    증권사 10:45 화면(보안주·사이버보안 1위, FC-BGA·PCB·기판 2위)과 07:50 알림의 순위가
+    달랐던 것은 장전 메시지가 전일 종가를 쓰면서도 그 사실을 흐리게 적었고, 장중 순위가
+    전일 종가 기준 그대로였기 때문이다.
+    """
+
+    TODAY = datetime(2026, 11, 26, 10, 45)
+
+    def frame(self, previous_pct, today_pct, base=10000.0, volume_today=1000.0,
+              end='2026-11-26'):
+        previous = base * (1 + previous_pct)
+        today = previous * (1 + today_pct)
+        return frame([base] * 21 + [previous, today], [1000.0] * 22 + [volume_today], end=end)
+
+    def prices(self, today_volume=3000.0):
+        return {
+            # 보안: 오늘 +12%, 거래대금 평소의 3배 → 장중 1위
+            '053800.KQ': self.frame(0.02, 0.12, 50000.0, today_volume),
+            '150900.KQ': self.frame(0.01, 0.10, 10000.0, today_volume),
+            # FC-BGA: 오늘 +3%, 거래대금 평소 수준
+            '009150.KS': self.frame(-0.01, 0.03, 700000.0, 1000.0),
+            '323280.KQ': self.frame(0.00, 0.02, 5000.0, 1000.0),
+            '^KS11': self.frame(0.0, -0.02, 2500.0, 1000.0),
+        }
+
+    def snapshot(self, mode, now=None):
+        return theme_sector_snapshot('KR', now or self.TODAY, mode=mode,
+                                     downloader=lambda symbols, market: self.prices(),
+                                     headlines=lambda *args: [])
+
+    def test_the_preopen_snapshot_reads_the_previous_close_and_says_so(self):
+        snapshot = self.snapshot('previous')
+        self.assertEqual(snapshot['data_date'], '2026-11-25')
+        self.assertFalse(snapshot['intraday'])
+        head = format_theme_block(snapshot, 'KR')[0]
+        self.assertIn('전일(11/25) 마감 기준', head)
+        self.assertNotIn('장중', head)
+        security = next(row for row in snapshot['rows'] if row['name'] == '보안·사이버보안')
+        self.assertAlmostEqual(security['return_pct'], 1.5, places=2)  # 전일 +2%·+1%
+        self.assertIsNone(security['turnover_pace_ratio'])
+
+    def test_the_intraday_snapshot_ranks_on_the_live_move_and_turnover_pace(self):
+        snapshot = self.snapshot('intraday')
+        self.assertEqual(snapshot['data_date'], '2026-11-26')
+        self.assertTrue(snapshot['intraday'])
+        self.assertEqual(snapshot['mode'], 'intraday')
+        head = format_theme_block(snapshot, 'KR')[0]
+        self.assertIn('장중 10:45 기준', head)
+        self.assertIn('당일 등락·거래대금', head)
+        # 경과 시간(105/390분)을 반영한 거래대금 페이스가 원배수보다 크다.
+        security = next(row for row in snapshot['rows'] if row['name'] == '보안·사이버보안')
+        self.assertAlmostEqual(security['turnover_ratio'], 3.41, places=2)
+        self.assertAlmostEqual(security['turnover_pace_ratio'], 12.67, places=1)
+        self.assertEqual(snapshot['rows'][0]['name'], '보안·사이버보안')
+        line = next(line for line in format_theme_block(snapshot, 'KR') if line.startswith('1. '))
+        self.assertIn('거래대금', line)
+        self.assertIn('억', line)
+
+    def test_the_session_clock_is_only_inside_the_regular_session(self):
+        from theme_sectors import session_progress
+        self.assertIsNone(session_progress(datetime(2026, 11, 26, 7, 50), 'KR'))
+        self.assertIsNone(session_progress(datetime(2026, 11, 26, 15, 30), 'KR'))
+        self.assertAlmostEqual(session_progress(datetime(2026, 11, 26, 10, 45), 'KR'),
+                               105 / 390, places=6)
+        self.assertAlmostEqual(session_progress(datetime(2026, 11, 26, 12, 0), 'US'),
+                               150 / 390, places=6)
+        self.assertIsNone(session_progress(datetime(2026, 11, 26, 8, 0), 'US'))
+
+    def test_the_broker_sectors_exist_with_their_leading_names(self):
+        themes = dict(THEME_UNIVERSE['KR'])
+        self.assertIn('보안·사이버보안', themes)
+        self.assertNotIn('AI 소프트웨어·보안', themes)
+        security = dict(themes['보안·사이버보안'])
+        self.assertEqual(security['053800.KQ'], '안랩')
+        self.assertEqual(security['150900.KQ'], '파수AI')
+        board = dict(themes['FC-BGA·PCB·기판'])
+        self.assertEqual(board['323280.KQ'], '태성')
+        self.assertEqual(board['090460.KS'], '비에이치')
+        self.assertEqual(board['009150.KS'], '삼성전기')

@@ -6,7 +6,7 @@
 
 텔레그램으로 나가는 모든 알림의 첫 블록은 세 줄이다.
 
-    1행  📈 지금 상승 흐름: 국내주식(+2.1%), 금·은(+3.4%)   (없으면 📉 전 자산 조정 구간 …)
+    1행  📈 글로벌 자산 흐름(간밤): 리츠(+4.2%), 미국채(+1.8%)   (없으면 📉 자산군 일제 조정 구간 …)
     2행  🌡️ 시장 분위기: 경계 속 단기 반등 시도 (VIX 26.6(-8.2%) 공포 진정 · 미10년물 4.92% 고금리 부담 · 달러 104.3 강세)
     3행  ⚡ 흐름 변화: 금·은 상승 진입 / 원자재 상승 이탈     (바뀐 것이 있을 때만)
 
@@ -61,6 +61,8 @@ GROUPS = (
     dict(key='bitcoin', label='비트코인',
          instruments=(('BTC-USD', '비트코인'),)),
 )
+# 국내 자산군. 이 줄이 국내 섹터 순위가 아니라는 것을 제목에서 구분하는 데 쓴다.
+DOMESTIC_LABELS = frozenset({'국내주식'})
 # 심리·매크로 지표. IEF는 미국채군에서 이미 받으므로 여기서 다시 받지 않는다.
 SENTIMENT_SYMBOLS = ('^VIX', '^TNX', 'HYG', 'DX-Y.NYB')
 
@@ -538,18 +540,33 @@ def assess(now=None, previous=None, context=None, downloader=None):
     return block
 
 
+def _flow_heading(uptrend):
+    """'📈 글로벌 자산 흐름(간밤):' — 국내 섹터가 아니라 자산군이라는 표시.
+
+    2026-11-26 지시: 맨 위 `📈 지금 상승 흐름: 리츠(+4.2%), 미국채(+1.8%)`가 국내 테마
+    순위로 읽혔다. 이 줄이 간밤 글로벌 자산군(그리고 국내 지수)의 20일 추세라는 것을 제목에
+    적는다. 국내주식이 목록에 있으면 '글로벌'만 쓰지 않고 국내 포함임을 밝힌다.
+    """
+    labels = {str(row.get('label') or '') for row in uptrend or []}
+    if labels and labels <= DOMESTIC_LABELS:
+        return '📈 자산군 흐름(간밤 · 국내): '
+    if labels & DOMESTIC_LABELS:
+        return '📈 글로벌 자산 흐름(간밤 · 국내 포함): '
+    return '📈 글로벌 자산 흐름(간밤): '
+
+
 def _flow_line(block):
     uptrend = block.get('uptrend_groups') or []
     if not any(row.get('observed', 1) for row in block.get('groups') or []):
-        return '❔ 지금 상승 흐름: 확인 불가 (자산 시세 미수신)'
+        return '❔ 글로벌 자산 흐름: 확인 불가 (자산 시세 미수신)'
     if uptrend:
         shown = uptrend[:MAX_FLOW_ITEMS]
         parts = [f"{row['label']}({row['return_20d_pct']:+.1f}%)"
                  if row.get('return_20d_pct') is not None else row['label'] for row in shown]
         extra = len(uptrend) - len(shown)
-        line = '📈 지금 상승 흐름: ' + ', '.join(parts)
+        line = _flow_heading(uptrend) + ', '.join(parts)
         return line + (f' 외 {extra}개' if extra > 0 else '')
-    line = '📉 전 자산 조정 구간 (현금·단기채 유리'
+    line = '📉 자산군 일제 조정 구간 (현금·단기채 유리'
     rebound = block.get('rebound_assets') or []
     if rebound:
         line += ' · 단기 반등: ' + ', '.join(rebound[:MAX_FLOW_ITEMS])
