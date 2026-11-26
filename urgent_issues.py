@@ -28,8 +28,10 @@ MIN_CHANGE_PCT = 10.0
 MAX_CHANGE_PCT = price_sanity.MAX_DAILY_CHANGE_PCT
 # 한국 거래소 일일 가격제한. 이를 넘는 값은 시세 오류로 본다(신규 상장 첫날 포함).
 KR_PRICE_LIMIT_PCT = price_sanity.KR_PRICE_LIMIT_PCT
-# 급등 당일 실제로 돈이 오갔는지: 당일 거래대금 또는 20일 평균 거래대금.
-MIN_TODAY_VALUE = {'KR': 5_000_000_000, 'US': 10_000_000}
+# 급등 당일 실제로 돈이 오갔는지: 당일 거래대금 또는 20일 평균 거래대금. 국내 문턱은
+# 모멘텀 경로의 20일 평균 하한(40억, 2026-11-26)을 그대로 쓰는 `MIN_AVERAGE_TURNOVER`와
+# 같은 규모로 맞춘다 — 한 함수 안에서 두 갈래의 유동성 기준이 서로 어긋나지 않도록.
+MIN_TODAY_VALUE = {'KR': 4_000_000_000, 'US': 10_000_000}
 MAX_ISSUES_PER_MARKET = 3
 NEWS_WINDOW_HOURS = 36
 MARKET_LABELS = {'KR': '국내', 'US': '미국'}

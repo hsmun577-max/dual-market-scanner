@@ -62,7 +62,7 @@ def flow(direction, score):
 class QualityTierTests(unittest.TestCase):
     def test_a_below_floor_turnover_name_is_read_on_the_quality_tier(self):
         self.assertIsNone(quality_watch_reason(kr_row(), 'KR'))
-        self.assertLess(18.4e8, 5e9)
+        self.assertLess(18.4e8, 4e9)
         self.assertGreater(18.4e8, RESEARCH_MIN_AVERAGE_TURNOVER['KR'])
 
     def test_the_tier_never_takes_a_name_the_momentum_path_already_has(self):
@@ -231,7 +231,7 @@ class QualityWatchResearchTests(unittest.TestCase):
 
 
 class ReuseSameSessionQualityWatchTests(unittest.TestCase):
-    """A same-session scan already read the 10억~50억 tier; a later report reuses it."""
+    """A same-session scan already read the 10억~40억 tier; a later report reuses it."""
 
     def test_a_same_session_record_is_not_read_again(self):
         report = dict(results=[], sectors=[], industry_snapshot=dict(rows=[]),

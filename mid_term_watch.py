@@ -9,7 +9,7 @@ breakout filters recall 0.1~2.7% of them — less often than they fire on ordina
 One set of point-in-time conditions survived, and it is the one wired here:
 
     ``20-day return <= -10%`` + ``RSI(14) <= 45`` +
-    ``20-day average turnover 10억~50억원`` + ``KOSPI-relative 20-day strength > 0``
+    ``20-day average turnover 10억~40억원`` + ``KOSPI-relative 20-day strength > 0``
 
 * 60 sessions held: 977 trades, **+9.54%** after 0.28% cost, **58.4%** touch +30% at the
   high, max drawdown −15.7% (the all-session baseline is 41.6% and −19.6%).
@@ -19,9 +19,12 @@ One set of point-in-time conditions survived, and it is the one wired here:
   price, volume and relative strength.
 
 Two consequences are built into the module. The turnover band is the *research* band
-(10억~50억원) — the same tier ``candidate_selection.quality_watch_reason`` reads — because
-the study found the 10~50억 names beat the 50억+ ones (+7.88% vs +2.85% at 60 sessions);
-the momentum buy path keeps its own 50억 floor untouched. And the hold is 20~60 sessions
+(10억~40억원) — the same tier ``candidate_selection.quality_watch_reason`` reads — because
+the study found the 10~50억 names beat the 50억+ ones (+7.88% vs +2.85% at 60 sessions).
+The band top is the momentum path's own KR floor, not a separate number: the study's
+10~50억 was exactly "below the 50억 floor", and the owner lowered that floor to 40억 on
+2026-11-26 ("거래대금 기준 40억으로 낮춰"), so the 40~50억 slice now belongs to the momentum
+buy path instead of this list. And the hold is 20~60 sessions
 with a −15% stop, so **nothing here is a same-day buy signal**: entries carry
 ``entry_signal: False`` and live in their own report field (``mid_term_watch``) and their
 own message section, never in ``recommendations`` or ``preopen_signal``.
@@ -37,11 +40,16 @@ in the list as ``unverified`` rather than dropping it.
 
 import math
 
+from candidate_selection import MIN_AVERAGE_TURNOVER
+
 LABEL = "[중기 +30% 눌림 발굴 (20~60일 보유 · -15% 손절)]"
 MIN_RETURN_20D = -0.10
 MAX_RSI = 45.0
 MIN_TURNOVER = 1_000_000_000
-MAX_TURNOVER = 5_000_000_000
+# The band top is the momentum path's KR turnover floor (40억 as of 2026-11-26), derived
+# rather than copied so the two tiers can never overlap when that floor moves. The study's
+# band was 10~50억 because the floor was 50억 then.
+MAX_TURNOVER = MIN_AVERAGE_TURNOVER["KR"]
 MIN_RELATIVE_STRENGTH = 0.0
 STOP_PCT = 0.15
 HOLD_SESSIONS = (20, 60)
@@ -241,5 +249,5 @@ def format_block(entries):
     if not rows:
         return []
     return [LABEL,
-            "20일 눌림 + 거래대금 10~50억 + 코스피 대비 상대강도 유지 · 당일 매수 신호 아님",
+            "20일 눌림 + 거래대금 10~40억 + 코스피 대비 상대강도 유지 · 당일 매수 신호 아님",
             *(line(row) for row in rows[:DEFAULT_LIMIT])]
