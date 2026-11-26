@@ -1628,17 +1628,14 @@ def send_telegram_summary(report):
         else:
             lines.append("매수 판정 보류 · 분석 미완료")
     # 계획마다 반복되던 안내는 블록에 한 번씩만 쓴다: 같은 문장을 다섯 번 읽히던 줄들
-    # (지수 20일선 아래 예외, 시가·거래량 게이트, 손절·익절 문구)이 2026-11-25 07:50
-    # 메시지의 절반을 차지했다.
+    # (시가·거래량 게이트, 손절·익절 문구)이 2026-11-25 07:50 메시지의 절반을 차지했다.
     catalysts = [row for row in conditional_rows
                  if row['preopen_signal'].get('strategy') in ('event_catalyst', 'earnings_catalyst')]
     if catalysts:
+        # 지수 20일선 아래(하락장)에서도 촉매 계획이 나가던 예외는 2026-11-26에 닫혔다. 이 줄에
+        # '지수 20일선 아래는 이 종목만 예외'가 다시 붙는다면 그 예외가 되살아난 것이다.
         from catalyst_track import MIN_ENTRY_VOLUME_RATIO
-        lifted = any(row['preopen_signal'].get('market_regime_lifted') for row in catalysts)
-        rule = ["확정 공시 근거", f"장초반 시가 아래·거래량 {MIN_ENTRY_VOLUME_RATIO:.1f}배 미달이면 진입 안 함"]
-        if lifted:
-            rule.insert(0, "지수 20일선 아래는 이 종목만 예외")
-        lines.append(" · ".join(rule))
+        lines.append(f"확정 공시 근거 · 장초반 시가 아래·거래량 {MIN_ENTRY_VOLUME_RATIO:.1f}배 미달이면 진입 안 함")
     for item in confirmed[:5]:
         lines.append(telegram_candidate_line(item))
     if len(confirmed) > 5:
