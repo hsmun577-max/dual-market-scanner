@@ -84,9 +84,10 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
         caveats=list(forecast.get('caveats',[])),
         entry_basis='source_dated_catalyst_pullback_band',fresh_execution_quote_required=True,
         target_basis='upside_scenario_not_expected_return',expires_session=expires_session,
-        # The confirmed-disclosure track is the one path allowed past a market headwind.
-        # The fact is recorded on the plan so the alert can say why a plan exists while
-        # the index is under its 20-day average, instead of leaving the reader to wonder.
+        # A market headwind is no longer lifted by this track (2026-11-26), so a promoted
+        # catalyst plan carries this as False. The field stays on the plan because archived
+        # records and `validate_entry` read it: if the exception is ever re-opened, the
+        # message shows it again instead of a plan appearing under a '하락 국면' line.
         market_regime_lifted=market_headwind_reason(values, row) == 'market_headwind',
         # The stop follows the instrument: −2% on a fund, −3% on a single stock.
         take_profit_pct=policy.take_profit_pct,
@@ -247,9 +248,9 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             # returned ``market_headwind`` and the event-support branch below skipped the
             # regime gate. This branch sits before it, so no plan reaches it under a
             # headwind. A name that the chart alone already refuses keeps that reason, so
-            # the rejection counts still say why it failed on its own. Only the
-            # confirmed-disclosure track above may lift a headwind
-            # (catalyst_track.LIFTABLE_REASONS).
+            # the rejection counts still say why it failed on its own. No track lifts a
+            # headwind any more: the confirmed-disclosure track was the last one and its
+            # entry is closed (`catalyst_track.liftable_reason`, 2026-11-26).
             status=headwind
         elif trend_reason and (trend_reason == 'market_headwind' or not event_support
                                or trend_reason not in EVENT_SUPPORT_LIFTABLE_REASONS):

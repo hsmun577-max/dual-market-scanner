@@ -23,6 +23,15 @@ The safety blocks stay in force — a catalyst never lifts insufficient liquidit
 price, a breakdown, an overheated/extended price, or a listed fund. And a lifted name is
 still refused at the moment of entry when the session is selling the news: below its
 opening price, or without same-time volume expansion (``entry_gate``).
+
+The market regime is not a reason this track may lift (closed 2026-11-26 on the owner's
+instruction, "하락장 촉매 예외를 닫아 주세요"). A disclosure explains a name, not the market:
+entries taken on confirmed earnings in a headwind averaged −0.47% over 263 trades with a
+40.5% win rate in the 2026-11-24 review, and −0.59% over the 116 reconstructed trades of
+the 2026-10-26~11-26 month with 75% stopped out — the only negative bucket that month.
+A name held by the regime is still read and recorded (``watchable_reason``,
+``catalyst_observation``) so its filings and news reach the 참고 blocks; it is only the
+buy plan that is refused.
 """
 
 from datetime import datetime, time, timedelta
@@ -31,15 +40,23 @@ import re
 from zoneinfo import ZoneInfo
 
 from candidate_selection import (MIN_DEMAND_VOLUME_RATIO, average_turnover,
-                                 candidate_rejection_reason, liquidity_rejection_reason)
+                                 candidate_rejection_reason, liquidity_rejection_reason,
+                                 market_headwind_reason)
 from research_asset import is_fund
 
 KST = ZoneInfo("Asia/Seoul")
 
-# First-screen reasons a confirmed catalyst may override.
+# First-screen reasons a confirmed catalyst may override. The market regime is not one of
+# them: a disclosure explains the name, not the market, and entries taken on it under a
+# headwind were the only negative bucket in both reviews (2026-11-24: 263 trades, −0.47%,
+# 40.5% win; 2026-10-26~11-26: 116 reconstructed trades, −0.59%, 25% win, 75% stopped).
+# 혜선 님 지시 2026-11-26 "하락장 촉매 예외를 닫아 주세요".
 LIFTABLE_REASONS = frozenset({"rebound", "weak_relative_trend", "unconfirmed_uptrend",
-                              "unconfirmed_demand", "insufficient_demand_expansion",
-                              "market_headwind"})
+                              "unconfirmed_demand", "insufficient_demand_expansion"})
+# Reasons worth a research slot that may never become a plan. A name the regime holds back
+# is still read: its news and filings have to reach the `긴급 이슈 참고` and
+# `장전 사전 시그널` blocks, which are observations and never buy signals.
+WATCH_ONLY_REASONS = frozenset({"market_headwind"})
 # Safety blocks the track may never override. They are listed so a change to the first
 # screen cannot silently widen this track.
 SAFETY_REASONS = frozenset({"insufficient_liquidity", "low_price", "missing_indicators",
@@ -150,29 +167,71 @@ def safety_block_reason(row, market):
     return None
 
 
-def liftable_reason(row, market):
-    """The first-screen rejection a confirmed catalyst may override, else None."""
-    if safety_block_reason(row, market):
-        return None
+def _first_chart_reason(row, market):
+    """The first-screen rejection, with ``breakdown_or_rebound`` split into its two cases.
+
+    A rebound candle is a reason a catalyst may override; a breakdown is not.
+    """
     first = candidate_rejection_reason(row, market)
     if first == "breakdown_or_rebound":
         values = row["indicators"]
         if not (values.get("rebound") and not values.get("breakdown")):
             return None
         first = "rebound"
+    return first
+
+
+def regime_held_reason(row):
+    """The market regime holding this name back, or None when the name may trade.
+
+    Any value is a refusal: ``market_headwind`` for a long under an index beneath its
+    20-day average, ``inverse_underlying_unverified`` for an inverse whose benchmark was
+    not observed.
+    """
+    return market_headwind_reason(row["indicators"], row)
+
+
+def liftable_reason(row, market):
+    """The first-screen rejection a confirmed catalyst may override, else None.
+
+    The market regime is refused here, before the chart reason is read: a name whose own
+    chart passes every test is still not bought under a headwind, and neither is a rebound
+    candle that only happened to be rejected first by its shape.
+    """
+    if safety_block_reason(row, market):
+        return None
+    if regime_held_reason(row):
+        return None
+    first = _first_chart_reason(row, market)
     return first if first in LIFTABLE_REASONS else None
 
 
-def watch_candidates(pool, market, limit=6):
-    """Reserve research slots for rejected names a disclosure could still lift.
+def watchable_reason(row, market):
+    """The first-screen rejection worth spending a research slot on, else None.
 
-    The budget is spent before any news is read, so only the shape that makes a catalyst
-    relevant is scored here: a rebound or a trend that has not confirmed itself yet, on
-    real volume. Safety-blocked and already-passing names are never included.
+    Reading a name is not buying it. This is ``liftable_reason`` plus the reasons in
+    ``WATCH_ONLY_REASONS``: a name the market regime holds back still gets its disclosure
+    read, and the observation log still records it, so closing the entry did not also
+    close the news.
+    """
+    if safety_block_reason(row, market):
+        return None
+    reason = _first_chart_reason(row, market)
+    return reason if reason in LIFTABLE_REASONS or reason in WATCH_ONLY_REASONS else None
+
+
+def watch_candidates(pool, market, limit=6):
+    """Reserve research slots for rejected names a disclosure would change the reading of.
+
+    That is every name a catalyst could lift and the ones the regime holds back, whose
+    filings and news still belong in the 참고 blocks. The budget is spent before any news
+    is read, so only the shape that makes a catalyst relevant is scored here: a rebound or
+    a trend that has not confirmed itself yet, on real volume. Safety-blocked and
+    already-passing names are never included.
     """
     rows = []
     for row in pool:
-        if liftable_reason(row, market) is None:
+        if watchable_reason(row, market) is None:
             continue
         if (_number(row["indicators"].get("volume_ratio")) or 0) < MIN_DEMAND_VOLUME_RATIO:
             continue

@@ -5,6 +5,11 @@ volume with the 20-day average above the 60-day one, and the first screen reject
 plain ``rebound`` under a market headwind. The next morning at 08:18 the 3Q operating-profit
 jump (+253% year over year) was disclosed and the stock gapped up. These tests hold the
 track to that evidence and to the safety blocks it may not lift.
+
+The market regime is no longer one of the things it lifts (2026-11-26): the same disclosure
+and the same candle are planned on a day the index is above its 20-day average, and refused
+when it is below. Entries taken under a headwind were the only negative bucket in both
+reviews, so the closure is held here in both directions.
 """
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -63,6 +68,18 @@ def row(**extra):
     return base
 
 
+def lifted_row(**extra):
+    """The 지니언스 case on a day the index is above its 20-day average.
+
+    Same disclosure, same rebound candle; only the market regime differs. This is the shape
+    the track still promotes, so the evidence checks keep a subject now that a headwind is
+    no longer lifted.
+    """
+    item = row(**extra)
+    item["indicators"]["market_above_ma20"] = True
+    return item
+
+
 def report(row):
     return dict(results=[row], preopen_session="2026-11-12", sectors=[])
 
@@ -78,8 +95,8 @@ class JinianceRegressionTests(unittest.TestCase):
             scanner.send_telegram_summary(report(item))
         return post.call_args.kwargs["json"]["text"]
 
-    def test_the_third_quarter_earnings_jump_lifts_a_rebound_under_a_market_headwind(self):
-        item = row()
+    def test_the_third_quarter_earnings_jump_lifts_a_rebound_when_the_index_is_above_its_average(self):
+        item = lifted_row()
         self.assertEqual(liftable_reason(item, "KR"), "rebound")
         result = evaluate_preopen(report(item), "2026-11-11", AT)
         signal = item["preopen_signal"]
@@ -87,6 +104,8 @@ class JinianceRegressionTests(unittest.TestCase):
         self.assertEqual(result["recommendations"], ["263860.KQ"])
         self.assertEqual(result["catalyst_candidates"], ["263860.KQ"])
         self.assertEqual(signal["strategy"], "earnings_catalyst")
+        # 이 계획은 하락장 예외가 아니다(2026-11-26에 닫힘).
+        self.assertFalse(signal["market_regime_lifted"])
         self.assertEqual(signal["catalyst"]["kind"], "earnings_surprise")
         self.assertIn("253", signal["catalyst"]["summary"])
         self.assertEqual(signal["catalyst"]["observed_at"], "2026-11-12T08:05:00+09:00")
@@ -101,14 +120,14 @@ class JinianceRegressionTests(unittest.TestCase):
         self.assertLess(signal["entry_floor"], signal["entry_limit"])
 
     def test_the_bull_case_alone_cannot_cover_the_catalyst_reward_floor(self):
-        item = row()
+        item = lifted_row()
         item['company_forecast']['base_price'] = 27000.0
         result = evaluate_preopen(report(item), '2026-11-11', AT)
         self.assertEqual(result['recommendations'], [])
         self.assertEqual(item['preopen_decision'], 'insufficient_expected_reward')
 
     def test_the_alert_names_the_track_and_carries_its_evidence(self):
-        item = row()
+        item = lifted_row()
         evaluate_preopen(report(item), "2026-11-11", AT)
         text = telegram_candidate_line(item)
         self.assertIn("[실적·호재 촉매]", text)
@@ -118,33 +137,45 @@ class JinianceRegressionTests(unittest.TestCase):
         # The entry guard moved to the block heading, where it is said once (2026-11-25).
         self.assertIn("장초반 시가 아래", self.message(item))
 
-    def test_a_catalyst_plan_under_a_market_headwind_says_so(self):
-        # The confirmed-disclosure track is the one path allowed past the market regime
-        # (the 지니언스 case was rejected by ``market_headwind`` as well). The plan records
-        # it and the alert states it, so a candidate under a '하락 국면' line is not a
-        # contradiction the reader has to resolve.
+    def test_the_same_disclosure_is_refused_under_a_market_headwind(self):
+        # 2026-11-26 혜선 님 결정: "하락장 촉매 예외를 닫아 주세요". 같은 공시·같은 캔들이라도
+        # 지수가 20일선 아래면 계획이 나가지 않는다. 근거는 그대로 읽고 기록한다 — 닫은 것은
+        # 매수 계획이지 자료가 아니다.
         item = row()
-        evaluate_preopen(report(item), "2026-11-11", AT)
         self.assertFalse(item["indicators"]["market_above_ma20"])
-        self.assertTrue(item["preopen_signal"]["market_regime_lifted"])
+        self.assertIsNone(liftable_reason(item, "KR"))
+        result = evaluate_preopen(report(item), "2026-11-11", AT)
+        self.assertEqual(item["preopen_decision"], "breakdown_or_rebound")
+        self.assertNotIn("preopen_signal", item)
+        self.assertEqual(result["recommendations"], [])
+        self.assertEqual(result["catalyst_candidates"], [])
+        recorded = result["catalyst_observation"]
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["kind"], "earnings_surprise")
+        self.assertEqual(recorded[0]["blocked_reason"], "breakdown_or_rebound")
+        self.assertIsNone(recorded[0]["liftable_reason"])
+        self.assertIs(recorded[0]["market_above_ma20"], False)
+
+    def test_the_alert_no_longer_announces_a_regime_exception(self):
+        # 예외가 닫혔으니 '지수 20일선 아래는 이 종목만 예외' 줄도 다시 나오면 안 된다.
+        item = lifted_row()
+        evaluate_preopen(report(item), "2026-11-11", AT)
         text = self.message(item)
-        self.assertIn("지수 20일선 아래", text)
         self.assertIn("확정 공시 근거", text)
-        # The execution gate is unchanged: the block still carries the guard.
         self.assertIn("장초반 시가 아래", text)
-        # ...and it is said once, not under every plan.
         self.assertEqual(text.count("장초반 시가 아래"), 1)
+        self.assertNotIn("20일선 아래는 이 종목만 예외", text)
 
     def test_a_plan_outside_a_headwind_does_not_claim_an_exception(self):
-        item = row()
-        item["indicators"]["market_above_ma20"] = True
+        item = lifted_row()
         evaluate_preopen(report(item), "2026-11-11", AT)
         self.assertFalse(item["preopen_signal"]["market_regime_lifted"])
         self.assertNotIn("예외 적용", telegram_candidate_line(item))
 
     def test_an_ordinary_conditional_plan_is_still_held_by_the_headwind(self):
-        # Only a confirmed disclosure lifts it. A name with no catalyst keeps the regime
-        # refusal even when its chart is otherwise a pass.
+        # Only a confirmed disclosure may lift a chart rejection, and even that no longer
+        # lifts the regime. A name with no catalyst keeps the regime refusal when its chart
+        # is otherwise held back.
         item = row()
         item["company_analysis"] = company(filings=[], financial_filing_url="")
         item["indicators"].update(dict(price=26000.0, rebound=False, breakdown=False,
@@ -163,7 +194,7 @@ class JinianceRegressionTests(unittest.TestCase):
         self.assertEqual(plan["exit_policy"]["stop_pct"], 0.02)
 
     def test_a_plan_without_an_atr_band_still_shows_the_single_entry_price(self):
-        item = row()
+        item = lifted_row()
         item["indicators"].pop("atr14_pct")
         evaluate_preopen(report(item), "2026-11-11", AT)
         self.assertIsNone(item["preopen_signal"]["entry_floor"])
@@ -173,7 +204,7 @@ class JinianceRegressionTests(unittest.TestCase):
 
     def test_a_verified_headline_with_the_figure_is_enough_when_the_statement_is_not_in_yet(self):
         url = "https://www.yna.co.kr/view/AKR202611120001"
-        item = row()
+        item = lifted_row()
         item["company_analysis"] = company(
             operating_income_yoy_pct=None, financial_source="DART 연결", filings=[], news=[
                 dict(headline="지니언스, 3분기 영업익 253% 급증…어닝 서프라이즈", url=url,
@@ -257,7 +288,7 @@ class ObservationLogTests(unittest.TestCase):
         return evaluation, evaluation.get("catalyst_observation") or []
 
     def test_a_lifted_name_is_recorded_with_its_evidence_and_score(self):
-        item = row()
+        item = lifted_row()
         evaluation, observations = self.observation(item)
         self.assertEqual(len(observations), 1)
         found = observations[0]
@@ -270,15 +301,28 @@ class ObservationLogTests(unittest.TestCase):
         self.assertAlmostEqual(found["composite_score"], 51.5)
         self.assertAlmostEqual(found["volume_ratio"], 4.24)
         self.assertTrue(found["volume_1_2x"])
-        self.assertIs(found["market_above_ma20"], False)
+        self.assertTrue(found["market_above_ma20"])
         self.assertEqual(found["liftable_reason"], "rebound")
         self.assertIn("영업이익", found["summary"])
         # 기록만 추가되고 판정·추천은 그대로다.
         self.assertEqual(evaluation["catalyst_candidates"], ["263860.KQ"])
         self.assertEqual(item["preopen_decision"], "conditional_buy")
 
-    def test_a_name_the_screen_blocked_is_recorded_with_why(self):
+    def test_a_regime_held_catalyst_is_still_recorded_but_never_lifted(self):
+        # 예외를 닫은 2026-11-26 이후에도 재료 관찰 로그는 계속 된다: 이 표본이 "정말 닫아야
+        # 했는지"를 다시 물을 수 있는 유일한 자료다.
         item = row()
+        self.assertFalse(item["indicators"]["market_above_ma20"])
+        evaluation, observations = self.observation(item)
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["kind"], "earnings_surprise")
+        self.assertEqual(observations[0]["blocked_reason"], "breakdown_or_rebound")
+        self.assertIsNone(observations[0]["liftable_reason"])
+        self.assertIs(observations[0]["market_above_ma20"], False)
+        self.assertEqual(evaluation["catalyst_candidates"], [])
+
+    def test_a_name_the_screen_blocked_is_recorded_with_why(self):
+        item = lifted_row()
         item["company_forecast"]["composite_score"] = MIN_CATALYST_COMPOSITE_SCORE - 1
         evaluation, observations = self.observation(item)
         self.assertEqual(len(observations), 1)
@@ -293,7 +337,7 @@ class ObservationLogTests(unittest.TestCase):
         self.assertEqual(observations, [])
 
     def test_a_volume_shortfall_is_visible_in_the_record(self):
-        item = row()
+        item = lifted_row()
         item["indicators"]["volume_ratio"] = 1.05
         _evaluation, observations = self.observation(item)
         self.assertEqual(len(observations), 1)
@@ -330,11 +374,64 @@ class SafetyBlockTests(unittest.TestCase):
         self.assertIsNone(liftable_reason(item, "KR"))
 
     def test_a_catalyst_does_not_override_the_score_floor(self):
-        item = row()
+        item = lifted_row()
         item["company_forecast"]["composite_score"] = MIN_CATALYST_COMPOSITE_SCORE - 1
         evaluate_preopen(report(item), "2026-11-11", AT)
         self.assertEqual(item["preopen_decision"], "catalyst_score_below_policy")
         self.assertNotIn("preopen_signal", item)
+
+
+class RegimeClosureTests(unittest.TestCase):
+    """하락장 촉매 예외를 닫은 2026-11-26 변경을 양방향으로 고정한다."""
+
+    def aligned_row(self, market_above_ma20):
+        """A chart that passes every first-screen test except possibly the market regime."""
+        item = row()
+        item["indicators"].update(dict(price=25900.0, rebound=False, breakdown=False,
+                                       ma20=24500.0, ma60=23800.0, return_5d=0.03,
+                                       return_20d=0.05, relative_strength=0.02,
+                                       obv_rising=True, volume_ratio=2.4,
+                                       market_above_ma20=market_above_ma20))
+        return item
+
+    def test_a_chart_that_passes_every_test_is_still_held_by_the_regime(self):
+        from candidate_selection import candidate_rejection_reason
+        item = self.aligned_row(False)
+        self.assertEqual(candidate_rejection_reason(item, "KR"), "market_headwind")
+        self.assertIsNone(liftable_reason(item, "KR"))
+        result = evaluate_preopen(report(item), "2026-11-11", AT)
+        self.assertEqual(item["preopen_decision"], "market_headwind")
+        self.assertNotIn("preopen_signal", item)
+        self.assertEqual(result["counts"].get("market_headwind"), 1)
+        self.assertEqual(result["recommendations"], [])
+
+    def test_the_same_chart_is_an_ordinary_plan_on_a_day_the_index_is_above_its_average(self):
+        item = self.aligned_row(True)
+        self.assertIsNone(liftable_reason(item, "KR"))
+        item["company_forecast"]["composite_score"] = 60.0
+        result = evaluate_preopen(report(item), "2026-11-11", AT)
+        self.assertEqual(item["preopen_decision"], "conditional_buy")
+        self.assertEqual(result["recommendations"], ["263860.KQ"])
+        # 정배열 경로로 들어온 계획이지 촉매 트랙이 아니다.
+        self.assertEqual(item["preopen_signal"]["strategy"], "trend")
+
+    def test_the_regime_held_name_is_still_read_for_the_reference_blocks(self):
+        # 읽기와 사기는 다르다: 20일선 아래라는 이유로 분석 슬롯에서도 빼면 뉴스·공시가
+        # 읽히지 않아 `긴급 이슈 참고`·`장전 사전 시그널`까지 같이 비게 된다.
+        from catalyst_track import watch_candidates, watchable_reason
+        item = self.aligned_row(False)
+        self.assertEqual(watchable_reason(item, "KR"), "market_headwind")
+        self.assertEqual([entry["symbol"] for entry in watch_candidates([item], "KR")],
+                         ["263860.KQ"])
+        self.assertIsNone(liftable_reason(item, "KR"))
+
+    def test_a_safety_block_is_not_even_watched(self):
+        from catalyst_track import watchable_reason
+        for change in (dict(overheated=True), dict(breakdown=True, rebound=False),
+                       dict(average_turnover_20d=1.0)):
+            item = self.aligned_row(False)
+            item["indicators"].update(change)
+            self.assertIsNone(watchable_reason(item, "KR"), change)
 
 
 class SellOnNewsTests(unittest.TestCase):
@@ -486,6 +583,8 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(reasons["263860.KQ"], "catalyst_watch")
         self.assertNotEqual(reasons.get("000660.KQ"), "catalyst_watch")
         self.assertNotEqual(reasons.get("035420.KQ"), "catalyst_watch")
+        # 하락장이라 계획은 없다. 그러나 이 이름은 여전히 리서치 풀에 남는다(2026-11-26).
+        self.assertIsNone(liftable_reason(weak, "KR"))
 
 
 class MarketMergeTests(unittest.TestCase):
@@ -497,7 +596,7 @@ class MarketMergeTests(unittest.TestCase):
                                   average_turnover_20d=4.0e7, ma20=95.0, ma60=90.0,
                                   return_5d=0.02, return_20d=-0.01, relative_strength=-0.02,
                                   obv_rising=True, breakout=False, breakdown=False,
-                                  rebound=True, overheated=False, market_above_ma20=False,
+                                  rebound=True, overheated=False, market_above_ma20=True,
                                   atr14_pct=3.0, data_date="2026-11-11"),
                   company_analysis=dict(market="US", quarter="2026-09",
                                         operating_income_amount=4.0e7,
@@ -510,7 +609,7 @@ class MarketMergeTests(unittest.TestCase):
                                         assessment_status="complete", missing_dimensions=[],
                                         caveats=[], base_price=106.0, bull_price=112.0,
                                         catalyst_context=dict(eligible=False)))
-        kr = row()
+        kr = lifted_row()
         merged, parts = evaluate_preopen_markets(dict(results=[kr, us], sectors=[]), AT)
         self.assertEqual(us["preopen_signal"]["strategy"], "earnings_catalyst")
         self.assertEqual(us["preopen_decision"], "conditional_buy")

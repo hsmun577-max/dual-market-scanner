@@ -80,10 +80,13 @@ class ShortPlanTests(unittest.TestCase):
                      "지수 20일선 아래 · 확정 공시 근거로 예외 적용"]:
             self.assertNotIn(gone, text)
 
-    def test_the_guard_and_the_exception_are_said_once(self):
+    def test_the_guard_is_said_once_and_the_regime_exception_is_gone(self):
+        # 2026-11-26에 하락장 촉매 예외를 닫았다. 계획 줄에는 이제 '지수 20일선 아래는 이
+        # 종목만 예외'가 붙지 않는다(옛 레코드의 market_regime_lifted=True도 같은 계약이다).
         text = message(report(row(), row(symbol="095610.KQ", name="테스")))
         self.assertEqual(text.count("장초반 시가 아래"), 1)
-        self.assertEqual(text.count("지수 20일선 아래"), 1)
+        self.assertEqual(text.count("지수 20일선 아래"), 0)
+        self.assertIn("시장 국면(KOSPI)", text)
         self.assertIn("자료 미확보 종목은 점수에 감점 반영", text)
 
     def test_a_closed_or_unopened_market_is_not_said_under_every_name(self):
