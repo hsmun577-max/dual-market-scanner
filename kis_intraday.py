@@ -29,7 +29,7 @@ from delivery_policy import delivery_status
 from event_impact_analysis import article_text, world_events, analyze_events, company_news_events
 from candidate_selection import (INVERSE_BENCHMARKS, instrument_rejection_reason, is_inverse,
                                  market_headwind_reason, meets_price_floor, rank_market_candidates)
-from theme_sectors import sector_section, theme_sector_snapshot
+from theme_sectors import sector_section, theme_membership, theme_sector_snapshot
 from telegram_text import rest_note, split_telegram_text
 from exit_policy import DEFAULT_EXIT_POLICY, classify_asset, exit_policy_for
 from tradable_signal import floor_order_price
@@ -43,6 +43,9 @@ from scanner import (KR_SYMBOL_NAMES, MARKET_INDEX_SYMBOLS, US_SYMBOL_NAMES,
 # Common shares from the current watchlist. NXT subscription acceptance is checked per session.
 SYMBOLS = tuple(symbol.split(".")[0] for symbol in list(KR_SYMBOL_NAMES)[:9])
 US_SYMBOLS = ("AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "GOOGL", "TSLA")
+# 마지막으로 읽은 KIS 장중 거래대금 순위(시장별). 테마 스냅샷의 동적 이슈 클러스터에
+# 바스켓 밖 종목으로 넘긴다. 조회 실패면 비어 있고, 그때는 클러스터가 나오지 않는다.
+INTRADAY_RANK_QUOTES = {}
 OPEN_TIMES = {"NXT": time(8), "KRX": time(9), "US-early": time(4), "US-late": time(8, 20)}
 BAR_SECONDS = 300
 DECISION_MINUTES = 25
@@ -1443,6 +1446,48 @@ def us_premarket_leaders(app_key, app_secret, now):
     return leaders
 
 
+# 동적 이슈 클러스터는 종목 묶음이다. KIS 거래대금 순위에는 ETF·ETN이 섞여 오므로
+# 브랜드명으로 걸러 낸다(``instrument_rejection_reason``은 복잡상품만 본다).
+FUND_NAME = re.compile(
+    r"KODEX|TIGER|ARIRANG|KBSTAR|HANARO|KOSEF|TIMEFOLIO|KOACT|\bSOL\b|\bACE\b|\bPLUS\b|"
+    r"\bRISE\b|ETF|ETN|레버리지|인버스", re.I)
+
+
+def turnover_quote_rows(rows, market, limit=12):
+    """KIS 장중 거래대금 순위 → 동적 이슈 클러스터 입력(고정 테마 바스켓 밖 종목만).
+
+    2026-11-26 지시(바스켓 밖에서 거래대금이 몰며 같이 움직이는 종목을 잡아라)의 데이터원.
+    바스켓에 이미 있는 종목은 테마 지표로 들어가므로 여기서 빼고, ETF·ETN은 이름 규칙으로
+    거른다. 이 값은 테마 순위에 끼지 않고 동적 클러스터에만 쓰인다.
+    """
+    basket = {part for symbol in theme_membership('KR') for part in (symbol, symbol.split('.')[0])}
+    today = datetime.now(KST).date().isoformat()
+    quotes = []
+    for row in rows or []:
+        symbol = str(row.get('mksc_shrn_iscd') or '')
+        if not re.fullmatch(r'[0-9A-Z]{6}', symbol) or symbol in basket:
+            continue
+        name = str(row.get('hts_kor_isnm') or symbol)
+        if instrument_rejection_reason(symbol, name) is not None or FUND_NAME.search(name):
+            continue
+        try:
+            turnover = float(row.get('acml_tr_pbmn') or 0)
+            move = float(row.get('prdy_ctrt') or 0)
+        except (TypeError, ValueError):
+            continue
+        if turnover <= 0 or not math.isfinite(turnover) or not math.isfinite(move):
+            continue
+        quotes.append(dict(symbol=symbol, name=name, return_pct=round(move, 2),
+                           turnover=turnover, turnover_ratio=None, data_date=today,
+                           intraday=True, outside_basket=True))
+    quotes.sort(key=lambda quote: (-quote['turnover'], quote['symbol']))
+    return quotes[:limit]
+
+
+def turnover_quotes(market):
+    return list(INTRADAY_RANK_QUOTES.get(market, []))
+
+
 def korean_intraday_leaders(market, app_key, app_secret):
     base = "https://openapi.koreainvestment.com:9443"
     auth = requests.post(base + "/oauth2/tokenP", timeout=8, json={
@@ -1466,6 +1511,7 @@ def korean_intraday_leaders(market, app_key, app_secret):
     if body.get("rt_cd") != "0" or not isinstance(body.get("output"), list):
         raise RuntimeError("KIS 장중 거래대금 순위 응답 오류")
     ranked = select_intraday_leaders(body["output"], limit=30)
+    INTRADAY_RANK_QUOTES[market] = turnover_quote_rows(body["output"])
     dart_key = os.getenv("DART_API_KEY", "").strip()
     catalysts = []
     if dart_key:
@@ -2354,7 +2400,8 @@ def main():
             "rows": sector_flow_snapshot("US" if overseas else "KR", datetime.now(local_zone)),
             # 대분류 ETF 순위만으로는 하락장에서 '1위 은행' 한 단어가 남는다.
             # 실제 구성종목으로 계산한 세부 테마를 같은 섹터 블록에 붙인다.
-            "themes": theme_sector_snapshot(market, datetime.now(local_zone))}
+            "themes": theme_sector_snapshot(market, datetime.now(local_zone),
+                                            extra_quotes=turnover_quotes(market))}
         if symbols:
             observed_market = market_evidence(market, previous_session, datetime.now(local_zone))
             evidence.extend(observed_market)
@@ -2430,7 +2477,8 @@ def main():
             def refresh_companies():
                 checked_at = datetime.now(local_zone)
                 sector_snapshot["rows"] = sector_flow_snapshot("US" if overseas else "KR", checked_at)
-                sector_snapshot["themes"] = theme_sector_snapshot(market, checked_at)
+                sector_snapshot["themes"] = theme_sector_snapshot(market, checked_at,
+                                                                 extra_quotes=turnover_quotes(market))
                 refreshed, events = company_context(market, symbols, checked_at)
                 events.extend(confirmed_contract_events(refreshed, market, checked_at))
                 return refreshed, events

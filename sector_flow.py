@@ -80,10 +80,12 @@ def fetch_intraday_sectors(sectors, benchmark, market, now):
 
 def format_sector_header(rows, market=None):
     available=[row for row in rows or [] if market is None or row.get('market')==market]
+    # 증권사식 순위(2026-11-26 지시): 등락률이 아니라 거래대금 유입 배수가 먼저다.
+    # 대분류 ETF 폴백은 세부 테마가 없을 때만 나오지만, 같은 기준을 쓴다.
     ranked=sorted(available,key=lambda row:(
+        -float(row.get('turnover_pace_ratio') or row.get('turnover_ratio') or 0),
         -float(row.get('market_excess_pct') or 0),
-        -float(row.get('return_pct') or 0),
-        -float(row.get('turnover_ratio') or 0)))
+        -float(row.get('return_pct') or 0)))
     selected=[]; names=set()
     for row in ranked:
         name=row.get('name')

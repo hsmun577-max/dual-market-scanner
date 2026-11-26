@@ -18,7 +18,7 @@ from candidate_selection import (INDEX_LABELS, INVERSE_BENCHMARKS, MARKET_INDEX_
                                  candidate_rejection_reason, index_symbol_for, is_inverse,
                                  rank_market_candidates)
 from sector_flow import fetch_intraday_sectors, format_sector_header
-from theme_sectors import theme_lines, theme_sector_snapshot
+from theme_sectors import outside_basket_quotes, theme_lines, theme_sector_snapshot
 from telegram_text import rest_note, split_telegram_text
 from research_asset import is_fund
 from company_forecast import build_company_forecast
@@ -1894,8 +1894,11 @@ def main():
         report["theme_sectors"] = []
         for market, zone in (("KR", "Asia/Seoul"), ("US", "America/New_York")):
             try:
+                # 고정 테마 바스켓 밖에서 거래대금이 몰린 종목(스캔 지표)을 동적 이슈 클러스터
+                # 후보로 넘긴다. 새 API를 부르지 않고, 테마 순위에는 끼지 않는다.
                 report["theme_sectors"].append(
-                    theme_sector_snapshot(market, checked.astimezone(ZoneInfo(zone))))
+                    theme_sector_snapshot(market, checked.astimezone(ZoneInfo(zone)),
+                                          extra_quotes=outside_basket_quotes(report["results"], market)))
             except Exception as exc:  # 테마 집계 실패가 전체 리포트를 막지 않는다
                 print(f"{market} theme sectors unavailable ({type(exc).__name__})")
         prepare_selected_analysis(report)

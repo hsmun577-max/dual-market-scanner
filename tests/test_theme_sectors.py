@@ -155,8 +155,9 @@ class BlockFormatTests(unittest.TestCase):
 
     def test_theme_line_carries_name_move_turnover_and_breadth(self):
         lines = format_theme_block(self.snapshot(), 'KR')
-        self.assertEqual(lines[0], '세부 테마 · 전일(11/23) 마감 기준 · KOSPI -3.31% 대비 상대강도')
-        self.assertEqual(lines[1], '1. 휴머노이드·로봇·액추에이터 +4.4% · 거래대금 2.9배 · 상승 5/8')
+        # 2026-11-26 지시: 거래대금(규모·유입 배수)이 등락률보다 먼저 온다.
+        self.assertEqual(lines[0], '세부 테마 · 전일(11/23) 마감 기준 · 거래대금 유입 순 · KOSPI -3.31% 대비 상대강도')
+        self.assertEqual(lines[1], '1. 휴머노이드·로봇·액추에이터 거래대금 2.9배 · +4.4% · 상승 5/8')
         self.assertEqual(lines[2], '   주도 휴림로봇 +30.0% · 로보티즈 +5.4%')
         self.assertEqual(lines[3], '   이슈: 로봇 공급 계약 체결')
 
