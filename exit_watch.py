@@ -29,6 +29,7 @@ import tempfile
 from zoneinfo import ZoneInfo
 
 from exit_policy import FUND_STOP_PCT, ExitTracker, exit_policy_for
+from theme_sectors import session_progress
 
 KST = ZoneInfo("Asia/Seoul")
 NY = ZoneInfo("America/New_York")
@@ -195,6 +196,9 @@ def evaluate_position(position, frame, now=None):
                       exit_at=decision.get("at"), exit_price=price,
                       exit_return_pct=round((price / position["entry"] - 1) * 100, 2),
                       sessions_held=held)
+        # 마지막 봉이 아직 끝나지 않은 오늘 봉이면 그 청산은 잠정이다(장중에 다시 오를 수 있다).
+        if last[0] == now.date() and session_progress(now, position.get("market")) is not None:
+            result.update(provisional=True, exit_at=now.isoformat())
     else:
         result.update(status="open")
     return result
@@ -228,7 +232,8 @@ def format_block(rows, at=None, limit=5):
             price = _price_text(row.get("exit_price"), market)
             gain = row.get("exit_return_pct")
             gain_text = f" ({gain:+.1f}%)" if isinstance(gain, (int, float)) else ""
-            lines.append(f"  {reason} · {when} {price} 청산{gain_text}")
+            state = " · 장중 잠정" if row.get("provisional") else ""
+            lines.append(f"  {reason} · {when} {price} 청산{gain_text}{state}")
         elif row.get("status") == "open":
             lines.append(f"  현재 {_price_text(row.get('current_price'), market)}"
                          f" ({row.get('current_return_pct'):+.1f}%) · "

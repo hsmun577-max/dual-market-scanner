@@ -122,6 +122,20 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'exited')
         self.assertEqual(result['exit_reason'], 'trailing_floor_breached')
 
+    def test_an_exit_on_todays_unfinished_bar_is_marked_provisional(self):
+        # 장중에 돌린 감시는 오늘 봉이 아직 끝나지 않았다. '청산'을 확정처럼 쓰지 않는다.
+        closes = [10000.0] * 20 + [10700.0]
+        during = datetime(2026, 11, 26, 11, 7, tzinfo=exit_watch.KST)
+        result = exit_watch.evaluate_position(position(), frame(closes), during)
+        self.assertEqual(result['status'], 'exited')
+        self.assertTrue(result.get('provisional'))
+        self.assertIn('장중 잠정', '\n'.join(exit_watch.format_block([result])))
+        # 마감 뒤(15:30 이후)에는 잠정이 아니다.
+        after = datetime(2026, 11, 26, 16, 5, tzinfo=exit_watch.KST)
+        closed = exit_watch.evaluate_position(position(), frame(closes), after)
+        self.assertFalse(closed.get('provisional'))
+        self.assertNotIn('장중 잠정', '\n'.join(exit_watch.format_block([closed])))
+
     def test_no_session_after_the_plan_is_not_a_loss(self):
         result = exit_watch.evaluate_position(position(), frame([10000.0] * 20, end='2026-11-25'), NOW)
         self.assertEqual(result['status'], 'awaiting_session')
