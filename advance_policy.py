@@ -5,6 +5,11 @@ from catalyst_policy import stamp
 import math
 from candidate_selection import instrument_rejection_reason,average_turnover,MIN_AVERAGE_TURNOVER,MIN_PRICE
 
+# 장전 사전 관찰(advance_candidate)의 점수 문턱. 매수 문턱(56/53/50)과 다른 축이다 —
+# 사전 관찰은 매수 계획이 아니므로 점수 하나로 매수 문턱을 낮추지 않는다. 이 값은
+# `entry_policy`의 점수 문턱과 함께 움직이지 않도록 상수로 두고, 호출부의 55 하드코딩을 뺐다.
+ADVANCE_SCORE_FLOOR = 55.0
+
 def eligible_for_advance_research(row,market):
     if instrument_rejection_reason(row['symbol'],row.get('name'),row.get('asset_type','')):return False
     try:

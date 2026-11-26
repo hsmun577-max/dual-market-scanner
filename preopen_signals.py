@@ -2,12 +2,13 @@
 from datetime import datetime,timedelta,timezone
 from collections import Counter
 import math
-from candidate_selection import (liquidity_rejection_reason,candidate_rejection_reason,
+from candidate_selection import (EVENT_SUPPORT_LIFTABLE_REASONS,
+                                 liquidity_rejection_reason,candidate_rejection_reason,
                                  market_headwind_reason,early_entry_block_reason,is_inverse,
                                  EARLY_ENTRY_LIFTABLE_REASONS,MIN_DEMAND_VOLUME_RATIO)
 import rebound_track
 import early_entry_track
-from advance_policy import advance_context,eligible_for_advance_research
+from advance_policy import ADVANCE_SCORE_FLOOR, advance_context,eligible_for_advance_research
 from catalyst_track import confirmed_catalyst,liftable_reason,stamp
 from entry_policy import entry_policy_snapshot, reward_check, score_floor
 from exit_policy import (DEFAULT_EXIT_POLICY, FUND_STOP_PCT, STOCK_STOP_PCT, exit_policy_for,
@@ -65,7 +66,7 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
         return 'entry_tick_missing',None
     from tradable_signal import floor_order_price
     order_type = dict(overseas=row.get('market') == 'US', fund=policy.stop_pct == FUND_STOP_PCT)
-    if forecast['bull_price'] / 1.06 < price:
+    if forecast['bull_price'] / (1 + policy.take_profit_pct) < price:
         return 'insufficient_catalyst_upside_room',None
     entry_limit = floor_order_price(price, **order_type)
     reward = reward_check(row, entry_limit, forecast['base_price'])
@@ -155,7 +156,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         reason=liquidity_rejection_reason(row,row['market'])
         values=row['indicators']; price=values['price']
         early=advance_context(company,values,at)
-        if early['eligible'] and score>=55 and eligible_for_advance_research(row,row['market']):
+        if early['eligible'] and score>=ADVANCE_SCORE_FLOOR and eligible_for_advance_research(row,row['market']):
             row['advance_signal']=dict(status='advance_candidate',confirmed=False,**early)
             advance.append(row['symbol'])
         graph=company.get('event_analysis',{}).get('economic_graph',{})
@@ -250,7 +251,14 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             # confirmed-disclosure track above may lift a headwind
             # (catalyst_track.LIFTABLE_REASONS).
             status=headwind
-        elif trend_reason and (trend_reason == 'market_headwind' or not event_support): status=trend_reason
+        elif trend_reason and (trend_reason == 'market_headwind' or not event_support
+                               or trend_reason not in EVENT_SUPPORT_LIFTABLE_REASONS):
+            # 규칙 기반 가설(event_support)이 차트를 부드럽게 할 수 있는 범위는 수요(거래량)
+            # 쪽으로 좁힌다. 추세 확인(`unconfirmed_uptrend`·`weak_relative_trend`)은 이 가설로
+            # 넘기지 않는다 — 그 둘을 넘기는 길은 단기 초입 트랙 하나이고, 그 트랙은 자기
+            # 안전 목록을 갖는다. 2026-11-26 점검이 찾은 구멍: event_support가 참이면 두 사유가
+            # 채택되지 않고 점수·손익비만 보게 됐다.
+            status=trend_reason
         elif score<score_floor(row): status='composite_score_below_policy'
         elif catalyst:
             status,plan=catalyst_plan(row,forecast,forecast.get('catalyst_context',{}),at,

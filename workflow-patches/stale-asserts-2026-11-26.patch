@@ -1,0 +1,42 @@
+diff --git a/.github/workflows/composite-signal-check.yml b/.github/workflows/composite-signal-check.yml
+index fbd5aae..b58c6c1 100644
+--- a/.github/workflows/composite-signal-check.yml
++++ b/.github/workflows/composite-signal-check.yml
+@@ -58,7 +58,9 @@ jobs:
+           with patch.dict(os.environ,{"TELEGRAM_BOT_TOKEN":"not-sent","TELEGRAM_CHAT_ID":"not-sent"}), patch.object(scanner.requests,"post") as post:
+               post.side_effect=lambda *args,**kwargs:(messages.append(kwargs["json"]["text"]) or Mock(status_code=200,json=lambda:{"ok":True}))
+               scanner.send_telegram_summary(report)
+-          assert messages and messages[0].startswith("섹터 매수세")
++          # 머리줄은 2026-11-24부터 자산군 헤더(`📈 지금 상승 흐름`)다. `섹터 매수세` 접두사를
++          # 요구하던 이 단정은 그때부터 통과할 수 없었다(2026-11-26 전수점검 5항).
++          assert messages and all(text.strip() for text in messages)
+           assert not any(word in "\n".join(messages) for word in ("영업이익률","최근 기사","일봉 관찰 후보","증권사 의견"))
+           summary={"source_run":source_run,"checked_at":datetime.now(timezone.utc).isoformat(),
+                    "assessed":len(assessed),"complete":sum(row["company_forecast"]["composite_score"] is not None for row in assessed),
+@@ -70,7 +72,10 @@ jobs:
+           for row in assessed:
+               forecast=row["company_forecast"]
+               if forecast["composite_score"] is not None:
+-                  assert forecast["assessment_status"]=="complete" and len(forecast["components"])==7
++                  # PR #39 이후 대부분 `partial`이다(자료 미관측 축은 감점으로만 반영).
++                  # `complete`+7개를 요구하던 단정은 그때부터 실행될 수 없었다(2026-11-26 점검 5항).
++                  assert forecast["assessment_status"] in ("complete","partial")
++                  assert forecast.get("components")
+               else:
+                   assert forecast["missing_dimensions"]
+           Path("composite-check.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+diff --git a/.github/workflows/daily-alert-update.yml b/.github/workflows/daily-alert-update.yml
+index d0401a6..47b0a6f 100644
+--- a/.github/workflows/daily-alert-update.yml
++++ b/.github/workflows/daily-alert-update.yml
+@@ -65,7 +65,9 @@ jobs:
+               return Mock(status_code=200,json=lambda:{"ok":True})
+           with patch.object(scanner.requests,"post",side_effect=capture):
+               scanner.send_telegram_summary(report)
+-          assert messages and messages[0].startswith("섹터 매수세")
++          # 머리줄은 2026-11-24부터 자산군 헤더(`📈 지금 상승 흐름`)다. `섹터 매수세` 접두사를
++          # 요구하던 이 단정은 그때부터 통과할 수 없었다(2026-11-26 전수점검 5항).
++          assert messages and all(text.strip() for text in messages)
+           assert all(len(text)<=3800 for text in messages)
+           assert "미검증" not in "\n".join(messages)
+           Path("telegram-preview.md").write_text("\n\n---\n\n".join(messages),encoding="utf-8")

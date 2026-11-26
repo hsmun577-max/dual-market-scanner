@@ -65,7 +65,10 @@ class ShortPlanTests(unittest.TestCase):
         self.assertIn("종합 65.2", lines[0])
         self.assertTrue(lines[1].strip().startswith("호재:"))
         self.assertIn("매수 732,000원~778,000원", lines[2])
-        self.assertIn("목표 960,000원", lines[2])
+        # 목표는 매도 규칙(+6% · 5거래일)이다. 예측 상승 시나리오(bull)는 참고로만 붙는다
+        # (2026-11-26: `목표 1,045,793원(+38.5%)`은 5거래일 목표로 읽힐 수 없었다).
+        self.assertIn("목표 +6%(5거래일)", lines[2])
+        self.assertIn("강세 참고 960,000원", lines[2])
         self.assertIn("손절 −3%", lines[2])
         self.assertIn("(11/24 종가)", lines[2])
 

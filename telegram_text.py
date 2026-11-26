@@ -9,6 +9,19 @@ them, and only a block longer than the whole limit is broken line by line.
 """
 
 
+def rest_note(total, shown, label="건"):
+    """'외 2건' — 잘린 목록이 조용히 사라지지 않게 알린다.
+
+    2026-11-26 07:50 발송본은 `confirmed[:5]`로 상위 5건만 싣고 6번째(SK텔레콤)를
+    아무 말 없이 버렸다. 화면에 없는 종목을 화면에 있는 것처럼 읽게 두지 않는다.
+    """
+    try:
+        missing = int(total or 0) - int(shown or 0)
+    except (TypeError, ValueError):
+        return ""
+    return f"외 {missing}{label}" if missing > 0 else ""
+
+
 def _blocks(text):
     block = []
     for line in text.splitlines(keepends=True):

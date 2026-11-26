@@ -30,13 +30,14 @@ from event_impact_analysis import article_text, world_events, analyze_events, co
 from candidate_selection import (INVERSE_BENCHMARKS, instrument_rejection_reason, is_inverse,
                                  market_headwind_reason, meets_price_floor, rank_market_candidates)
 from theme_sectors import sector_section, theme_sector_snapshot
-from telegram_text import split_telegram_text
+from telegram_text import rest_note, split_telegram_text
 from exit_policy import DEFAULT_EXIT_POLICY, classify_asset, exit_policy_for
 from tradable_signal import floor_order_price
 from provider_retry import call as provider_call, isolate_yfinance_cache, transient
-from scanner import (BENCHMARKS, KR_SYMBOL_NAMES, US_SYMBOL_NAMES, attach_inverse_regime,
-                     calculate_indicators, classify_signal, clean_prices, completed_daily_prices,
-                     last_completed_session, sector_flow_snapshot, yf_download)
+from scanner import (KR_SYMBOL_NAMES, MARKET_INDEX_SYMBOLS, US_SYMBOL_NAMES,
+                     attach_inverse_regime, calculate_indicators, classify_signal, clean_prices,
+                     completed_daily_prices, index_symbol_for, last_completed_session,
+                     sector_flow_snapshot, yf_download)
 
 
 # Common shares from the current watchlist. NXT subscription acceptance is checked per session.
@@ -281,6 +282,7 @@ def market_evidence(market, previous_session, available_at):
         supportive = []
         snapshot = {}
         lagged = {}
+        per_index = {}
         for ticker in tickers:
             if ticker not in data.columns.get_level_values(0):
                 continue
@@ -298,7 +300,10 @@ def market_evidence(market, previous_session, available_at):
                 continue
             if lag:
                 lagged[ticker] = lag
-            supportive.append(bool(closes.iloc[-1] > closes.iloc[-20:].mean()))
+            above = bool(closes.iloc[-1] > closes.iloc[-20:].mean())
+            per_index[ticker] = {"above_ma20": above, "index_ma20": float(closes.iloc[-20:].mean()),
+                                 "index_date": day.isoformat(), "lag_sessions": lag}
+            supportive.append(above)
     except Exception as exc:
         print(f"{market} market context unavailable ({type(exc).__name__})")
         return []
@@ -313,7 +318,7 @@ def market_evidence(market, previous_session, available_at):
     state = "supportive" if sum(supportive) > len(local) / 2 else "neutral"
     return [{"kind": "market", "market": market, "symbol": "*",
              "available_at": available_at.isoformat(), "assessment": state,
-             "snapshot": snapshot}]
+             "snapshot": snapshot, "indices": per_index}]
 
 
 # 종목 뉴스 수집 창은 촉매 판정 창(`catalyst_track`, 72시간)보다 좁으면 안 된다. 24시간으로
@@ -1134,14 +1139,15 @@ def company_context(market, symbols, now):
         print(f"{market} DART_API_KEY missing; domestic disclosures unavailable")
 
     history_prices = None
-    benchmark_symbol = BENCHMARKS["US" if overseas else "KR"]
+    # 국내는 코스피·코스닥을 모두 받아 종목이 상장된 시장의 지수로 점수를 매긴다.
+    benchmark_symbols = MARKET_INDEX_SYMBOLS["US" if overseas else "KR"]
     mapped_tickers = {symbol: (symbol[4:] if overseas else symbol + (
         ".KQ" if symbol + ".KQ" in KR_SYMBOL_NAMES else ".KS")) for symbol in symbols}
     isolate_yfinance_cache()
     inverse_benchmarks = {INVERSE_BENCHMARKS[ticker] for ticker in mapped_tickers.values()
                           if ticker in INVERSE_BENCHMARKS}
     history_prices = download_company_history(
-        [*mapped_tickers.values(), benchmark_symbol, *sorted(inverse_benchmarks)], market)
+        [*mapped_tickers.values(), *benchmark_symbols, *sorted(inverse_benchmarks)], market)
     market_code = 'US' if overseas else 'KR'
     cutoff = last_completed_session(market_code, now)
 
@@ -1225,7 +1231,7 @@ def company_context(market, symbols, now):
         if history_prices is not None:
             try:
                 data = history_prices[mapped_tickers[symbol]]
-                benchmark = history_prices[benchmark_symbol]
+                benchmark = history_prices[index_symbol_for(mapped_tickers[symbol], market_code)]
                 data = clean_prices(completed_daily_prices(data, market_code, through=cutoff))
                 benchmark = clean_prices(completed_daily_prices(benchmark, market_code, through=cutoff))
                 indicators = calculate_indicators(data, benchmark)
@@ -1522,17 +1528,23 @@ def daily_candidates(previous_session, overseas=False):
         print("직전 거래일 전 종목 스캔 자료 없음: 기존 감시 목록 사용")
     tickers = list(US_SYMBOLS) if overseas else [f"{symbol}.KS" for symbol in SYMBOLS]
     market = "US" if overseas else "KR"
-    benchmark_symbol = BENCHMARKS[market]
+    # 국내는 코스피·코스닥 지수를 모두 받아 종목이 상장된 시장의 지수로 판정한다. 코스피 하나로
+    # 코스닥 종목을 재면 그 종목이 속하지 않은 시장의 국면이 붙는다(2026-11-26 전수점검).
+    benchmark_symbols = MARKET_INDEX_SYMBOLS[market]
     prices = yf_download(
-        list(dict.fromkeys([*tickers, benchmark_symbol])), period="1y", interval="1d", auto_adjust=True,
-        group_by="ticker", progress=False, threads=6, timeout=15,
+        list(dict.fromkeys([*tickers, *benchmark_symbols])), period="1y", interval="1d",
+        auto_adjust=True, group_by="ticker", progress=False, threads=6, timeout=15,
     )
     if prices is None:
         print("시장 비교 자료 미확보: 일봉 후보 선정 보류")
         return []
-    try:
-        benchmark = clean_prices(prices[benchmark_symbol].loc[prices[benchmark_symbol].index.date <= previous_session])
-    except (KeyError, ValueError):
+    benchmarks = {}
+    for name in benchmark_symbols:
+        try:
+            benchmarks[name] = clean_prices(prices[name].loc[prices[name].index.date <= previous_session])
+        except (KeyError, ValueError):
+            continue
+    if not benchmarks:
         print("시장 비교 자료 미확보: 일봉 후보 선정 보류")
         return []
     candidates = []
@@ -1541,6 +1553,10 @@ def daily_candidates(previous_session, overseas=False):
             history = prices[ticker]
             history = clean_prices(history.loc[history.index.date <= previous_session])
             if history.index[-1].date() != previous_session:
+                continue
+            benchmark = benchmarks.get(index_symbol_for(ticker, market))
+            if benchmark is None:
+                print(f"{index_symbol_for(ticker, market)} 지수 미확보: 국면 미확인으로 후보에서 제외 {ticker}")
                 continue
             indicators = calculate_indicators(history, benchmark)
             signal = classify_signal(indicators)
@@ -2137,14 +2153,19 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
         limit = floor_order_price(entry_limit, overseas=overseas,
                                   fund=intraday_asset_class(symbol, overseas, companies.get(symbol)) == 'fund')
         entry_label = "$" + f"{limit:,.2f}" if overseas else f"{limit:,.0f}원"
-        base, upside = forecast["base_price"], forecast["bull_price"]
-        target_label = "$" + f"{base:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{base:,.0f} / {upside:,.0f}원"
-        # The alert names the stop of this instrument, not of the default policy.
+        upside = forecast["bull_price"]
+        # 목표는 매도 규칙(+6% · 5거래일)이다. 예측 시나리오(bull)는 참고로만 붙는다
+        # (장전 조건부 계획과 같은 기준 — 2026-11-26 전수점검 2항).
         policy = exit_policy_for(dict(symbol=symbol, name=name,
                                       company_analysis=companies.get(symbol)))
+        scenario = (f" · 강세 참고 ${upside:,.2f}" if overseas else f" · 강세 참고 {upside:,.0f}원") \
+            if isinstance(upside, (int, float)) and not isinstance(upside, bool) else ""
         lines.extend(["", f"• {name} ({ticker}) · 종합 {forecast['composite_score']:.1f}",
-                      f"  매수 상한 {entry_label} · 목표 {target_label} · 손절 −{policy.stop_pct:.0%}",
+                      f"  매수 상한 {entry_label} · 목표 +{policy.take_profit_pct:.0%} · 손절 −{policy.stop_pct:.0%}"
+                      + scenario,
                       f"  {(closes+timedelta(seconds=30)):%H:%M:%S}까지 재확인 · 5거래일 보유"])
+    if len(confirmed) > 5:
+        lines.append(f"   {rest_note(len(confirmed), 5)} (분석자료 참고)")
     if urgent:
         import urgent_issues
         block = urgent_issues.format_urgent_block(urgent)
