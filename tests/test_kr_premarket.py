@@ -130,7 +130,7 @@ class SelectionTests(unittest.TestCase):
         items = select_signals({'000660': quote(-5.6)}, {}, MORNING)
         self.assertEqual(items[0]['move_pct'], -5.6)
 
-    def test_news_alone_is_a_signal_with_the_move_marked_as_unknown(self):
+    def test_news_alone_is_a_signal_without_a_move_label(self):
         items = select_signals({'012450': quote(1.2)},
                                {'012450': [article('한화에어로스페이스, 유럽과 2조원 규모 공급 계약 체결')]},
                                MORNING)
@@ -138,7 +138,8 @@ class SelectionTests(unittest.TestCase):
         self.assertIsNone(items[0]['move_pct'])
         self.assertEqual(items[0]['catalysts'], ['deal'])
         text = '\n'.join(format_block(items, 'nxt_premarket'))
-        self.assertIn('NXT 장전 ±5% 미만', text)
+        self.assertNotIn('±5%', text)
+        self.assertIn('(012450) · 촉매: 수주·M&A', text)
         self.assertIn('촉매: 수주·M&A', text)
 
     def test_old_news_is_ignored(self):

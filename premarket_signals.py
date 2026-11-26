@@ -323,18 +323,16 @@ def format_block(items):
     lines = [f'{HEADING} · {SUBTITLE}']
     for item in items:
         symbol = item.get('symbol') or ''
-        session = SESSION_LABELS.get(item.get('session'), '장전')
-        stamp = ''
-        if item.get('as_of'):
-            try:
-                stamp = ' (' + datetime.fromisoformat(item['as_of']).astimezone(NY).strftime('%H:%M ET') + ')'
-            except (ValueError, TypeError):
-                stamp = ''
+        parts = [f"• {item.get('name')} ({symbol})"]
         if item.get('move_pct') is not None:
-            move = f"{session} {item['move_pct']:+.1f}%{stamp}"
-        else:
-            move = f"{session} ±{PREMARKET_MOVE_PCT:.0f}% 미만"
-        parts = [f"• {item.get('name')} ({symbol}) · {move}"]
+            session = SESSION_LABELS.get(item.get('session'), '장전')
+            stamp = ''
+            if item.get('as_of'):
+                try:
+                    stamp = ' (' + datetime.fromisoformat(item['as_of']).astimezone(NY).strftime('%H:%M ET') + ')'
+                except (ValueError, TypeError):
+                    stamp = ''
+            parts.append(f"{session} {item['move_pct']:+.1f}%{stamp}")
         if item.get('catalyst_labels'):
             parts.append('촉매: ' + '·'.join(item['catalyst_labels']))
         lines.append(' · '.join(parts))

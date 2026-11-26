@@ -91,7 +91,7 @@ class SignalSelectionTests(unittest.TestCase):
                                now=NOW)
         self.assertEqual(items, [])
 
-    def test_news_alone_is_a_signal_with_the_move_marked_as_small(self):
+    def test_news_alone_is_a_signal_without_a_move_label(self):
         items = select_signals({'NVDA': quote(1.2)},
                                {'NVDA': [article('Trump tariff plan hits chipmakers; Nvidia shares steady')]},
                                now=NOW)
@@ -99,7 +99,8 @@ class SignalSelectionTests(unittest.TestCase):
         self.assertIsNone(items[0]['move_pct'])
         self.assertEqual(items[0]['catalysts'], ['policy'])
         text = '\n'.join(format_block(items))
-        self.assertIn('프리마켓 ±5% 미만', text)
+        self.assertNotIn('±5%', text)
+        self.assertIn('(NVDA) · 촉매: 정책·규제', text)
         self.assertIn('촉매: 정책·규제', text)
 
     def test_old_news_is_ignored(self):
