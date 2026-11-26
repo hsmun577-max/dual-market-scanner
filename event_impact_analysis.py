@@ -571,7 +571,7 @@ def korean_policy_events(now):
         for href,title in parser.rows:
             url=urljoin('https://www.korea.kr/',href)
             if any(path in url for path in ('policyNewsView.do?','pressReleaseView.do?','presidentView.do?','policyBriefingView.do?','/www/brd/m_4080/view.do')) and allowed_url(url):
-                if re.search(r'FTA|정상|관세|금리|수출|콘텐츠|제재|협상|에너지|반도체|문화교류|문화 교류|한한령|공연|음악|게임|외교장관|일정|예정|사전',title,re.I):
+                if re.search(r'FTA|정상|관세|금리|수출|콘텐츠|제재|협상|에너지|반도체|문화교류|문화 교류|한한령|공연|음악|게임|외교장관|일정|예정|사전|화장품|K뷰티|K-뷰티',title,re.I):
                     links.append((canonical_article_url(url),title))
         unique={}
         for url,title in links:unique.setdefault(url,title)

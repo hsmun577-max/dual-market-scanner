@@ -136,7 +136,7 @@ class SharedMembershipTests(unittest.TestCase):
 
     def test_the_korean_basket_shares_the_board_and_ai_server_members(self):
         membership = theme_membership('KR')
-        self.assertEqual(membership['009150.KS'], ('FC-BGA·PCB·기판', 'AI서버·데이터센터 부품'))
+        self.assertTrue({'FC-BGA·PCB·기판', 'AI서버·데이터센터 부품'} <= set(membership['009150.KS']))
         self.assertIn('HBM·메모리 반도체', membership['042700.KS'])
         self.assertIn('AI서버·데이터센터 부품', membership['042700.KS'])
 
@@ -155,10 +155,10 @@ class SharedMembershipTests(unittest.TestCase):
 
 class DynamicClusterTests(unittest.TestCase):
     def quotes(self):
-        # 바스켓에 없는 종목(현대차·기아)과 바스켓 종목(안랩)이 같은 재료로 움직인다.
+        # 바스켓에 없는 종목(CJ·DL)과 바스켓 종목(안랩)이 같은 재료로 움직인다.
         return {
-            '005380.KS': dict(name='현대차', return_pct=4.0, turnover=900.0, data_date='2026-11-25'),
-            '000270.KS': dict(name='기아', return_pct=2.0, turnover=700.0, data_date='2026-11-25'),
+            '001040.KS': dict(name='CJ', return_pct=4.0, turnover=900.0, data_date='2026-11-25'),
+            '000210.KS': dict(name='DL', return_pct=2.0, turnover=700.0, data_date='2026-11-25'),
             '053800.KQ': dict(name='안랩', return_pct=9.0, turnover=300.0, data_date='2026-11-25'),
         }
 
@@ -168,14 +168,14 @@ class DynamicClusterTests(unittest.TestCase):
         return handler
 
     def test_two_stocks_with_the_same_headline_keyword_become_one_cluster(self):
-        headlines = {'005380.KS': '현대차, 전고체 배터리 시제품 공개',
-                     '000270.KS': '기아 전기차 배터리 공급 계약',
+        headlines = {'001040.KS': 'CJ, 전고체 배터리 시제품 공개',
+                     '000210.KS': 'DL 전기차 배터리 공급 계약',
                      '053800.KQ': '안랩 랜섬웨어 대응 솔루션 출시'}
         clusters = dynamic_theme_clusters(self.quotes(), 'KR', NOW, self.fetch(headlines))
         # 보안 키워드는 안랩 한 종목뿐이라 클러스터가 아니다(최소 2종목).
         self.assertEqual([cluster['label'] for cluster in clusters], ['2차전지·전고체'])
         battery = clusters[0]
-        self.assertEqual(battery['symbols'], ['000270.KS', '005380.KS'])
+        self.assertEqual(battery['symbols'], ['000210.KS', '001040.KS'])
         self.assertEqual(battery['outside_basket'], 2)
         self.assertEqual(battery['themes'], [])
         self.assertAlmostEqual(battery['return_pct'], 3.0)
@@ -183,7 +183,7 @@ class DynamicClusterTests(unittest.TestCase):
 
     def test_one_stock_with_a_keyword_is_not_a_cluster(self):
         clusters = dynamic_theme_clusters(self.quotes(), 'KR', NOW,
-                                          self.fetch({'005380.KS': '현대차 수소차 공개'}))
+                                          self.fetch({'001040.KS': 'CJ 수소차 공개'}))
         self.assertEqual(clusters, [])
 
     def test_the_same_input_gives_the_same_clusters(self):
@@ -206,7 +206,7 @@ class DynamicClusterTests(unittest.TestCase):
     def test_headline_labels_read_only_the_listed_words(self):
         self.assertEqual(headline_labels('삼성전기, FC-BGA 기판 증설'), ['기판·FC-BGA'])
         self.assertEqual(headline_labels('SK하이닉스 hbm4 양산'), ['HBM·메모리'])
-        self.assertEqual(headline_labels('현대차 수소차 공개'), [])
+        self.assertEqual(headline_labels('CJ 수소차 공개'), [])
         self.assertEqual(headline_labels(None), [])
 
 
@@ -220,12 +220,12 @@ class DynamicClusterMessageTests(unittest.TestCase):
                     dynamic_clusters=clusters)
 
     def test_a_cluster_that_spans_the_basket_gets_one_line(self):
-        cluster = dict(label='AI서버·부품', symbols=['005380.KS', '007660.KS'],
-                       members=[dict(symbol='005380.KS', name='현대차', return_pct=5.0),
+        cluster = dict(label='AI서버·부품', symbols=['001040.KS', '007660.KS'],
+                       members=[dict(symbol='001040.KS', name='CJ', return_pct=5.0),
                                 dict(symbol='007660.KS', name='이수페타시스', return_pct=7.0)],
                        turnover=2.6e12, outside_basket=1)
         lines = format_theme_block(self.snapshot([cluster]), 'KR')
-        self.assertEqual(lines[-1], '동적 이슈: AI서버·부품 — 현대차 +5.0% · 이수페타시스 +7.0% · 거래대금 26,000억')
+        self.assertEqual(lines[-1], '동적 이슈: AI서버·부품 — CJ +5.0% · 이수페타시스 +7.0% · 거래대금 26,000억')
 
     def test_a_cluster_inside_one_shown_theme_is_not_repeated(self):
         cluster = dict(label='보안', symbols=['053800.KQ', '150900.KQ'],
@@ -243,7 +243,7 @@ class OutsideBasketQuoteTests(unittest.TestCase):
             dict(base, symbol='005930.KS', name='삼성전자', indicators=dict(
                 price=70000.0, volume=100000.0, average_turnover_20d=5.6e9, return_1d=0.02,
                 data_date='2026-11-25')),
-            dict(base, symbol='005380.KS', name='현대차', indicators=dict(
+            dict(base, symbol='001040.KS', name='CJ', indicators=dict(
                 price=200000.0, volume=50000.0, average_turnover_20d=5.0e9, return_1d=-0.01,
                 data_date='2026-11-25')),
             dict(base, symbol='069500.KS', name='KODEX 200', asset_type='etf', indicators=dict(
@@ -255,7 +255,7 @@ class OutsideBasketQuoteTests(unittest.TestCase):
 
     def test_only_stocks_outside_the_basket_with_a_full_quote_are_kept(self):
         quotes = outside_basket_quotes(self.results(), 'KR')
-        self.assertEqual([quote['symbol'] for quote in quotes], ['005380.KS'])
+        self.assertEqual([quote['symbol'] for quote in quotes], ['001040.KS'])
         self.assertAlmostEqual(quotes[0]['turnover'], 1.0e10)
         self.assertAlmostEqual(quotes[0]['turnover_ratio'], 2.0)
         self.assertAlmostEqual(quotes[0]['return_pct'], -1.0)
@@ -268,7 +268,7 @@ class KisTurnoverQuoteTests(unittest.TestCase):
     def test_rank_rows_outside_the_basket_become_cluster_quotes(self):
         from kis_intraday import INTRADAY_RANK_QUOTES, turnover_quote_rows, turnover_quotes
         rows = [
-            dict(mksc_shrn_iscd='005380', hts_kor_isnm='현대차',
+            dict(mksc_shrn_iscd='001040', hts_kor_isnm='CJ',
                  acml_tr_pbmn='900000000000', prdy_ctrt='4.5'),
             # 테마 바스켓 종목: 테마 지표로 이미 들어가므로 뺐다.
             dict(mksc_shrn_iscd='005930', hts_kor_isnm='삼성전자',
@@ -277,11 +277,11 @@ class KisTurnoverQuoteTests(unittest.TestCase):
             dict(mksc_shrn_iscd='122630', hts_kor_isnm='KODEX 레버리지',
                  acml_tr_pbmn='800000000000', prdy_ctrt='0.5'),
             # 거래대금이 없는 행은 버린다.
-            dict(mksc_shrn_iscd='000270', hts_kor_isnm='기아',
+            dict(mksc_shrn_iscd='000210', hts_kor_isnm='DL',
                  acml_tr_pbmn='0', prdy_ctrt='1.0'),
         ]
         quotes = turnover_quote_rows(rows, 'KRX')
-        self.assertEqual([quote['symbol'] for quote in quotes], ['005380'])
+        self.assertEqual([quote['symbol'] for quote in quotes], ['001040'])
         self.assertAlmostEqual(quotes[0]['return_pct'], 4.5)
         self.assertAlmostEqual(quotes[0]['turnover'], 9.0e11)
         self.assertTrue(quotes[0]['outside_basket'])
@@ -303,11 +303,11 @@ class SnapshotClusterIntegrationTests(unittest.TestCase):
         rendered = {robots[0][0]: self.frame([50000.0] * 21 + [62000.0]),
                     robots[1][0]: self.frame([50000.0] * 21 + [51000.0]),
                     '^KS11': self.frame([2500.0] * 21 + [2475.0])}
-        headlines = {'005380.KS': '현대차 로봇 라인 증설',
-                     '000270.KS': '기아 로봇 부품 공급'}
-        extra = [dict(symbol='005380.KS', name='현대차', return_pct=3.0, turnover=900e8,
+        headlines = {'001040.KS': 'CJ 로봇 라인 증설',
+                     '000210.KS': 'DL 로봇 부품 공급'}
+        extra = [dict(symbol='001040.KS', name='CJ', return_pct=3.0, turnover=900e8,
                       turnover_ratio=2.0, data_date='2026-11-25', outside_basket=True),
-                 dict(symbol='000270.KS', name='기아', return_pct=1.0, turnover=700e8,
+                 dict(symbol='000210.KS', name='DL', return_pct=1.0, turnover=700e8,
                       turnover_ratio=1.5, data_date='2026-11-25', outside_basket=True)]
         snapshot = theme_sector_snapshot(
             'KR', datetime(2026, 11, 26, 6, 30), mode='previous',

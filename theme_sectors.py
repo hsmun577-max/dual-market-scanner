@@ -39,10 +39,20 @@ from datetime import datetime, time, timedelta, timezone
 from html import unescape
 
 import price_sanity
+from theme_universe_additions import KR_ADDITIONS, US_ADDITIONS
 
 # 테마 구성종목은 상장 종목코드(한국)와 티커(미국)로 고정한다. 이름은 종목 뉴스 수집기의
 # 엔티티 매칭에 그대로 쓰이므로 상장명과 같아야 한다.
+BEAUTY_BRANDS = (
+    ("278470.KS", "에이피알"), ("090430.KS", "아모레퍼시픽"), ("051900.KS", "LG생활건강"),
+    ("123690.KS", "한국화장품"), ("214420.KS", "토니모리"), ("078520.KS", "에이블씨엔씨"),
+)
+BEAUTY_SUPPLY_CHAIN = (
+    ("192820.KS", "코스맥스"), ("161890.KS", "한국콜마"), ("241710.KQ", "코스메카코리아"),
+    ("003350.KS", "한국화장품제조"), ("257720.KQ", "실리콘투"),
+)
 KR_THEMES = (
+    ("화장품·K뷰티", BEAUTY_BRANDS + BEAUTY_SUPPLY_CHAIN),
     ("휴머노이드·로봇·액추에이터", (
         ("277810.KQ", "레인보우로보틱스"), ("108490.KQ", "로보티즈"), ("090710.KQ", "휴림로봇"),
         ("058610.KQ", "에스피지"), ("389500.KQ", "에스비비테크"), ("437730.KQ", "삼현"),
@@ -187,7 +197,7 @@ US_THEMES = (
     )),
     ("엔터·미디어", (
         ("NFLX", "넷플릭스", "Netflix"), ("DIS", "디즈니", "Disney"), ("SPOT", "스포티파이", "Spotify"),
-        ("RBLX", "로블록스", "Roblox"), ("PARA", "파라마운트", "Paramount"),
+        ("RBLX", "로블록스", "Roblox"), ("CMCSA", "컴캐스트", "Comcast"),
     )),
     ("금융·은행", (
         ("JPM", "JP모건", "JPMorgan"), ("BAC", "뱅크오브아메리카", "Bank of America"),
@@ -202,6 +212,8 @@ US_THEMES = (
     )),
 )
 
+KR_THEMES += KR_ADDITIONS
+US_THEMES += US_ADDITIONS
 THEME_UNIVERSE = {"KR": KR_THEMES, "US": US_THEMES}
 MARKET_LABELS = {"KR": "KOSPI", "US": "S&P500"}
 BENCHMARK_SYMBOLS = {"KR": "^KS11", "US": "SPY"}
@@ -244,6 +256,22 @@ ISSUE_KEYWORDS = (
     ("전력·변압기", ("변압기", "전력망", "전력기기", "송전")),
     ("원전·SMR", ("원전", "SMR", "소형모듈원자로")),
     ("방산·수출", ("방산", "방위산업", "국방")),
+    ("화장품·K뷰티", ("화장품", "K뷰티", "K-뷰티", "cosmetics")),
+    ("자율주행·전장", ("자율주행", "라이다", "ADAS")),
+    ("통신장비", ("통신장비", "광트랜시버", "5G", "6G")),
+    ("태양광·풍력", ("태양광", "해상풍력", "풍력발전")),
+    ("수소·연료전지", ("수소 생산", "수소연료전지", "수전해")),
+    ("유리기판", ("유리기판", "글라스기판", "glass substrate")),
+    ("게임", ("게임 출시", "신작 게임", "게임 판호")),
+    ("K푸드", ("K푸드", "K-푸드", "불닭볶음면")),
+    ("리츠", ("리츠", "REIT")),
+    ("금속·희토류", ("희토류", "구리 가격", "광산 개발")),
+    ("의료기기", ("의료기기", "미용장비")),
+    ("ESS·전력저장", ("에너지저장장치", "전력저장", "ESS")),
+    ("파운드리·시스템반도체", ("파운드리", "시스템반도체", "팹리스")),
+    ("우주·위성", ("위성 통신", "위성 발사", "우주발사체")),
+    ("디스플레이·OLED", ("OLED", "마이크로LED", "폴더블 디스플레이")),
+    ("전선·전력망", ("초고압 케이블", "송전망", "HVDC")),
     ("바이오·임상", ("임상", "FDA", "비만", "ADC", "품목허가")),
     ("보안", ("보안", "해킹", "랜섬웨어")),
     ("조선·LNG", ("조선", "LNG선", "LNG 운반")),
@@ -658,7 +686,11 @@ def headline_labels(headline):
         return []
     labels = []
     for label, words in ISSUE_KEYWORDS:
-        if any(word.casefold() in text for word in words):
+        if any(
+            re.search(r"(?<![a-z0-9])" + re.escape(word.casefold()) + r"(?![a-z0-9])", text)
+            if word in {"ESS", "REIT", "5G", "6G"} else word.casefold() in text
+            for word in words
+        ):
             labels.append(label)
     return labels
 
@@ -733,10 +765,21 @@ def dynamic_theme_clusters(metrics, market, now, headlines=None, budget=None,
 def _download(symbols, market, downloader):
     if downloader is not None:
         return downloader(symbols, market)
+    import pandas as pd
     from scanner import yf_download
-    return yf_download(symbols, period="2mo", interval="1d", prepost=market == "US",
-                       auto_adjust=False, group_by="ticker", progress=False, threads=8,
-                       timeout=12, multi_level_index=True)
+
+    batches = []
+    for start in range(0, len(symbols), 75):
+        try:
+            frame = yf_download(symbols[start:start + 75], period="2mo", interval="1d",
+                                prepost=market == "US", auto_adjust=False, group_by="ticker",
+                                progress=False, threads=8, timeout=12, multi_level_index=True)
+        except Exception as exc:
+            print(f"{market} theme price batch failed ({type(exc).__name__})", flush=True)
+            continue
+        if frame is not None and not frame.empty:
+            batches.append(frame)
+    return pd.concat(batches, axis=1) if batches else None
 
 
 def session_progress(now, market):
@@ -777,7 +820,7 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
                     benchmark_date=None, data_date=None, intraday=False, rows=[], quoted=0,
                     mode=mode or ("intraday" if live else "latest"),
                     members=len(set(symbols)), source="theme_member_daily_aggregate",
-                    excluded=[], unaligned=[], error=None, checked_at=now.isoformat(),
+                    excluded=[], missing_price_data=[], unaligned=[], error=None, checked_at=now.isoformat(),
                     dynamic_clusters=[], outside_quotes=0,
                     # 한 종목이 여러 테마에 속하는 공유 종목 수(중복 허용의 가시화).
                     shared_members=sum(1 for names in theme_membership(market).values()
@@ -789,6 +832,7 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
         prices = None
     if prices is None:
         snapshot["error"] = "시세 미확보"
+        snapshot["missing_price_data"] = sorted(set(symbols))
         return snapshot
     today = now.date()
     # 장전(mode='previous')은 오늘(아직 끝나지 않은 세션) 봉을 읽지 않는다.
@@ -810,6 +854,7 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
             print(f"{market} theme price error excluded: {symbol} ({exc.reason})", flush=True)
             continue
         except (ValueError, TypeError, KeyError):
+            snapshot["missing_price_data"].append(symbol)
             continue
         metrics[symbol] = metric
     # 구성종목이 공유하는 기준 세션(가장 많은 종목이 가진 최신 세션)을 정하고, 그 세션 봉이
