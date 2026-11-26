@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import price_sanity
 from candidate_selection import (MIN_AVERAGE_TURNOVER, MIN_PRICE, average_turnover,
-                                 instrument_rejection_reason)
+                                 instrument_rejection_reason, regime_above_ma20)
 from research_asset import is_fund
 
 HEADING = '🚨 긴급 이슈 참고 · 매수 신호 아님'
@@ -245,7 +245,8 @@ def _liquid(row, market):
 
 def _reason_codes(row, market, regime):
     codes = []
-    if ((regime or {}).get(market) or {}).get('above_ma20') is False:
+    # 국내는 종목이 상장된 시장의 지수(코스피/코스닥)로 판정한다.
+    if regime_above_ma20(regime, market, (row or {}).get('symbol')) is False:
         codes.append('market_headwind')
     for key in ('preopen_decision', 'selection_filter'):
         code = (row or {}).get(key)

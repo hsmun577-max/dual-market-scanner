@@ -168,13 +168,16 @@ def validate_entry(row,quote,at,session_open):
     if floor is None and ask<limit*.98:return reject('price_moved_requires_reanalysis')
     base=number(forecast.get('base_price'));bull=number(forecast.get('bull_price'))
     if base is None or bull is None or base<=ask or bull<base:return reject('invalid_price_targets')
+    # The stop follows the instrument the row is: −2% on a fund, −3% on a single stock.
+    policy=exit_policy_for(row)
     if plan.get('strategy') in ('event_catalyst','earnings_catalyst'):
         verified=(forecast.get('catalyst_context',{}).get('eligible') is True
                   if plan.get('strategy')=='event_catalyst'
                   else (plan.get('catalyst') or {}).get('eligible') is True)
         if not verified:return reject('catalyst_not_verified')
         if floor is None:return reject('entry_band_missing')
-        if bull/ask-1<.06:return reject('insufficient_catalyst_upside_room')
+        # 촉매 계획도 매도 규칙의 +6%를 남겨야 한다(1.06 하드코딩을 정책 상수로).
+        if bull/ask-1 < policy.take_profit_pct:return reject('insufficient_catalyst_upside_room')
         if plan.get('strategy')=='earnings_catalyst':
             # A disclosed catalyst is not an entry. If the stock trades under its open or
             # same-time volume has not expanded, the market is selling the news.
@@ -185,8 +188,6 @@ def validate_entry(row,quote,at,session_open):
                     volume_ratio=quote.get('volume_ratio'),catalyst=plan.get('catalyst'))
     reward = reward_check(row, ask, base, bid)
     if not reward['allowed']:return reject('insufficient_expected_reward')
-    # The stop follows the instrument the row is: −2% on a fund, −3% on a single stock.
-    policy=exit_policy_for(row)
     return dict(result,trade_ready=True,reason='entry_conditions_met',score=score,
         entry_requirements=dict(min_score=required, **reward),
         reference_price=plan.get('reference_price'),reference_date=plan.get('reference_date'),
@@ -231,7 +232,9 @@ def plan_line(plan):
 
     The short form the owner asked for on 2026-11-25: the name, what the news was, and
     the price band with the target — no per-name sell-rule paragraph and no repeated
-    '매수 신호 아님' sentence, which the block's heading already says once.
+    '매수 신호 아님' sentence, which the block's heading already says once. The target is
+    the sell rule's +6% (5 sessions), never a forecast upside scenario: the 2026-11-26
+    alert printed `목표 1,045,793원 (+38.5%)` for a five-session plan.
     """
     code = str(plan.get('symbol') or '').split('.')[0]
     label = plan.get('label') or TRACK_LABELS.get(plan.get('strategy'), plan.get('strategy')) or '조건부'
@@ -256,8 +259,13 @@ def plan_line(plan):
     price_line = []
     if band:
         price_line.append(f"매수 {band[0]}")
-    if isinstance(target, (int, float)):
-        price_line.append(f"목표 {text(target)}")
+    take_profit = plan.get('take_profit_pct')
+    if isinstance(take_profit, (int, float)) and not isinstance(take_profit, bool):
+        price_line.append(f"목표 +{take_profit:.0%}(5거래일)")
+        if isinstance(target, (int, float)):
+            price_line.append(f"강세 참고 {text(target)}")
+    elif isinstance(target, (int, float)):
+        price_line.append(f"참고 {text(target)}")
     stop = plan.get('stop_pct')
     if isinstance(stop, (int, float)):
         price_line.append(f"손절 −{stop:.0%}")
@@ -267,7 +275,7 @@ def plan_line(plan):
 
 
 def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans=None,
-                            market_note=None):
+                            market_note=None,plan_total=None):
     ready=[row for row in signals if row.get('trade_ready') is True]
     # 알림 최상단: 지금 상승 흐름 · 시장 분위기 · (바뀌었으면) 흐름 변화.
     regime_lines=asset_regime.header_lines(regime)
@@ -299,6 +307,9 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans
                 *([f"  호재: {evidence['summary']}"] if evidence.get('summary') else []),
                 f"  매수 {row['entry_limit']:,.0f}원 · 목표 {target:,.0f}원 · 손절 −{row['stop_pct']:.0%}"
                 + (f" · {until}까지" if until else "")])
+        if len(ready) > 5:
+            from telegram_text import rest_note
+            lines.append(f"   {rest_note(len(ready), 5)} (분석자료 참고)")
         lines.append('')
         lines.append('※ 익절 +6%, 급등 시 트레일링 보유 · 실제 체결가 기준')
     elif any(row.get('reason')=='waiting_for_entry_price' for row in signals):
@@ -318,6 +329,12 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans
         shown = [plan for plan in (plans or [])][:5]
         lines.extend(['', *[plan_line(plan) for plan in shown]] if shown else
                      ['실시간 호가·가격 조건 미확인 또는 미충족'])
+        if len(plans or []) > 5:
+            from telegram_text import rest_note
+            lines.append(f"   {rest_note(len(plans or []), 5)} (분석자료 참고)")
+        elif isinstance(plan_total, int) and plan_total > len(shown):
+            from telegram_text import rest_note
+            lines.append(f"   {rest_note(plan_total, len(shown))} (분석자료 참고)")
     else:
         lines.extend([f'분석 결과 · {at:%m/%d %H:%M} KST','매수 조건 충족 종목 없음'])
     return '\n'.join(lines)

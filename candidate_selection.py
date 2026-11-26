@@ -58,6 +58,41 @@ def is_inverse(symbol, name="", asset_type=""):
             or bool(INVERSE_NAME.search(name or "")))
 
 
+# 국내 지수는 상장 시장별로 다르다. 코스닥 종목을 코스피 20일선으로 판정하면 그 종목이
+# 속하지 않은 시장의 국면이 붙고, 장전(코스피 하나)과 장중(kis_intraday는 두 지수를 모두
+# 봄)의 판정도 갈렸다(2026-11-26 전수점검 5항). 종목은 자기 시장의 지수로 판정한다.
+KR_INDEX_BY_SUFFIX = {".KS": "^KS11", ".KQ": "^KQ11"}
+MARKET_INDEX_SYMBOLS = {"KR": ("^KS11", "^KQ11"), "US": ("SPY",)}
+INDEX_LABELS = {"^KS11": "KOSPI", "^KQ11": "코스닥", "SPY": "S&P500(SPY)"}
+
+
+def index_symbol_for(symbol, market):
+    """그 종목이 상장된 시장의 기준지수(코스피 · 코스닥 · SPY)."""
+    if market != "KR":
+        return MARKET_INDEX_SYMBOLS["US"][0]
+    code = str(symbol or "").upper()
+    for suffix, index in KR_INDEX_BY_SUFFIX.items():
+        if code.endswith(suffix):
+            return index
+    # 접미사 없는 국내 표기(지수 ETF·직접 지정)는 코스피로 둔다.
+    return KR_INDEX_BY_SUFFIX[".KS"]
+
+
+def regime_above_ma20(regime, market, symbols=None):
+    """그 종목이 상장된 시장의 국면(지수 > 20일선). 모르는 값은 None.
+
+    `regime`은 스캔 보고서의 `market_regime`이다. 국내는 코스피·코스닥을 따로 남기므로
+    종목의 접미사로 자기 지수를 고른다.
+    """
+    data = (regime or {}).get(market) or {}
+    indices = data.get("indices") or {}
+    if indices and symbols:
+        item = indices.get(index_symbol_for(symbols, market)) or {}
+        if item.get("above_ma20") is not None:
+            return item["above_ma20"]
+    return data.get("above_ma20")
+
+
 def instrument_rejection_reason(symbol, name, asset_type=""):
     """Filter identifiable instruments with a different payoff or liquidity profile.
 
@@ -153,6 +188,15 @@ def candidate_rejection_reason(item, market):
 # a breakdown, an extended price, and the market regime. Those stay here, in one place, so
 # the two paths cannot drift apart.
 EARLY_ENTRY_LIFTABLE_REASONS = frozenset({"unconfirmed_uptrend", "weak_relative_trend"})
+
+# 규칙 기반 가설(`economic_graph`의 긍정 링크, `event_support`)이 차트 게이트에서 넘길 수 있는
+# 사유. 수요(거래량) 쪽 흔들림과 반등 캔들(`breakdown_or_rebound`, event_catalyst 트랙의 전제)만
+# 넘긴다. 추세 확인(`unconfirmed_uptrend`·`weak_relative_trend`)은 넘기지 않는다 — 그것을
+# 실제로 넘기는 길은 단기 초입 트랙 하나이고, 그 트랙은 자기 안전 목록
+# (`early_entry_block_reason`·`qualifier`)을 따로 갖는다. 2026-11-26 전수점검: `event_support`가
+# 참인 분석 42종목 중 20종목이 이 구멍에 해당해, 추세 미확인 상태도 점수·손익비만 보면 통과했다.
+EVENT_SUPPORT_LIFTABLE_REASONS = frozenset({"breakdown_or_rebound", "unconfirmed_demand",
+                                           "insufficient_demand_expansion"})
 
 
 def early_entry_block_reason(item, market):

@@ -111,15 +111,31 @@ class PreopenTests(unittest.TestCase):
         for field,value in [('composite_score',52),('base_price',10200)]:
             row=self.row();row['company_forecast'][field]=value
             self.assertEqual(evaluate_preopen(self.report(row),'2026-11-18',AT)['recommendations'],[])
-    def test_scoped_event_can_research_and_plan_before_ma60_turns_but_not_buy_overheated(self):
+    def test_scoped_event_cannot_lift_an_unconfirmed_trend_but_still_softens_demand(self):
+        # 2026-11-26 전수점검 4항: event_support(규칙 기반 가설)가 참이면
+        # unconfirmed_uptrend·weak_relative_trend 가 통째로 우회됐다. 추세 확인은 단기 초입
+        # 트랙의 몫이고, 이 가설이 부드럽게 할 수 있는 것은 수요(거래량) 쪽이다.
         row=self.row();row['indicators']['ma60']=11000
         self.assertEqual(evaluate_preopen(self.report(row),'2026-11-18',AT)['recommendations'],[])
         row['company_analysis']['event_analysis']['economic_graph']['expectation_links']=[
             dict(watch_bias='positive_policy_sympathy',source_url='https://www.korea.kr/test')]
-        self.assertEqual(evaluate_preopen(self.report(row),'2026-11-18',AT)['recommendations'],['352820.KS'])
-        row['indicators']['overheated']=True
         self.assertEqual(evaluate_preopen(self.report(row),'2026-11-18',AT)['recommendations'],[])
-        self.assertNotIn('preopen_signal',row)
+        self.assertEqual(row['preopen_decision'],'unconfirmed_uptrend')
+        # 수요 쪽 흔들림(1.2~1.8배)은 여전히 계획으로 넘어간다.
+        demand=self.row();demand['indicators']['volume_ratio']=1.5
+        demand['company_analysis']['event_analysis']['economic_graph']['expectation_links']=[
+            dict(watch_bias='positive_policy_sympathy',source_url='https://www.korea.kr/test')]
+        result=evaluate_preopen(self.report(demand),'2026-11-18',AT)
+        self.assertEqual(result['recommendations'],['352820.KS'])
+        # 과열은 어느 경로로도 사지 않는다.
+        demand['indicators']['overheated']=True
+        self.assertEqual(evaluate_preopen(self.report(demand),'2026-11-18',AT)['recommendations'],[])
+        self.assertNotIn('preopen_signal',demand)
+        weak=self.row();weak['indicators']['return_20d']=-.05
+        weak['company_analysis']['event_analysis']['economic_graph']['expectation_links']=[
+            dict(watch_bias='positive_policy_sympathy',source_url='https://www.korea.kr/test')]
+        self.assertEqual(evaluate_preopen(self.report(weak),'2026-11-18',AT)['recommendations'],[])
+        self.assertEqual(weak['preopen_decision'],'weak_relative_trend')
     def test_stock_score_floor_and_net_reward_are_separate(self):
         row = self.row()
         row['company_forecast']['composite_score'] = 56
@@ -206,10 +222,11 @@ class MarketHeadwindGateTests(unittest.TestCase):
         self.assertEqual(result['recommendations'],['352820.KS'])
         self.assertEqual(row['preopen_signal']['strategy'],'event_catalyst')
         # An unobserved regime is not a headwind: an archived report stays as it was.
+        # 다만 추세 미확인은 이 가설로 넘기지 않는다(2026-11-26 4항).
         row=self.row();row['indicators']['ma60']=11000
         row['indicators'].pop('market_above_ma20')
         result=evaluate_preopen(self.report([self.event_support(row)]),'2026-11-18',AT)
-        self.assertEqual(result['recommendations'],['352820.KS'])
-        self.assertEqual(row['preopen_decision'],'conditional_buy')
+        self.assertEqual(result['recommendations'],[])
+        self.assertEqual(row['preopen_decision'],'unconfirmed_uptrend')
 
 if __name__=='__main__':unittest.main()

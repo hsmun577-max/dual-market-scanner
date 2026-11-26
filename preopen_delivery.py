@@ -10,6 +10,28 @@ from delivery_policy import plan,delivery_status
 from json_utils import dump
 
 
+def attach_exit_watch(report, market, artifact_market=None):
+    """직전 세션 계획의 매도 감시 줄을 보고서에 붙인다.
+
+    계획이 나간 뒤 다음 세션들의 +6% · 트레일링 · 손절 · 5거래일 만기를 보는 자리다
+    (`exit_watch`). 이 실행은 계좌를 읽지 않으므로 블록이 '체결 미확인 · 계획 진입가 가정'을
+    밝힌다. 직전 계획은 그 실행의 산출물(`preopen-analysis.json`)에서 읽고, 받지 못하거나
+    시세가 없으면 이 블록만 빠지고 알림은 그대로 나간다.
+    """
+    try:
+        import exit_watch
+        prior=exit_watch.previous_analysis(artifact_market or market,limit=6)
+        lines,rows=exit_watch.watch(prior,market) if prior else ([],[])
+        if lines:
+            report['exit_watch_lines']=lines
+        print('EXIT_WATCH='+json.dumps(dict(lines=len(lines),positions=len(rows)),
+                                      ensure_ascii=False),flush=True)
+        return lines
+    except Exception as exc:
+        print('Exit watch unavailable: '+type(exc).__name__,flush=True)
+        return []
+
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('market',choices=['NXT','KRX','US_PRE','US'])
@@ -89,6 +111,9 @@ def main():
                 report['sector_header_override']=format_report(data).split('\n')
         except Exception as exc:
             print('Industry investor data unavailable: '+type(exc).__name__,flush=True)
+    # 보유·매도 감시: 직전 세션 계획의 진입가를 기준으로 +6% · 트레일링 · 손절 · 5거래일 만기를
+    # 본다.
+    attach_exit_watch(report,market,args.market)
     while datetime.now(timezone.utc)<target:
         time.sleep(min(20,max(0,(target-datetime.now(timezone.utc)).total_seconds())))
     allowed,reason=delivery_status(args.market,datetime.now(timezone.utc))

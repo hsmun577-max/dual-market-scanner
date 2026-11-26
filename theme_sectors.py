@@ -196,11 +196,87 @@ ISSUE_UNCONFIRMED = "이슈: 뉴스 미확인"
 _HEADLINE_CACHE = {}
 
 
-def member_metric(frame, today=None, market=None):
+def _session_stamps(index):
+    """일봉 인덱스의 세션 날짜(ISO 문자열) 목록. 타임존이 있어도 날짜만 본다."""
+    stamps = []
+    for stamp in index:
+        value = stamp.date() if hasattr(stamp, "date") else None
+        if value is not None:
+            stamps.append(value.isoformat())
+    return stamps
+
+
+def frame_sessions(frame):
+    """그 시세가 가진 세션 날짜 집합."""
+    if frame is None or getattr(frame, "empty", True):
+        return set()
+    try:
+        return set(_session_stamps(frame.index))
+    except (TypeError, ValueError, AttributeError):
+        return set()
+
+
+def benchmark_session_moves(frame):
+    """기준지수의 세션별 등락률 표(%).
+
+    테마 구성종목의 등락을 같은 날의 지수 등락과 견주려면 두 값이 **한 세션**에서 나와야 한다.
+    2026-11-26 발송본은 11/25 구성종목 등락에 11/24 지수 등락(+6.32%)을 붙여 상대강도와
+    `지수 대비 강세` 라벨을 다른 세션 기준으로 계산했다(Yahoo에 11/25 지수 봉이 없었다).
+    여기서 만든 표를 기준으로 구성종목을 같은 세션에 맞춰 읽는다.
+    """
+    if frame is None:
+        return {}
+    data = frame[["Close"]].replace([float("inf"), float("-inf")], float("nan")).dropna(subset=["Close"])
+    data = data.loc[~data.index.duplicated(keep="last")].sort_index()
+    close = data["Close"].astype(float)
+    close = close.loc[close > 0]
+    if len(close) < 2:
+        return {}
+    moves = {}
+    previous = None
+    for stamp, value in close.items():
+        day = stamp.date().isoformat() if hasattr(stamp, "date") else None
+        if day is None:
+            previous = value
+            continue
+        if previous is not None and previous > 0:
+            moves[day] = round((float(value) / float(previous) - 1) * 100, 4)
+        previous = value
+    return moves
+
+
+def last_common_session(frame, sessions):
+    """구성종목의 마지막 봉 중 지수도 가진 세션(교집합의 최신). 없으면 None."""
+    if not sessions:
+        return None
+    common = frame_sessions(frame) & set(sessions)
+    return max(common) if common else None
+
+
+def aligned_session(metrics):
+    """구성종목 지표가 공유하는 기준 세션: 가장 많은 종목이 가진 세션, 동률이면 최신.
+
+    한두 종목만 다른 날 봉을 가진 채로 테마 평균에 섞이면 등락률·상승비율·거래대금 배수가
+    서로 다른 세션의 값을 더하게 된다. 기준 세션이 다른 종목은 집계에서 빼고 기록에 남긴다.
+    """
+    counts = {}
+    for metric in (metrics or {}).values():
+        day = (metric or {}).get("data_date")
+        if day:
+            counts[day] = counts.get(day, 0) + 1
+    if not counts:
+        return None
+    return sorted(counts.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
+
+
+def member_metric(frame, today=None, market=None, session=None):
     """구성종목 하나의 마지막 봉 등락률·거래량 배수·거래대금 배수를 계산한다.
 
     마지막 봉이 `today`와 같은 날이면 장중 미완성 봉이며 `intraday=True`로 표시한다.
     값이 모자라면(기준 20일 미만) ValueError로 알리고 테마 집계에서 뺀다.
+
+    `session`을 주면 그 세션(포함)까지만 읽는다. 테마 스냅샷은 이 값으로 구성종목과
+    기준지수를 같은 세션에 맞춘다.
 
     등락이 가격제한을 넘거나 종가가 극저가면 `price_sanity.PriceError`로 알린다. `market`을
     주지 않으면 시장별 가격제한·최저가 검사 없이 150% 상한만 본다(시장을 모르는 호출부).
@@ -211,6 +287,9 @@ def member_metric(frame, today=None, market=None):
     if data.empty:
         raise ValueError("구성종목 종가 없음")
     data = data.loc[~data.index.duplicated(keep="last")].sort_index()
+    if session:
+        stamps = _session_stamps(data.index)
+        data = data.loc[[day <= session for day in stamps]]
     if len(data) < 22:
         raise ValueError("일봉 22개 미만")
     close = data["Close"].astype(float)
@@ -434,9 +513,9 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
     symbols = [member[0] for _, members in themes for member in members]
     benchmark = BENCHMARK_SYMBOLS[market]
     snapshot = dict(market=market, benchmark=benchmark, benchmark_return_pct=None,
-                    data_date=None, intraday=False, rows=[], quoted=0,
+                    benchmark_date=None, data_date=None, intraday=False, rows=[], quoted=0,
                     members=len(set(symbols)), source="theme_member_daily_aggregate",
-                    excluded=[], error=None, checked_at=now.isoformat())
+                    excluded=[], unaligned=[], error=None, checked_at=now.isoformat())
     try:
         prices = _download(list(dict.fromkeys([*symbols, benchmark])), market, downloader)
     except Exception as exc:  # 테마 집계 실패가 알림 자체를 막지 않는다
@@ -446,10 +525,14 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
         snapshot["error"] = "시세 미확보"
         return snapshot
     today = now.date()
+    # 기준지수의 세션별 등락을 먼저 만들고, 구성종목은 그 지수가 가진 세션까지 읽는다.
+    benchmark_moves = benchmark_session_moves(_frame(prices, benchmark))
     metrics = {}
     for symbol in dict.fromkeys(symbols):
+        frame = _frame(prices, symbol)
+        session = last_common_session(frame, benchmark_moves)
         try:
-            metric = member_metric(_frame(prices, symbol), today, market)
+            metric = member_metric(frame, today, market, session=session)
         except price_sanity.PriceError as exc:
             # 티커 혼동·액면병합·극저가: 테마 등락률·대표주·상승 비율에 넣지 않는다.
             snapshot["excluded"].append(dict(symbol=symbol, reason=exc.reason,
@@ -459,11 +542,19 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
         except (ValueError, TypeError, KeyError):
             continue
         metrics[symbol] = metric
+    # 구성종목과 기준지수가 같은 세션에서 읽히도록 기준 세션을 정하고, 그 세션 봉이 없는
+    # 종목은 테마 평균에서 뺀다(다른 세션 값을 섞으면 상대강도가 다시 어긋난다).
+    reference = aligned_session(metrics)
+    if reference:
+        aligned = {symbol: metric for symbol, metric in metrics.items()
+                   if metric.get("data_date") == reference}
+        snapshot["unaligned"] = [dict(symbol=symbol, data_date=metric.get("data_date"))
+                                 for symbol, metric in metrics.items()
+                                 if metric.get("data_date") != reference]
+        metrics = aligned
     snapshot["quoted"] = len(metrics)
-    try:
-        snapshot["benchmark_return_pct"] = member_metric(_frame(prices, benchmark), today, market)["return_pct"]
-    except (ValueError, TypeError, KeyError):
-        snapshot["benchmark_return_pct"] = None
+    snapshot["benchmark_date"] = reference if reference in benchmark_moves else None
+    snapshot["benchmark_return_pct"] = benchmark_moves.get(reference) if reference else None
     ranked = rank_theme_sectors(theme_rows(market, themes, metrics, snapshot["benchmark_return_pct"]), limit)
     if with_news and ranked:
         budget = [NEWS_LOOKUPS_PER_RUN]

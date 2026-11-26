@@ -102,11 +102,14 @@ def main():
             flat_open_entry_limit=plan.get('flat_open_entry_limit'),
             composite_score=(row.get('company_forecast') or {}).get('composite_score'),
             catalyst_summary=(plan.get('catalyst') or {}).get('summary'),
+            take_profit_pct=plan.get('take_profit_pct'),
+            bull_target=(row.get('company_forecast') or {}).get('bull_price'),
             hold_reason=reason_by_symbol.get(row['symbol']),
             live_quote=row.get('live_quote')))
     message=format_requested_report(sector_lines,entries,evaluation,sent_at,
                                     regime=asset_regime.cached_block(),plans=plans,
-                                    market_note=scanner.market_regime_note(report))
+                                    market_note=scanner.market_regime_note(report),
+                                    plan_total=len(recommendations))
     # 요청 장전 리포트에도 매수 후보와 분리된 '긴급 이슈 참고'를 붙인다.
     urgent={}
     try:
@@ -127,7 +130,8 @@ def main():
     if inflow:
         message='\n'.join([message,'','[수급 유입 우량주]',
             '외인·기관 순매수 확인 · 매수 후보 검토 대상 · 매수 신호 아님',
-            *[scanner.quality_watch_line(row) for row in inflow[:5]]])
+            *[scanner.quality_watch_line(row) for row in inflow[:5]],
+            *([f"   외 {len(inflow)-5}건"] if len(inflow)>5 else [])])
     # 요청 장전 리포트에도 국내 핵심 대표주의 NXT 장전 움직임·촉매·간밤 미국 연동을 붙인다.
     # 정규장 장중 요청에는 이미 지난 장전 창문이므로 싣지 않는다(kr_premarket.include_block).
     kr_premarket=dict(items=[])

@@ -14,11 +14,12 @@ import numpy as np
 import pandas as pd
 import requests
 import asset_regime
-from candidate_selection import (INVERSE_BENCHMARKS, candidate_rejection_reason,
-                                 is_inverse, rank_market_candidates)
+from candidate_selection import (INDEX_LABELS, INVERSE_BENCHMARKS, MARKET_INDEX_SYMBOLS,
+                                 candidate_rejection_reason, index_symbol_for, is_inverse,
+                                 rank_market_candidates)
 from sector_flow import fetch_intraday_sectors, format_sector_header
 from theme_sectors import theme_lines, theme_sector_snapshot
-from telegram_text import split_telegram_text
+from telegram_text import rest_note, split_telegram_text
 from research_asset import is_fund
 from company_forecast import build_company_forecast
 from delivery_policy import delivery_status
@@ -79,6 +80,18 @@ BENCHMARKS = {
     "KR": "^KS11",
     "US": "SPY"
 }
+
+# 국내 지수는 상장 시장별로 다르다(정의는 `candidate_selection`): 코스닥 종목을 코스피
+# 20일선으로 판정하면 그 종목이 속하지 않은 시장의 국면이 붙는다(2026-11-26 전수점검 5항).
+
+
+def index_frame(benchmarks, market, symbol=None):
+    """시장 대표 지수 시세. 국내는 지수별 시세 묶음을 받는다."""
+    value = (benchmarks or {}).get(market)
+    if isinstance(value, dict):
+        return value.get(index_symbol_for(symbol, market) if symbol else BENCHMARKS[market])
+    return value
+
 
 LEVERAGED_ETFS = {
     "252670.KS", "122630.KS",
@@ -453,15 +466,35 @@ def calculate_indicators(data, benchmark=None):
     market_return = None
     market_above_ma20 = None
     market_ma20 = None
+    market_ma20_date = None
+    market_lag_sessions = None
 
     if benchmark is not None:
         # Market regime from the index itself: an entry needs the index above its own
         # 20-day average. Left as None (not False) when the index is unavailable so a
         # fetch gap cannot read as a headwind.
         index_closes = benchmark["Close"].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
-        if len(index_closes) >= 20:
-            market_ma20 = float(index_closes.tail(20).mean())
-            market_above_ma20 = bool(float(index_closes.iloc[-1]) > market_ma20)
+        index_closes = index_closes.loc[~index_closes.index.duplicated(keep="last")].sort_index()
+        index_closes = index_closes.loc[index_closes > 0]
+        # 기준일을 종목의 마지막 봉에 맞춘다. 지수가 더 새 봉(아직 끝나지 않은 당일 봉)을
+        # 갖고 있으면 20일선에 미완성 세션이 들어가고, 하루 밀려 있으면 전일 국면이 오늘
+        # 국면으로 읽힌다 — 2026-11-26 발송본의 index_ma20 5,322.07은 실제로 11/24까지의
+        # 20일 평균이었고, 지수 봉이 11/25를 건너뛴 탓이었다. 두 경우 모두 종목 봉의 마지막
+        # 세션까지만 읽고, 기준일과 지연 세션 수를 함께 남겨 메시지가 그 사실을 말하게 한다.
+        last_session = close.index[-1]
+        last_day = last_session.date() if hasattr(last_session, "date") else last_session
+        stamps = [stamp.date() if hasattr(stamp, "date") else stamp for stamp in index_closes.index]
+        index_upto = index_closes.loc[[day <= last_day for day in stamps]]
+        if len(index_upto) >= 20:
+            market_ma20 = float(index_upto.tail(20).mean())
+            market_above_ma20 = bool(float(index_upto.iloc[-1]) > market_ma20)
+            index_last = index_upto.index[-1]
+            market_ma20_date = (index_last.date() if hasattr(index_last, "date")
+                                else index_last).isoformat()
+            market_lag_sessions = sum(
+                1 for stamp in close.index
+                if (stamp.date() if hasattr(stamp, "date") else stamp) > (index_last.date()
+                                                                         if hasattr(index_last, "date") else index_last))
 
         aligned = pd.concat(
             [
@@ -524,6 +557,8 @@ def calculate_indicators(data, benchmark=None):
         "market_return_20d": safe_float(market_return),
         "market_above_ma20": market_above_ma20,
         "market_ma20": safe_float(market_ma20),
+        "market_ma20_date": market_ma20_date,
+        "market_lag_sessions": market_lag_sessions,
         "average_turnover_20d": safe_float((close * volume).iloc[-21:-1].mean()),
         "return_5d": safe_float(return_5),
         "return_20d": safe_float(return_20),
@@ -685,8 +720,15 @@ def scan_market(market, tickers, benchmark, names=None, prices=None, *,
     if selection_now is None:
         selection_now = datetime.now(timezone.utc)
     cutoff = last_completed_session(market, selection_now)
-    if benchmark is not None:
-        benchmark = completed_daily_prices(benchmark, market, through=cutoff)
+    # `benchmark`는 한 시장의 지수 하나이거나, 국내처럼 시장별 지수 묶음일 수 있다.
+    if isinstance(benchmark, dict):
+        market_benchmarks = {name: (completed_daily_prices(frame, market, through=cutoff)
+                                    if frame is not None else None)
+                             for name, frame in benchmark.items()}
+    elif benchmark is not None:
+        market_benchmarks = {BENCHMARKS[market]: completed_daily_prices(benchmark, market, through=cutoff)}
+    else:
+        market_benchmarks = {}
     inverse_prices = {symbol: completed_daily_prices(frame, market, through=cutoff)
                       for symbol, frame in (inverse_prices or {}).items() if frame is not None}
     for symbol in dict.fromkeys(tickers):
@@ -695,7 +737,7 @@ def scan_market(market, tickers, benchmark, names=None, prices=None, *,
             data = completed_daily_prices(data, market, through=cutoff)
 
             indicators = calculate_indicators(
-                data, benchmark
+                data, market_benchmarks.get(index_symbol_for(symbol, market))
             )
 
             inverse = is_inverse(symbol, names.get(symbol))
@@ -1176,6 +1218,23 @@ def reference_note(plan):
     return f" ({value[5:7]}/{value[8:10]} 종가)"
 
 
+def plan_target_line(exit_policy):
+    """'목표 +6%(5거래일)' — 계획 줄이 말하는 목표는 사용자의 매도 규칙이다.
+
+    2026-11-26 발송본은 촉매 계획마다 `forecast['bull_price']`만 `목표`로 인쇄했다
+    (삼성전기 +38.5% · NHN +49.9%). 5거래일 목표로 읽을 수 없는 상승 시나리오이고,
+    실제 매도 기준은 +6%(급등 시 트레일링)이다. 예측 시나리오는 `강세 참고`로 구분해 붙인다.
+    """
+    return f"목표 +{exit_policy.take_profit_pct:.0%}(5거래일)"
+
+
+def scenario_note(bull_target, overseas=False):
+    """' · 강세 참고 1,045,793원' — 시나리오일 뿐 목표가 아니라는 표시를 붙인다."""
+    if not isinstance(bull_target, (int, float)) or isinstance(bull_target, bool):
+        return ""
+    return f" · 강세 참고 {bull_target:,.2f}$" if overseas else f" · 강세 참고 {bull_target:,.0f}원"
+
+
 def telegram_candidate_line(item):
     forecast = item.get("company_forecast", {})
     signal = item.get("signal", {})
@@ -1201,14 +1260,12 @@ def telegram_candidate_line(item):
     kind = " · ETF" if exit_policy.stop_pct == FUND_STOP_PCT else ""
     code = symbol if overseas else symbol.split(".")[0]
     entry_label = "$" + f"{entry:,.2f}" if overseas else f"{entry:,.0f}원"
-    target, upside = forecast["base_price"], forecast["bull_price"]
-    target_label = "$" + f"{target:,.2f} / $" + f"{upside:,.2f}" if overseas else f"{target:,.0f} / {upside:,.0f}원"
+    upside = forecast.get("bull_price")
     label = '조건부 매수' if conditional else '매수 확인'
     if conditional and preopen.get('strategy') in ('event_catalyst','earnings_catalyst'):
         track = preopen.get('strategy')=='earnings_catalyst'
         floor=preopen.get('entry_floor')
         floor_label=(f'${floor:,.2f}' if overseas else f'{floor:,.0f}원') if floor else None
-        upper_label=f'${upside:,.2f}' if overseas else f'{upside:,.0f}원'
         entry_zone=f'{floor_label}~{entry_label}' if floor_label else entry_label
         heading='[실적·호재 촉매]' if track else '[호재 촉매]'
         # 호재 한 줄: the disclosure and when it was made. Without it the name is a chart
@@ -1224,10 +1281,13 @@ def telegram_candidate_line(item):
             basis_line=f"  호재: {evidence['summary']}" + (f' ({when})' if when else '') + '\n'
         return (f"• {name} ({code}) · 종합 {score:.1f} · {heading}{kind}\n"
                 f"{basis_line}"
-                f"  매수 {entry_zone} · 목표 {upper_label} · 손절 −{exit_policy.stop_pct:.0%}"
-                + reference_note(preopen) + quote_note(item))
+                f"  매수 {entry_zone} · {plan_target_line(exit_policy)}"
+                f" · 손절 −{exit_policy.stop_pct:.0%}"
+                + scenario_note(upside, overseas) + reference_note(preopen) + quote_note(item))
     return (f"• {name} ({code}) · {label}{kind} · 종합 {score:.1f}\n"
-            f"  매수 상한 {entry_label} · 목표 {target_label} · 손절 −{exit_policy.stop_pct:.0%}"
+            f"  매수 상한 {entry_label} · {plan_target_line(exit_policy)}"
+            f" · 손절 −{exit_policy.stop_pct:.0%}"
+            + (scenario_note(upside, overseas) if conditional else '')
             + reference_note(preopen) + quote_note(item))
 
 
@@ -1371,7 +1431,7 @@ def scan_sectors(benchmarks):
             continue
         for symbol, name in sectors.items():
             try:
-                benchmark = benchmarks.get(market)
+                benchmark = index_frame(benchmarks, market)
                 if benchmark is not None:
                     benchmark = completed_daily_prices(benchmark, market, selection_now)
                 metrics = sector_metrics(completed_daily_prices(prices[symbol], market, selection_now), benchmark)
@@ -1430,8 +1490,22 @@ def market_regime_note(report, market=None):
             continue
         state = "상승 국면(지수 > 20일선)" if data.get("above_ma20") else "하락 국면(지수 < 20일선)"
         note = f"시장 국면({names.get(name, name)}): {state}"
+        # 국내는 코스피·코스닥을 따로 본다. 종목은 자기 시장의 지수로 판정되므로 둘을 함께 쓴다.
+        for symbol, item in (data.get("indices") or {}).items():
+            if symbol == data.get("index_symbol") or not isinstance(item, dict):
+                continue
+            if item.get("above_ma20") is None:
+                continue
+            label = INDEX_LABELS.get(symbol, symbol)
+            note += (f" · {label} "
+                     + ("상승 국면" if item["above_ma20"] else "하락 국면"))
         if data.get("above_ma20") is False and data.get("headwind_skipped"):
             note += f" · 추세 통과 {data['headwind_skipped']}종목은 시장 역풍으로 보류"
+        # 지수 봉이 종목 봉보다 한 세션 늦으면 그 사실을 말한다. 전일 국면이 오늘 국면으로 읽히지 않게.
+        lag = data.get("lag_sessions")
+        if isinstance(lag, int) and lag > 0 and data.get("index_date"):
+            note += (f" · 지수 기준일 {data['index_date'][5:].replace('-', '/')}"
+                     f"({lag}세션 지연)")
         lines.append(note)
     return lines
 
@@ -1567,10 +1641,20 @@ def send_telegram_summary(report):
         lines.append(" · ".join(rule))
     for item in confirmed[:5]:
         lines.append(telegram_candidate_line(item))
+    if len(confirmed) > 5:
+        lines.append(f"   {rest_note(len(confirmed), 5)} (분석자료 참고)")
     if rebound:
         lines.extend(["", "[반등 눌림 후보] · 시장 국면 게이트 미적용"])
         for item in rebound[:5]:
             lines.append(telegram_rebound_line(item))
+        if len(rebound) > 5:
+            lines.append(f"   {rest_note(len(rebound), 5)} (분석자료 참고)")
+    # 보유·매도 감시: 직전 세션 계획의 진입가를 기준으로 +6% · 트레일링 · 손절 · 5거래일
+    # 만기를 본다(계좌 체결을 읽지 않으므로 가정임을 블록이 밝힌다). 계산은
+    # `exit_watch`가 발송 전에 끝내고, 여기서는 그 줄만 싣는다.
+    exit_lines = list(report.get('exit_watch_lines') or [])
+    if exit_lines:
+        lines.extend(['', *exit_lines])
     # 당일 급등했지만 게이트에 막혀 매수 후보에서 빠진 종목은 별도 참고 블록으로만 나간다.
     # 매수 후보 카운트·`preopen_signal`은 건드리지 않는다(urgent_issues는 읽기 전용).
     import urgent_issues
@@ -1598,6 +1682,8 @@ def send_telegram_summary(report):
     if inflow:
         lines.extend(['', '[수급 유입 우량주] · 매수 신호 아님'])
         lines.extend(quality_watch_line(row) for row in inflow[:5])
+        if len(inflow) > 5:
+            lines.append(f"   {rest_note(len(inflow), 5)}")
     # 블록 단위 안내: 매도 규칙 하나, 자료가 얇은 축, 개장 전이라 호가를 못 읽었다는 사실.
     # 계획마다 반복되던 문단을 여기 한 줄씩으로 모았다.
     notes = []
@@ -1679,18 +1765,24 @@ def main():
     benchmarks = {}
     benchmark_errors = []
 
-    for market, symbol in BENCHMARKS.items():
-        try:
-            benchmarks[market] = download_prices(
-                symbol
-            )
-        except Exception as exc:
-            benchmarks[market] = None
-            benchmark_errors.append({
-                "market": market,
-                "symbol": symbol,
-                "error": str(exc)
-            })
+    for market, symbols in MARKET_INDEX_SYMBOLS.items():
+        if len(symbols) == 1:
+            symbol = symbols[0]
+            try:
+                benchmarks[market] = download_prices(symbol)
+            except Exception as exc:
+                benchmarks[market] = None
+                benchmark_errors.append({"market": market, "symbol": symbol, "error": str(exc)})
+            continue
+        # 국내는 코스피·코스닥을 모두 받는다. 코스닥 종목을 코스피 하나로 판정하지 않게.
+        frames = {}
+        for symbol in symbols:
+            try:
+                frames[symbol] = download_prices(symbol)
+            except Exception as exc:
+                frames[symbol] = None
+                benchmark_errors.append({"market": market, "symbol": symbol, "error": str(exc)})
+        benchmarks[market] = frames
 
     inverse_prices = {"KR": {}, "US": {}}
     for market, tickers in watchlist.items():
@@ -1722,14 +1814,30 @@ def main():
     market_regime = {}
     for market in BENCHMARKS:
         rows = [item for item in all_results if item["market"] == market]
-        observed = next((item["indicators"].get("market_above_ma20") for item in rows
-                         if item["indicators"].get("market_above_ma20") is not None), None)
-        ma20 = next((item["indicators"].get("market_ma20") for item in rows
-                     if item["indicators"].get("market_ma20") is not None), None)
+        indices = {}
+        for symbol in MARKET_INDEX_SYMBOLS[market]:
+            same = [item for item in rows if index_symbol_for(item["symbol"], market) == symbol]
+            above = next((item["indicators"].get("market_above_ma20") for item in same
+                          if item["indicators"].get("market_above_ma20") is not None), None)
+            ma20 = next((item["indicators"].get("market_ma20") for item in same
+                         if item["indicators"].get("market_ma20") is not None), None)
+            date = next((item["indicators"].get("market_ma20_date") for item in same
+                         if item["indicators"].get("market_ma20_date")), None)
+            lag = next((item["indicators"].get("market_lag_sessions") for item in same
+                        if item["indicators"].get("market_lag_sessions") is not None), None)
+            indices[symbol] = {"above_ma20": above, "index_ma20": ma20,
+                               "index_date": date, "lag_sessions": lag,
+                               "observed": above is not None}
+        head = indices.get(BENCHMARKS[market], {})
         headwind_skipped = sum(1 for item in rows if item.get("selection_filter") == "market_headwind")
-        market_regime[market] = {"index_symbol": BENCHMARKS[market], "above_ma20": observed,
-                                 "index_ma20": ma20, "headwind_skipped": headwind_skipped,
-                                 "observed": observed is not None}
+        market_regime[market] = {"index_symbol": BENCHMARKS[market],
+                                 "above_ma20": head.get("above_ma20"),
+                                 "index_ma20": head.get("index_ma20"),
+                                 "index_date": head.get("index_date"),
+                                 "lag_sessions": head.get("lag_sessions"),
+                                 "headwind_skipped": headwind_skipped,
+                                 "observed": head.get("above_ma20") is not None,
+                                 "indices": indices}
 
     report = {
         "generated_at": datetime.now(

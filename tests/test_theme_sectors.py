@@ -313,5 +313,64 @@ class MessageIntegrationTests(unittest.TestCase):
         self.assertLess(text.index('휴머노이드'), text.index('분석 결과'))
 
 
+class SessionAlignmentTests(unittest.TestCase):
+    """2026-11-26: 11/25 구성종목 등락에 11/24 지수 등락(+6.32%)이 붙었다.
+
+    Yahoo에 11/25 지수 봉이 없었는데 테마 경로만 두 날짜를 맞추지 않고 각자의 마지막 봉을
+    읽었다. `sector_metrics()`처럼 교집합의 마지막 세션에서 두 값을 함께 읽어야 한다.
+    """
+
+    NOW_26 = datetime(2026, 11, 26, 6, 38)
+
+    def rendered(self, robots, index_end='2026-11-24', index_closes=None):
+        return {
+            robots[0][0]: frame([50000.0] * 21 + [62000.0, 68000.0], end='2026-11-25'),
+            robots[1][0]: frame([50000.0] * 21 + [52500.0, 53000.0], end='2026-11-25'),
+            robots[2][0]: frame([50000.0] * 21 + [49000.0, 49000.0], end='2026-11-25'),
+            '^KS11': frame(index_closes or [2500.0] * 21 + [2417.25], end=index_end),
+        }
+
+    def test_the_index_move_is_read_on_the_same_session_as_the_members(self):
+        robots = dict(THEME_UNIVERSE['KR'])['휴머노이드·로봇·액추에이터']
+        snapshot = theme_sector_snapshot('KR', self.NOW_26,
+                                         downloader=lambda symbols, market: self.rendered(robots),
+                                         headlines=lambda *args: [])
+        # 지수가 11/25 봉을 갖지 않으므로 두 값 모두 11/24에서 읽는다.
+        self.assertEqual(snapshot['data_date'], '2026-11-24')
+        self.assertEqual(snapshot['benchmark_date'], '2026-11-24')
+        self.assertAlmostEqual(snapshot['benchmark_return_pct'], -3.31, places=2)
+        row = snapshot['rows'][0]
+        self.assertAlmostEqual(row['return_pct'], 9.0, places=2)  # 11/24: +24 · +5 · -2
+        self.assertNotAlmostEqual(row['return_pct'], 3.54, places=2)  # 11/25: +9.68 · +0.95 · 0
+        self.assertAlmostEqual(row['benchmark_return_pct'], -3.31, places=2)
+        self.assertEqual(row['data_date'], '2026-11-24')
+        self.assertEqual(snapshot['rows'][0]['state'], '주도')
+
+    def test_a_member_without_the_session_bar_is_left_out_of_the_average(self):
+        robots = dict(THEME_UNIVERSE['KR'])['휴머노이드·로봇·액추에이터']
+        rendered = self.rendered(robots)
+        # 한 종목만 11/20에 멈춰 있다(지수·다른 종목은 11/24까지). 그 종목의 등락을 섞으면 테마 평균이 다른 세션 값이 된다.
+        rendered[robots[2][0]] = frame([50000.0] * 21 + [60000.0], end='2026-11-20')
+        snapshot = theme_sector_snapshot('KR', self.NOW_26,
+                                         downloader=lambda symbols, market: rendered,
+                                         headlines=lambda *args: [])
+        row = snapshot['rows'][0]
+        self.assertEqual((row['total'], row['up']), (2, 2))
+        self.assertAlmostEqual(row['return_pct'], 14.5, places=2)  # (+24 +5) / 2
+        self.assertEqual(snapshot['unaligned'],
+                         [dict(symbol=robots[2][0], data_date='2026-11-20')])
+
+    def test_a_missing_index_leaves_strength_unstated_instead_of_wrong(self):
+        robots = dict(THEME_UNIVERSE['KR'])['휴머노이드·로봇·액추에이터']
+        rendered = self.rendered(robots)
+        rendered.pop('^KS11')
+        snapshot = theme_sector_snapshot('KR', self.NOW_26,
+                                         downloader=lambda symbols, market: rendered,
+                                         headlines=lambda *args: [])
+        self.assertIsNone(snapshot['benchmark_return_pct'])
+        self.assertIsNone(snapshot['rows'][0]['market_excess_pct'])
+        self.assertNotIn('상대강도', format_theme_block(snapshot, 'KR')[0])
+
+
 if __name__ == '__main__':
     unittest.main()
