@@ -74,6 +74,8 @@ def main():
     from preopen_signals import evaluate_preopen
     cal=exchange_calendars.get_calendar('XNYS' if market=='US' else 'XKRX')
     previous_session=cal.previous_session(window['session_date']).strftime('%Y-%m-%d')
+    import bearish_watch
+    bearish_watch.attach(report, previous_session if market == "US" else None)
     report['preopen_session']=window['session_date']
     evaluate_preopen(report,previous_session,datetime.now(timezone.utc))
     # 미국 장전 요약: 차트 게이트와 무관한 장전 사전 시그널을 발송 전에 준비한다.
