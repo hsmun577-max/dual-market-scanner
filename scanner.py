@@ -999,7 +999,7 @@ def _same_session(stamp, at):
 
 
 def quality_watch_research(report, at):
-    """Read the 10억~50억 turnover issuers the momentum screen drops, and grade them.
+    """Read the 10억~40억 turnover issuers the momentum screen drops, and grade them.
 
     For each one: the statements and broker consensus the scan already fetches, plus the
     measured foreign/institutional flow, then the two axes of ``company_forecast``.
@@ -1071,7 +1071,7 @@ def quality_watch_research(report, at):
                                     -(entry['fundamental_score'] or 0)))
     report['quality_watch'] = entries
     report['quality_watch_at'] = at.isoformat()
-    report['quality_watch_scope'] = dict(tier='10억~50억 20일 평균 거래대금',
+    report['quality_watch_scope'] = dict(tier='10억~40억 20일 평균 거래대금',
                                          candidates=len(pool), read=len(selected),
                                          graded=len(entries))
     return entries

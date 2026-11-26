@@ -1,7 +1,7 @@
 """The mid-term +30% pullback list: conditions, its own field, its own message section.
 
 The study (``evidence/dual-market-scanner/상승초입-조기포착-전략연구.md`` 2부, 추천 1):
-``20일 수익률 ≤ −10%`` + ``RSI(14) ≤ 45`` + ``20일 평균 거래대금 10억~50억`` +
+``20일 수익률 ≤ −10%`` + ``RSI(14) ≤ 45`` + ``20일 평균 거래대금 10억~40억`` +
 ``코스피 대비 20일 상대강도 > 0`` → 60 sessions held +9.54%, +30% touch 58.4%, max
 drawdown −15.7% (977 trades). It is a 20~60 session hold with a −15% stop, so it must never
 be mixed into the same-day buy alerts: these tests hold it in ``mid_term_watch`` and in its
@@ -56,19 +56,32 @@ class ConditionTests(unittest.TestCase):
             self.assertEqual(reason(row(indicators=values(**change)), "KR"), expected, change)
 
     def test_the_band_edges_are_inclusive(self):
-        self.assertIsNone(reason(row(indicators=values(average_turnover_20d=1_000_000_000)), "KR"))
-        self.assertIsNone(reason(row(indicators=values(average_turnover_20d=5_000_000_000)), "KR"))
+        from mid_term_watch import MAX_TURNOVER, MIN_TURNOVER
+        self.assertEqual(MAX_TURNOVER, 4_000_000_000)
+        self.assertIsNone(reason(row(indicators=values(average_turnover_20d=MIN_TURNOVER)), "KR"))
+        self.assertIsNone(reason(row(indicators=values(average_turnover_20d=MAX_TURNOVER)), "KR"))
         self.assertIsNone(reason(row(indicators=values(return_20d=-0.10, rsi14=45.0)), "KR"))
         self.assertEqual(reason(row(indicators=values(return_20d=-0.099)), "KR"),
                          "pullback_too_shallow")
 
+    def test_the_band_stops_at_the_momentum_floor(self):
+        # 2026-11-26: the owner lowered the KR momentum floor to 40억, so the band top
+        # follows it — a 40억~50억 name now belongs to the momentum path, not this list.
+        from candidate_selection import MIN_AVERAGE_TURNOVER
+        from mid_term_watch import MAX_TURNOVER
+        self.assertEqual(MIN_AVERAGE_TURNOVER["KR"], 4_000_000_000)
+        self.assertEqual(MAX_TURNOVER, MIN_AVERAGE_TURNOVER["KR"])
+        self.assertEqual(reason(row(indicators=values(average_turnover_20d=5_000_000_000)), "KR"),
+                         "turnover_outside_research_band")
+        self.assertIsNone(reason(row(indicators=values(average_turnover_20d=3_900_000_000)), "KR"))
+
     def test_the_turnover_floor_is_the_research_band_not_the_momentum_floor(self):
-        # 10억~50억 is below the momentum path's 50억 floor; that is the point of the band.
+        # The band is below the momentum path's 40억 floor; that is the point of the band.
         from candidate_selection import MIN_AVERAGE_TURNOVER, liquidity_rejection_reason
         item = row()
         self.assertEqual(liquidity_rejection_reason(item, "KR"), "insufficient_liquidity")
         self.assertIsNone(reason(item, "KR"))
-        self.assertGreaterEqual(MIN_AVERAGE_TURNOVER["KR"], 5_000_000_000)
+        self.assertEqual(MIN_AVERAGE_TURNOVER["KR"], 4_000_000_000)
 
     def test_funds_special_securities_and_other_markets_are_not_the_condition(self):
         self.assertEqual(reason(row(asset_type="etf", name="KODEX 200"), "KR"), None)
@@ -106,7 +119,7 @@ class AttachTests(unittest.TestCase):
         scope = report_["mid_term_watch_scope"]
         self.assertEqual(scope["qualified"], 11)
         self.assertEqual(scope["listed"], 8)
-        self.assertEqual(scope["turnover_band"], [1_000_000_000, 5_000_000_000])
+        self.assertEqual(scope["turnover_band"], [1_000_000_000, 4_000_000_000])
 
     def test_excluded_rows_are_counted_with_their_reason(self):
         report_ = report(row(), row(symbol="1.KS", indicators=values(rsi14=60.0)),

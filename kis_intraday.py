@@ -573,7 +573,7 @@ def dart_company_codes(api_key):
     from zipfile import BadZipFile, ZipFile
 
     # The corporate-code file is a few megabytes and changes once a day. A report reads it
-    # more than once (the selected candidates, then the 10억~50억 quality tier), so it is
+    # more than once (the selected candidates, then the 10억~40억 quality tier), so it is
     # kept for the day instead of downloaded again — the same issuer must not get two
     # different corporate codes inside one run.
     cached = _DART_CODE_CACHE.get(api_key)

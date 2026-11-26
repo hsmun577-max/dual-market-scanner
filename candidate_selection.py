@@ -3,7 +3,11 @@
 import math
 import re
 
-MIN_AVERAGE_TURNOVER = {"KR": 5_000_000_000, "US": 10_000_000}
+# 20일 평균 거래대금 하한. 국내는 2026-11-26 혜선 님 지시("거래대금 기준 40억으로 낮춰")로
+# 50억→40억 내렸다. 40억~50억 구간은 그전까지 `quality_watch`의 리서치 티어에서만 읽히던
+# 종목이라, 이제는 모멘텀 매수 경로의 유동성 검사를 통과한다(티어 상단도 이 값을 따라간다).
+# 미국 $10M은 그대로 둔다.
+MIN_AVERAGE_TURNOVER = {"KR": 4_000_000_000, "US": 10_000_000}
 MIN_PRICE = {"KR": 1000, "US": 5}
 # Demand has to be observed in volume, not inferred from the price high alone. The
 # five-session backtest of 2,300 candidates (2025-02-28~2026-11-12, 565 symbols) shows the
