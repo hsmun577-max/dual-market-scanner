@@ -344,3 +344,26 @@ class MessageBlockTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ThemeCounterpartTests(unittest.TestCase):
+    """2026-11-26: 테마 이름이 바뀌었는데(보안 분리, AI서버 추가) 미국 대응 표가 옛 이름을
+    가리켜 그 종목들은 간밤 미국 연동이 아예 붙지 않았다. 표와 테마 정의가 어긋나면 실패한다."""
+
+    def test_every_mapped_korean_theme_and_us_theme_still_exists(self):
+        from kr_premarket import US_THEME_COUNTERPART
+        from theme_sectors import THEME_UNIVERSE
+        kr = {name for name, _ in THEME_UNIVERSE['KR']}
+        us = {name for name, _ in THEME_UNIVERSE['US']}
+        self.assertEqual(sorted(set(US_THEME_COUNTERPART) - kr), [])
+        self.assertEqual(sorted(set(US_THEME_COUNTERPART.values()) - us), [])
+
+    def test_a_security_or_ai_server_member_links_to_the_overnight_us_sector(self):
+        from kr_premarket import theme_membership
+        membership = theme_membership()
+        security = us_links('053800', [dict(market='US', rows=[
+            dict(name='사이버보안', return_pct=5.0)])], membership)
+        self.assertEqual([link['name'] for link in security], ['사이버보안'])
+        board = us_links('009150', US_ROWS, membership)
+        # 삼성전기는 이제 FC-BGA와 AI서버 두 테마에 속하지만, 미국 대응이 같으면 한 번만 남는다.
+        self.assertEqual([link['name'] for link in board], ['AI 반도체·GPU'])
