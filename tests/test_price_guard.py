@@ -93,7 +93,7 @@ class SnapshotGuardTests(unittest.TestCase):
     def test_a_real_frame_with_a_ticker_switch_is_excluded_and_reported(self):
         rendered = {
             'NFLX': frame([58.0] * 21 + [58.1]),
-            'PARA': frame([0.04] * 21 + [2.72]),
+            'CMCSA': frame([0.04] * 21 + [2.72]),
             'RBLX': frame([46.0] * 21 + [51.65]),
             'SPY': frame([700.0] * 21 + [722.29]),
         }
@@ -104,17 +104,17 @@ class SnapshotGuardTests(unittest.TestCase):
         row = next(row for row in snapshot['rows'] if row['name'] == '엔터·미디어')
         self.assertAlmostEqual(row['return_pct'], 6.22, places=2)  # (0.17 + 12.28) / 2
         self.assertLess(row['return_pct'], 100)
-        self.assertEqual(snapshot['excluded'], [dict(symbol='PARA', reason='abnormal_change',
+        self.assertEqual(snapshot['excluded'], [dict(symbol='CMCSA', reason='abnormal_change',
                                                      label='비정상 등락')])
-        self.assertEqual(snapshot['quoted'], 2)  # PARA는 제외, SPY는 벤치마크
+        self.assertEqual(snapshot['quoted'], 2)  # CMCSA는 제외, SPY는 벤치마크
         text = '\n'.join(format_theme_block(snapshot, 'US'))
-        self.assertNotIn('파라마운트', text)
+        self.assertNotIn('컴캐스트', text)
         self.assertNotIn('9614', text)
 
     def test_a_healthy_dataset_reports_no_exclusions(self):
         rendered = {
             'NFLX': frame([58.0] * 21 + [58.1]),
-            'PARA': frame([80.0] * 21 + [82.0]),
+            'CMCSA': frame([80.0] * 21 + [82.0]),
             'SPY': frame([700.0] * 21 + [722.29]),
         }
         snapshot = theme_sector_snapshot('US', NOW, downloader=lambda symbols, market: rendered,

@@ -850,7 +850,10 @@ def prepare_selected_analysis(report):
     checked = datetime.now(timezone.utc)
     shared_events, event_coverage = world_events(checked)
     registry = load_profiles()
-    linked = discover(registry, shared_events, datetime.now(timezone.utc),limit=None)
+    event_at = datetime.now(timezone.utc)
+    linked = discover(registry, shared_events, event_at, limit=None)
+    from sector_catalyst_watch import attach as attach_sector_catalysts
+    attach_sector_catalysts(report, shared_events, event_at, last_completed_session("KR", event_at).isoformat())
     report["event_discovery"] = {"profile_count":len(registry),"linked_symbols":linked,
                                  "feed_coverage":event_coverage,"universe_wide_news_coverage":False}
     for market in ("KR", "US"):
@@ -1596,6 +1599,10 @@ def send_telegram_summary(report):
                     if include_kr_premarket(kr_watch) else [])
         if kr_lines:
             lines.extend(['', *kr_lines])
+    from sector_catalyst_watch import format_block as format_sector_catalysts
+    sector_catalyst_lines = format_sector_catalysts(report.get("kr_sector_catalyst_watch"), market)
+    if sector_catalyst_lines:
+        lines.extend(["", *sector_catalyst_lines])
     from bearish_watch import format_block as format_bearish_watch
     bearish_lines = format_bearish_watch(report.get('bearish_watch'), market)
     if bearish_lines:
