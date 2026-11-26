@@ -472,22 +472,15 @@ def format_block(items, session=None):
     for item in items:
         code = item.get('code') or ''
         label = SESSION_LABELS.get(item.get('session') or session)
+        parts = [f"• {item.get('name')} ({code})"]
         if item.get('move_pct') is not None and label:
-            move = f"{label} {item['move_pct']:+.1f}%{_stamp(item)}"
-        elif label and item.get('change_pct') is not None:
-            move = f"{label} ±{PREMARKET_MOVE_PCT:.0f}% 미만"
-        else:
-            # 체결가가 없을 때 '장전 시세 미확인'을 줄마다 붙이면 촉매 줄만 길어진다.
-            # 확인하지 못했다는 사실은 시세 칸을 비우는 것으로 말한다.
-            move = None
-        parts = [f"• {item.get('name')} ({code})" + (f" · {move}" if move else '')]
-        context = []
+            parts.append(f"{label} {item['move_pct']:+.1f}%{_stamp(item)}")
         if item.get('catalyst_labels'):
-            context.append('촉매: ' + '·'.join(item['catalyst_labels']))
+            parts.append('촉매: ' + '·'.join(item['catalyst_labels']))
         if item.get('us_links'):
             link = item['us_links'][0]
-            context.append(f"간밤 미국 {link['name']} {link['return_pct']:+.1f}%")
-        lines.append(' · '.join(parts + ([' · '.join(context)] if context else [])))
+            parts.append(f"간밤 미국 {link['name']} {link['return_pct']:+.1f}%")
+        lines.append(' · '.join(parts))
         if item.get('headline'):
             lines.append(f"  {_clean(item['headline'])}")
     return lines
