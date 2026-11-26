@@ -61,9 +61,12 @@ def main():
     overnight_us_themes=[row for row in report.get('theme_sectors') or []
                          if isinstance(row,dict) and str(row.get('market') or '').upper().startswith('US')]
     try:
-        from theme_sectors import theme_sector_snapshot
+        from theme_sectors import outside_basket_quotes, theme_sector_snapshot
         # 장전은 전날 마감 기준이다(2026-11-26 지시). 당일 장중 봉은 읽지 않는다.
-        report['theme_sectors']=[theme_sector_snapshot(market,local,mode='previous')]
+        # 직전 전 종목 스캔이 남긴 바스켓 밖 거래대금 상위 지표를 동적 이슈 클러스터 후보로 넘긴다.
+        report['theme_sectors']=[theme_sector_snapshot(
+            market,local,mode='previous',
+            extra_quotes=outside_basket_quotes(report['results'],market))]
     except Exception as exc:  # 테마 집계 실패가 장전 알림 자체를 막지 않는다
         print('Theme sectors unavailable: '+type(exc).__name__,flush=True)
     scanner.prepare_selected_analysis(report)

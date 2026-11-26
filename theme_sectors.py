@@ -1,17 +1,28 @@
-"""증권사 리서치식 세부 테마·이슈 섹터: 실제 구성종목 등락·상승비율·거래대금으로 순위를 매긴다.
+"""증권사 리서치식 세부 테마·이슈 섹터: 실제 구성종목의 거래대금 유입으로 순위를 매긴다.
 
 왜 필요한가: `SECTOR_ETFS`의 15개 대분류 ETF는 `return>0 + 거래대금 2배` 조건과 함께 쓰이면
 지수가 빠지는 날 전부 음수라 아무것도 통과하지 못하고, 메시지는 `1위 은행` 한 단어나
 `확인 불가`로 끝났다. 그런 날에도 로봇·방산처럼 수급이 쏠린 세부 테마는 존재한다.
 
+순위 기준(2026-11-26 지시: 증권사 `지금 섹터는?`처럼 "등락률이 아니라 거래대금이 몰리는 순서"):
 이 모듈은 테마별 실제 구성종목의 일봉에서
-  - 테마 등락률(구성종목 동일가중 평균),
-  - 지수 대비 초과등락(상대강도),
-  - 상승 종목 비율(확산도),
-  - 구성종목 거래대금 합계와 20일 평균 대비 배수(자금 유입 강도)
-를 계산해 위 세 기준의 백분위 가중합(상대강도 45%·확산도 30%·거래대금 25%)으로 순위를 낸다.
-상대강도가 1순위 기준이므로 지수가 -3% 빠지는 날 -1%로 버틴 테마도 `1번`이 될 수 있고,
-그 사실을 `state`(주도/상대강세/약세)로 함께 남겨 하락장의 상대강세를 상승으로 오해하지 않게 한다.
+  - 구성종목 거래대금 합계(누적 거래대금 규모)와 20일 평균 대비 배수(자금 유입 강도),
+  - 장중이면 경과시간으로 보정한 거래대금 페이스(유입 속도),
+  - 테마 등락률(동일가중 평균)·상승 종목 비율(확산도)·지수 대비 초과등락
+를 계산해 **거래대금 유입(급증 배수 40% + 규모 30%)을 핵심으로, 등락률·확산도를 보조(각 15%)**로
+한 백분위 가중합으로 정렬한다. 등락률이 뒤로 밀린 대신 `state`(주도/상대강세/약세)로 방향을
+남겨 하락장의 상대강세를 상승으로 오해하지 않게 하고, 하락만 하는 투매 섹터(등락률 -3% 이하이면서
+하락 종목이 과반)는 `dumping`으로 표시해 뒤로 보낸다.
+
+한 종목은 여러 테마에 동시에 속한다(삼성전기 = `FC-BGA·PCB·기판` + `AI서버·데이터센터 부품`).
+테마는 자기 구성종목만 집계하므로 중복 포함이 테마 등락·거래대금을 왜곡하지 않고, 시세는
+한 번만 받는다(`dict.fromkeys`).
+
+고정 바스켓 밖의 종목은 거래대금이 몰려도 테마가 없다. 그래서 호출부가 넘긴
+"고정 바스켓 밖 거래대금 상위" 지표(`extra_quotes`)와 이미 수집한 헤드라인으로
+`dynamic_theme_clusters`가 이슈 라벨 클러스터를 만든다 — 이슈 키워드 표에 있는 말만 뽑는
+결정적 규칙이라 같은 입력이면 같은 클러스터가 나오고, 뉴스 조회가 실패하면 클러스터가
+비어 있을 뿐 섹터 블록은 그대로다.
 
 각 상위 테마에는 대표 상승주 2~3개와 그 등락률, 그리고 기존 뉴스 수집기
 (`issuer_news.issuer_news_result` - 국내 종목 뉴스, `yfinance` - 미국 종목 뉴스)에서 가져온
@@ -23,6 +34,7 @@
 """
 
 import re
+import unicodedata
 from datetime import datetime, time, timedelta, timezone
 from html import unescape
 
@@ -50,6 +62,13 @@ KR_THEMES = (
         ("036540.KQ", "SFA반도체"), ("489500.KQ", "엘케이켐"),
         # 2026-11-26: 증권사 거래대금 상위 섹터에 FC-BGA로 오르는데 이 바스켓에 없던 두 종목.
         ("323280.KQ", "태성"), ("090460.KS", "비에이치"),
+    )),
+    # 한 종목이 여러 테마에 속한다(2026-11-26 지시). 삼성전기·이수페타시스·대덕전자는
+    # `FC-BGA·PCB·기판`과 여기 양쪽에 있고, 한미반도체는 `HBM·메모리 반도체`와 겹친다.
+    # 같은 종목이 기판 수요와 AI 서버 증설 양쪽에서 거래대금을 받기 때문이다.
+    ("AI서버·데이터센터 부품", (
+        ("009150.KS", "삼성전기"), ("007660.KS", "이수페타시스"), ("353200.KS", "대덕전자"),
+        ("058470.KQ", "리노공업"), ("403870.KQ", "HPSP"), ("042700.KS", "한미반도체"),
     )),
     ("2차전지·전고체", (
         ("247540.KQ", "에코프로비엠"), ("086520.KQ", "에코프로"), ("003670.KS", "포스코퓨처엠"),
@@ -194,13 +213,42 @@ MINIMUM_MEMBERS = 2
 DEFAULT_LIMIT = 5
 TELEGRAM_LIMIT = 3
 
-# 순위 가중치: 상대강도(지수 대비) > 확산도(상승 종목 비율) > 거래대금 배수.
-LEADERSHIP_WEIGHTS = {"market_excess_pct": 0.45, "breadth_pct": 0.30, "turnover_ratio": 0.25}
-# 장중 순위: 당일 등락(실시간) + 거래대금 페이스(경과시간 대비) + 지수 대비 + 확산도.
-# 종전에는 장중에도 전일 종가 기준 순위를 그대로 찍었다(2026-11-26 지시: "장중에는 당일
-# 장중 실시간 등락률·거래대금 기준으로 상위 섹터"). 장전은 LEADERSHIP_WEIGHTS 그대로 둔다.
-INTRADAY_LEADERSHIP_WEIGHTS = {"return_pct": 0.40, "turnover_pace_ratio": 0.30,
-                               "market_excess_pct": 0.15, "breadth_pct": 0.15}
+# 순위 가중치(2026-11-26 지시: "등락률이 아니라 거래대금 유입·급증 속도로"):
+#   거래대금 배수(평소 대비 얼마나 빨리 몰리나) 40% + 거래대금 규모(얼마가 몰랐나) 30%가 핵심,
+#   등락률·확산도는 각 15%의 보조. 증권사 `지금 섹터는?`의 `최근 3분 +53.3억 상승`처럼
+#   돈이 들어오는 순서를 먼저 본다.
+LEADERSHIP_WEIGHTS = {"turnover_ratio": 0.40, "turnover": 0.30,
+                      "return_pct": 0.15, "breadth_pct": 0.15}
+# 장중은 당일 누적 거래대금을 경과시간으로 나눈 페이스(유입 속도)를 배수 자리에 넣는다.
+# 종전에는 장중에도 전일 종가 기준 순위를 그대로 찍었다(2026-11-26 지시). 장전은 전일
+# 마감 기준 LEADERSHIP_WEIGHTS 그대로다(장전 = 전일 마감 / 장중 = 당일 실시간 분리는 유지).
+INTRADAY_LEADERSHIP_WEIGHTS = {"turnover_pace_ratio": 0.40, "turnover": 0.30,
+                               "return_pct": 0.15, "breadth_pct": 0.15}
+# 유입 점수만 따로 낼 때의 비중(메시지·기록에서 `거래대금 유입` 순위를 보여 준다).
+INFLOW_WEIGHTS = {"turnover_ratio": 0.60, "turnover": 0.40}
+INTRADAY_INFLOW_WEIGHTS = {"turnover_pace_ratio": 0.60, "turnover": 0.40}
+# 하락만 하는 과매도·투매 섹터를 거르는 최소 필터: 등락률이 이 값 이하이고 하락 종목이
+# 과반이면 매수 유입이 아니라 매도 소화다. 점수를 지우지 않고 뒤로만 보낸 뒤 `dumping`으로 남긴다.
+DUMPING_RETURN_PCT = -3.0
+# 동적 이슈 클러스터: 고정 바스켓 밖 거래대금 상위 종목을 헤드라인 키워드로 묶는다.
+DYNAMIC_CLUSTER_LIMIT = 2
+DYNAMIC_CLUSTER_MINIMUM = 2
+DYNAMIC_CLUSTER_LOOKUPS = 8
+# 헤드라인에서 뽑는 이슈 라벨. 임의 명사 추출 대신 이 표의 말만 본다 — 결정적이고,
+# "수주"·"장비"처럼 어디에나 나오는 말은 넣지 않는다(모든 종목이 한 클러스터로 빨려 든다).
+ISSUE_KEYWORDS = (
+    ("HBM·메모리", ("HBM", "고대역폭", "CXL", "D램", "낸드")),
+    ("AI서버·부품", ("AI 서버", "AI서버", "데이터센터", "데이터 센터", "GPU", "액체냉각")),
+    ("로봇", ("휴머노이드", "로봇", "액추에이터")),
+    ("2차전지·전고체", ("전고체", "2차전지", "양극재", "배터리")),
+    ("전력·변압기", ("변압기", "전력망", "전력기기", "송전")),
+    ("원전·SMR", ("원전", "SMR", "소형모듈원자로")),
+    ("방산·수출", ("방산", "방위산업", "국방")),
+    ("바이오·임상", ("임상", "FDA", "비만", "ADC", "품목허가")),
+    ("보안", ("보안", "해킹", "랜섬웨어")),
+    ("조선·LNG", ("조선", "LNG선", "LNG 운반")),
+    ("기판·FC-BGA", ("FC-BGA", "기판", "MLB")),
+)
 NEWS_LOOKUPS_PER_RUN = 6
 NEWS_LOOKUPS_PER_THEME = 2
 # 기사가 없을 때 이슈 줄 대신 붙는 수급 요약의 머리표. 메시지에서는 위 테마 줄과 숫자가
@@ -208,6 +256,60 @@ NEWS_LOOKUPS_PER_THEME = 2
 ISSUE_UNCONFIRMED = "이슈: 뉴스 미확인"
 
 _HEADLINE_CACHE = {}
+
+
+def theme_membership(market):
+    """종목코드 → 그 종목이 속한 테마 이름들. 한 종목이 여러 테마에 속할 수 있다.
+
+    2026-11-26 지시(증권사 화면은 한 종목을 여러 섹터에 중복으로 넣는다)에 따라 테마 정의는
+    종목 중복을 허용한다. 집계는 테마별 자기 구성종목만 보므로 중복이 등락률·거래대금을
+    두 번 더하지 않고, 어느 테마가 같은 종목을 공유하는지는 여기서 확인한다.
+    """
+    themes = THEME_UNIVERSE["US" if str(market).upper().startswith("US") else "KR"]
+    membership = {}
+    for name, members in themes:
+        for member in members:
+            membership.setdefault(member[0], []).append(name)
+    return {symbol: tuple(names) for symbol, names in membership.items()}
+
+
+def outside_basket_quotes(results, market, limit=12):
+    """고정 테마 바스켓에 없는 종목의 당일 거래대금·등락 지표(동적 클러스터 입력).
+
+    스캔 결과(`scanner.scan_market`의 지표)에서 거래대금(종가×거래량)과 20일 평균 배수를
+    꺼낸다. 새 API를 부르지 않고, 값이 모자란 행·ETF·이미 바스켓에 있는 종목은 뺀다.
+    테마 집계에는 들어가지 않고 동적 클러스터의 후보로만 쓰인다.
+    """
+    market = "US" if str(market).upper().startswith("US") else "KR"
+    basket = theme_membership(market)
+    quotes = []
+    for row in results or []:
+        if row.get("market") != market or row.get("asset_type") not in ("stock_or_etf", "stock"):
+            continue
+        symbol = str(row.get("symbol") or "")
+        if not symbol or symbol in basket:
+            continue
+        values = row.get("indicators") or {}
+        price, volume = values.get("price"), values.get("volume")
+        baseline = values.get("average_turnover_20d")
+        move = values.get("return_1d")
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                   for value in (price, volume, move)):
+            continue
+        turnover = float(price) * float(volume)
+        if turnover <= 0:
+            continue
+        quotes.append({
+            "symbol": symbol, "name": row.get("name") or symbol,
+            "return_pct": round(float(move) * 100, 2),
+            "turnover": turnover,
+            "turnover_ratio": (round(turnover / float(baseline), 2)
+                               if isinstance(baseline, (int, float)) and not isinstance(baseline, bool)
+                               and baseline > 0 else None),
+            "data_date": values.get("data_date"), "intraday": False, "outside_basket": True,
+        })
+    quotes.sort(key=lambda quote: (-quote["turnover"], quote["symbol"]))
+    return quotes[:limit]
 
 
 def _session_stamps(index):
@@ -382,6 +484,9 @@ def theme_rows(market, themes, metrics, benchmark_return_pct=None, session_progr
         excess = None if benchmark_return_pct is None else move - benchmark_return_pct
         state = ("주도" if move > 0 and (excess is None or excess > 0)
                  else "상대강세" if excess is not None and excess > 0 else "약세")
+        # 하락만 하는 과매도·투매는 매수 유입이 아니라 매도 소화다(등락률 -3% 이하 +
+        # 하락 종목 과반). 점수를 지우지 않고 뒤로 보낸 뒤 이유를 남긴다.
+        dumping = bool(move <= DUMPING_RETURN_PCT and up * 2 < len(present))
         rows.append({
             "market": market, "name": name,
             "return_pct": round(move, 2),
@@ -393,6 +498,12 @@ def theme_rows(market, themes, metrics, benchmark_return_pct=None, session_progr
             "turnover": turnover or None,
             "turnover_ratio": None if ratio is None else round(ratio, 2),
             "turnover_pace_ratio": pace,
+            # 순위에 실제로 쓰인 유입 배수(장중이면 페이스, 장전이면 평소 대비 배수).
+            "inflow_multiple": pace if pace is not None else (None if ratio is None else round(ratio, 2)),
+            "dumping": dumping,
+            # 이 테마를 이루는 종목코드: 동적 클러스터가 '이미 보여 준 테마'인지 판단하고,
+            # 같은 종목이 여러 테마에 속하는지 확인하는 데 쓴다.
+            "symbols": [symbol for symbol, _, _ in present],
             "leaders": [dict(symbol=symbol, name=label, return_pct=metric["return_pct"],
                              alias=aliases.get(symbol))
                         for symbol, label, metric in leaders],
@@ -417,16 +528,32 @@ def _percentile_rank(rows, key):
 
 def rank_theme_sectors(rows, limit=DEFAULT_LIMIT, minimum_members=MINIMUM_MEMBERS,
                        weights=None):
-    """상대강도·상승비율·거래대금 백분위 가중합으로 정렬한다. 지수가 빠져도 1등은 나온다."""
+    """거래대금 유입(급증 배수 + 규모) 백분위 가중합으로 정렬한다.
+
+    2026-11-26 지시: 증권사 `지금 섹터는?`처럼 등락률이 아니라 **거래대금이 몰리는 순서**가
+    먼저다. 배수(평소 대비 급증·장중 페이스) 40% + 거래대금 규모 30%가 핵심이고 등락률·
+    확산도는 각 15%의 보조다. 유입만 따로 본 `inflow_score`도 함께 남겨, 화면에는
+    "거래대금 순위"와 "등락률"을 구분해 읽을 수 있게 한다.
+
+    하락만 하는 투매 섹터(`dumping`: 등락률 -3% 이하 + 하락 종목 과반)는 점수와 별개로
+    뒤로 보낸다 — 거래대금이 커도 그 돈은 매수 유입이 아니다. 지수가 빠지는 날에는
+    후보가 전부 투매일 수 있으므로 점수를 지우지 않는다(그 안에서 유입 순서는 그대로).
+    """
     ranked = [dict(row) for row in rows or [] if (row.get("total") or 0) >= minimum_members]
     if not ranked:
         return []
     weights = weights or LEADERSHIP_WEIGHTS
     ranks = {key: _percentile_rank(ranked, key) for key in weights}
+    inflow_weights = (INTRADAY_INFLOW_WEIGHTS if "turnover_pace_ratio" in weights
+                      else INFLOW_WEIGHTS)
+    inflow_ranks = {key: _percentile_rank(ranked, key) for key in inflow_weights}
     for row in ranked:
         row["leadership_score"] = round(
             sum(weight * ranks[key](row) for key, weight in weights.items()), 4)
-    ranked.sort(key=lambda row: (-row["leadership_score"],
+        row["inflow_score"] = round(
+            sum(weight * inflow_ranks[key](row) for key, weight in inflow_weights.items()), 4)
+    ranked.sort(key=lambda row: (bool(row.get("dumping")), -row["leadership_score"],
+                                 -row["inflow_score"],
                                  -(row["market_excess_pct"] if row["market_excess_pct"] is not None else -999),
                                  row["name"]))
     return ranked[:limit]
@@ -520,6 +647,89 @@ def issue_line(row, market, now, headlines=None, budget=None):
     return f"{ISSUE_UNCONFIRMED} · {supply} 수급"
 
 
+def headline_labels(headline):
+    """헤드라인에서 이슈 라벨을 결정적으로 뽑는다(`ISSUE_KEYWORDS`의 말만 본다).
+
+    임의 명사 추출을 하지 않는 이유: 같은 기사 묶음이면 언제나 같은 라벨이 나와야 테스트가
+    되고, "수주"·"장비" 같은 범용어로 모든 종목이 한 클러스터에 빨려 들지 않게 하기 위해서다.
+    """
+    text = " ".join(unicodedata.normalize("NFKC", str(headline or "")).split()).casefold()
+    if not text:
+        return []
+    labels = []
+    for label, words in ISSUE_KEYWORDS:
+        if any(word.casefold() in text for word in words):
+            labels.append(label)
+    return labels
+
+
+def dynamic_theme_clusters(metrics, market, now, headlines=None, budget=None,
+                           membership=None, limit=DYNAMIC_CLUSTER_LIMIT):
+    """고정 바스켓 밖 거래대금 상위 종목을 헤드라인 이슈 라벨로 묶는다.
+
+    2026-11-26 지시(증권사는 기본 테마 DB + 뉴스·공시 연관도로 동적으로 묶는다)의 구현.
+    고정 바스켓 테마가 못 잡는 무리는 두 종류다 — 바스켓에 아예 없는 종목, 그리고 여러
+    테마에 걸쳐 같은 재료로 움직이는 종목. 둘 다 그 종목의 **당일 헤드라인 키워드**로 잡는다.
+
+    * 후보: `metrics` 중 거래대금이 큰 순서로 `DYNAMIC_CLUSTER_LOOKUPS`개(뉴스 조회 예산).
+    * 묶음: 같은 라벨이 `DYNAMIC_CLUSTER_MINIMUM`종목 이상이면 클러스터.
+    * 결정적: 정렬·라벨 추출에 난수·현재시각 의존이 없다. 뉴스 조회가 터지면 그 종목만 빠진다.
+    * `outside_basket`: 바스켓에 없는 종목 수, `themes`: 이 클러스터가 걸친 고정 테마 이름.
+    """
+    metrics = metrics or {}
+    membership = theme_membership(market) if membership is None else membership
+    fetch = headlines or _headlines
+    budget = [DYNAMIC_CLUSTER_LOOKUPS] if budget is None else budget
+    ordered = sorted((symbol for symbol, metric in metrics.items()
+                      if metric and (metric.get("turnover") or 0) > 0),
+                     key=lambda symbol: (-(metrics[symbol].get("turnover") or 0), symbol))
+    labels_by_symbol = {}
+    for symbol in ordered[:DYNAMIC_CLUSTER_LOOKUPS]:
+        if budget[0] <= 0:
+            break
+        budget[0] -= 1
+        metric = metrics[symbol] or {}
+        try:
+            articles = fetch(market, symbol, metric.get("name") or symbol, now) or []
+        except Exception:  # 뉴스 실패가 섹터 블록을 막지 않는다
+            articles = []
+        if not articles:
+            continue
+        newest = max(articles, key=lambda item: str(item.get("available_at") or ""))
+        labels = headline_labels(newest.get("headline"))
+        if labels:
+            labels_by_symbol[symbol] = labels[:2]
+    grouped = {}
+    for symbol, labels in labels_by_symbol.items():
+        for label in labels:
+            grouped.setdefault(label, []).append(symbol)
+    rows = []
+    for label, symbols in grouped.items():
+        if len(symbols) < DYNAMIC_CLUSTER_MINIMUM:
+            continue
+        symbols = sorted(symbols)
+        moves = [float(metrics[symbol].get("return_pct") or 0) for symbol in symbols]
+        turnover = sum(float(metrics[symbol].get("turnover") or 0) for symbol in symbols)
+        theme_names = sorted({name for symbol in symbols for name in membership.get(symbol, ())})
+        move = sum(moves) / len(moves)
+        rows.append({
+            "label": label, "market": market, "symbols": symbols,
+            "members": [dict(symbol=symbol, name=metrics[symbol].get("name") or symbol,
+                             return_pct=moves[index],
+                             outside_basket=symbol not in membership)
+                        for index, symbol in enumerate(symbols)],
+            "turnover": turnover or None,
+            "return_pct": round(move, 2),
+            "up": sum(1 for value in moves if value > 0), "total": len(symbols),
+            "outside_basket": sum(1 for symbol in symbols if symbol not in membership),
+            "themes": theme_names,
+            "state": "주도" if move > 0 else "약세",
+            "source": "headline_keyword",
+        })
+    rows.sort(key=lambda row: (-(row["turnover"] or 0), -row["total"], row["label"]))
+    return rows[:limit]
+
+
 def _download(symbols, market, downloader):
     if downloader is not None:
         return downloader(symbols, market)
@@ -541,7 +751,7 @@ def session_progress(now, market):
 
 
 def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
-                          headlines=None, with_news=True, mode=None):
+                          headlines=None, with_news=True, mode=None, extra_quotes=None):
     """한 시장의 세부 테마 스냅샷. 시세가 없으면 지어내지 않고 error로 남긴다.
 
     `mode`는 어느 세션을 읽을지 정한다.
@@ -551,6 +761,10 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
     * ``intraday`` — 당일 장중 봉을 포함해 실시간 등락·거래대금 페이스로 순위를 낸다.
     * ``None`` — 지금이 정규장이면 ``intraday``, 아니면 ``previous``가 아닌 **있는 그대로**
       (마감 뒤에는 당일 종가가 이미 완성본이라 그것을 쓴다).
+
+    `extra_quotes`는 고정 바스켓 밖에서 거래대금이 몰린 종목의 지표다(호출부가 이미 가진
+    스캔 지표·KIS 당일 거래대금 순위). 테마 집계에는 들어가지 않고 동적 이슈 클러스터의
+    후보로만 쓰인다 — 바스켓에 없는 종목이 뉴스 재료로 같이 움직이는 것을 잡기 위해서다.
     """
     market = "US" if str(market).upper().startswith("US") else "KR"
     live = (mode == "intraday") if mode else (session_progress(now, market) is not None)
@@ -563,7 +777,11 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
                     benchmark_date=None, data_date=None, intraday=False, rows=[], quoted=0,
                     mode=mode or ("intraday" if live else "latest"),
                     members=len(set(symbols)), source="theme_member_daily_aggregate",
-                    excluded=[], unaligned=[], error=None, checked_at=now.isoformat())
+                    excluded=[], unaligned=[], error=None, checked_at=now.isoformat(),
+                    dynamic_clusters=[], outside_quotes=0,
+                    # 한 종목이 여러 테마에 속하는 공유 종목 수(중복 허용의 가시화).
+                    shared_members=sum(1 for names in theme_membership(market).values()
+                                       if len(names) > 1))
     try:
         prices = _download(list(dict.fromkeys([*symbols, benchmark])), market, downloader)
     except Exception as exc:  # 테마 집계 실패가 알림 자체를 막지 않는다
@@ -653,6 +871,28 @@ def theme_sector_snapshot(market, now, limit=DEFAULT_LIMIT, downloader=None,
     snapshot["rows"] = ranked
     if not ranked:
         snapshot["error"] = "테마 구성종목 시세 부족"
+    # 동적 이슈 클러스터: 고정 바스켓 밖 거래대금 상위(extra_quotes)까지 같은 헤드라인
+    # 키워드로 묶는다. 뉴스·추가 지표가 없으면 빈 목록이고, 실패해도 블록은 그대로다.
+    if with_news and ranked:
+        names = {member[0]: member[1] for _, members in themes for member in members}
+        cluster_metrics = {symbol: dict(metric, name=names.get(symbol, symbol))
+                           for symbol, metric in metrics.items()}
+        for quote in extra_quotes or []:
+            symbol = str((quote or {}).get("symbol") or "")
+            if not symbol or symbol in cluster_metrics:
+                continue
+            session = quote.get("data_date")
+            if reference and session and session != reference:
+                continue
+            cluster_metrics[symbol] = dict(quote)
+        snapshot["outside_quotes"] = sum(1 for symbol in cluster_metrics if symbol not in names)
+        try:
+            snapshot["dynamic_clusters"] = dynamic_theme_clusters(
+                cluster_metrics, market, now, headlines,
+                budget=[DYNAMIC_CLUSTER_LOOKUPS], membership=theme_membership(market))
+        except Exception as exc:  # 클러스터 실패가 섹터 블록을 막지 않는다
+            print(f"{market} dynamic cluster failed ({type(exc).__name__})")
+            snapshot["dynamic_clusters"] = []
     return snapshot
 
 
@@ -706,15 +946,54 @@ def _theme_stamp(snapshot, market):
     return "직전 세션 기준"
 
 
+def _turnover_measure(row, market, live):
+    """`거래대금 5,350억(4.4배)` — 규모와 유입 배수를 한 덩어리로 읽히게."""
+    amount = _turnover_text(row.get("turnover"), market)
+    multiple = row.get("turnover_pace_ratio") if live else None
+    if multiple is None:
+        multiple = row.get("inflow_multiple")
+    if multiple is None:
+        multiple = row.get("turnover_ratio")
+    if amount:
+        return f"거래대금 {amount}" + (f"({multiple:.1f}배)" if isinstance(multiple, (int, float)) else "")
+    if isinstance(multiple, (int, float)):
+        return f"거래대금 {multiple:.1f}배"
+    return None
+
+
+def _cluster_lines(snapshot, market, shown):
+    """동적 이슈 클러스터 줄. 위 테마 줄이 이미 같은 종목 묶음을 보여 줬으면 싣지 않는다.
+
+    고정 테마 하나에 그대로 들어가는 무리는 새 정보가 아니다. 클러스터가 여러 테마에
+    걸치거나 바스켓 밖 종목을 포함할 때만 한 줄로 알린다.
+    """
+    shown_members = [set(row.get("symbols") or []) for row in shown]
+    lines = []
+    for cluster in snapshot.get("dynamic_clusters") or []:
+        members = set(cluster.get("symbols") or [])
+        if not members:
+            continue
+        if any(members <= block for block in shown_members if block):
+            continue
+        names = " · ".join(f"{member['name']} {member['return_pct']:+.1f}%"
+                           for member in (cluster.get("members") or [])[:3])
+        amount = _turnover_text(cluster.get("turnover"), market)
+        lines.append(f"동적 이슈: {cluster.get('label')} — {names}"
+                     + (f" · 거래대금 {amount}" if amount else ""))
+        if len(lines) >= DYNAMIC_CLUSTER_LIMIT:
+            break
+    return lines
+
+
 def format_theme_block(snapshot, market=None, limit=4):
-    """`세부 테마` 블록: 테마 등락·거래대금·상승비율, 대표주 등락, 이슈 한 줄."""
+    """`세부 테마` 블록: 거래대금 유입(규모·배수)·등락률·상승비율, 대표주, 이슈 한 줄."""
     snapshot = snapshot or {}
     rows = (snapshot.get("rows") or [])[:limit]
     if not rows:
         return [f"세부 테마: {snapshot['error']}"] if snapshot.get("error") else []
     market = market or snapshot.get("market")
     label = MARKET_LABELS.get(market, market or "시장")
-    head = f"세부 테마 · {_theme_stamp(snapshot, market)}"
+    head = f"세부 테마 · {_theme_stamp(snapshot, market)} · 거래대금 유입 순"
     if snapshot.get("benchmark_return_pct") is not None:
         pct = snapshot["benchmark_return_pct"]
         if snapshot.get("benchmark_aligned", True):
@@ -728,20 +1007,15 @@ def format_theme_block(snapshot, market=None, limit=4):
     lines = [head]
     live = bool(snapshot.get("intraday"))
     for index, row in enumerate(rows, 1):
-        parts = [f"{row.get('return_pct', 0):+.1f}%"]
-        if live:
-            # 장중에는 증권사 화면과 같은 '거래대금 금액 + 경과시간 대비 배수'를 쓴다.
-            amount = _turnover_text(row.get("turnover"), market)
-            pace = row.get("turnover_pace_ratio")
-            if amount:
-                parts.append(f"거래대금 {amount}" + (f"({pace:.1f}배)" if isinstance(pace, (int, float)) else ""))
-            elif row.get("turnover_ratio"):
-                parts.append(f"거래대금 {row['turnover_ratio']:.1f}배")
-        elif row.get("turnover_ratio"):
-            parts.append(f"거래대금 {row['turnover_ratio']:.1f}배")
+        # 거래대금(규모 + 유입 배수)을 먼저, 등락률을 뒤에 — 증권사 `지금 섹터는?`과 같은
+        # 순서다(2026-11-26 지시). 배수는 장중이면 경과시간 보정 페이스, 장전이면 평소 대비다.
+        parts = [part for part in (_turnover_measure(row, market, live),
+                                   f"{row.get('return_pct', 0):+.1f}%") if part]
         if row.get("total"):
             parts.append(f"상승 {row.get('up', 0)}/{row['total']}")
-        if row.get("state") == "상대강세":
+        if row.get("dumping"):
+            parts.append("투매")
+        elif row.get("state") == "상대강세":
             parts.append("지수 대비 강세")
         lines.append(f"{index}. {row['name']} " + " · ".join(parts))
         leaders = row.get("leaders") or []
@@ -754,6 +1028,7 @@ def format_theme_block(snapshot, market=None, limit=4):
             # 기사가 없을 때의 '상승 7/7종목 · 거래대금 0.6배' 요약은 바로 위 테마 줄과 같은
             # 숫자를 두 번 쓰는 것이다. 기록(`row['issue']`)은 남기되 메시지에는 싣지 않는다.
             lines.append(f"   {row['issue']}")
+    lines.extend(_cluster_lines(snapshot, market, rows))
     return lines
 
 
