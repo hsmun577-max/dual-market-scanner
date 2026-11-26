@@ -464,6 +464,7 @@ def calculate_indicators(data, benchmark=None):
 
     relative_strength = None
     market_return = None
+    market_return_5d = None
     market_above_ma20 = None
     market_ma20 = None
     market_ma20_date = None
@@ -495,6 +496,12 @@ def calculate_indicators(data, benchmark=None):
                 1 for stamp in close.index
                 if (stamp.date() if hasattr(stamp, "date") else stamp) > (index_last.date()
                                                                          if hasattr(index_last, "date") else index_last))
+
+        if len(close) >= 6 and len(index_upto) >= 6:
+            stock_days = pd.DatetimeIndex(close.index[-6:]).date
+            index_days = pd.DatetimeIndex(index_upto.index[-6:]).date
+            if np.array_equal(stock_days, index_days):
+                market_return_5d = float(index_upto.iloc[-1] / index_upto.iloc[-6] - 1)
 
         aligned = pd.concat(
             [
@@ -555,6 +562,7 @@ def calculate_indicators(data, benchmark=None):
         "atr14_pct": safe_float(100 * pd.concat([high-low, (high-close.shift()).abs(),
             (low-close.shift()).abs()],axis=1).max(axis=1).tail(14).mean()/price),
         "market_return_20d": safe_float(market_return),
+        "market_return_5d": safe_float(market_return_5d),
         "market_above_ma20": market_above_ma20,
         "market_ma20": safe_float(market_ma20),
         "market_ma20_date": market_ma20_date,
@@ -1588,6 +1596,10 @@ def send_telegram_summary(report):
                     if include_kr_premarket(kr_watch) else [])
         if kr_lines:
             lines.extend(['', *kr_lines])
+    from bearish_watch import format_block as format_bearish_watch
+    bearish_lines = format_bearish_watch(report.get('bearish_watch'), market)
+    if bearish_lines:
+        lines.extend(['', *bearish_lines])
     # The reversal tracks are delivered in their own section: they are exempt from the
     # regime gate by design (they are the entries a downtrend leaves on the table), so
     # they must never be read as momentum buys that passed it.
@@ -1899,6 +1911,9 @@ def main():
             except Exception as exc:  # 테마 집계 실패가 전체 리포트를 막지 않는다
                 print(f"{market} theme sectors unavailable ({type(exc).__name__})")
         prepare_selected_analysis(report)
+
+    import bearish_watch
+    bearish_watch.attach(report, last_completed_session("US", datetime.now(timezone.utc)).isoformat())
 
     # 자산군 상승 흐름·시장 분위기는 리포트 JSON(`asset_regime`)과 텔레그램 최상단에 함께
     # 남긴다. 조회 실패가 스캔·발송을 막지 않는다.
