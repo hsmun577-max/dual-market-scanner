@@ -856,6 +856,14 @@ def prepare_selected_analysis(report):
     attach_sector_catalysts(report, shared_events, event_at, last_completed_session("KR", event_at).isoformat())
     report["event_discovery"] = {"profile_count":len(registry),"linked_symbols":linked,
                                  "feed_coverage":event_coverage,"universe_wide_news_coverage":False}
+    from issuer_catalyst_discovery import discover as discover_issuer_catalysts, merge_candidates
+    issuer_discovery = (discover_issuer_catalysts(report["results"], datetime.now(timezone.utc))
+                        if report.get("full_market_scan") else
+                        {"items": [], "coverage": {}, "complete_news_coverage": False})
+    report["issuer_catalyst_discovery"] = issuer_discovery
+    for item in report["results"]:
+        item.pop("issuer_catalyst_watch", None)
+        item.pop("discovery_tracks", None)
     for market in ("KR", "US"):
         pool = [item for item in report["results"] if item["market"] == market
                 and (not is_fund(item) or item["symbol"] in promoted_sets.get(market,set()))]
@@ -864,6 +872,7 @@ def prepare_selected_analysis(report):
                 or (market=="KR" and item["symbol"].split(".")[0]==symbol))]
         selected = select_analysis_candidates(pool, market, event_symbols,
                                               pinned=promoted_sets.get(market,()))
+        selected = merge_candidates(selected, pool, issuer_discovery["items"], market)
         watched=[item['symbol'] for item in selected if item.get('selection_reason')=='catalyst_watch']
         if watched:
             # Research budget spent before any news is read; the promotion itself only
@@ -1648,6 +1657,10 @@ def send_telegram_summary(report):
     sector_catalyst_lines = format_sector_catalysts(report.get("kr_sector_catalyst_watch"), market)
     if sector_catalyst_lines:
         lines.extend(["", *sector_catalyst_lines])
+    from issuer_catalyst_discovery import format_block as format_issuer_catalysts
+    issuer_lines = format_issuer_catalysts(report.get('issuer_catalyst_discovery') or {}, market)
+    if issuer_lines:
+        lines.extend(['', *issuer_lines])
     from bearish_watch import format_block as format_bearish_watch
     bearish_lines = format_bearish_watch(report.get('bearish_watch'), market)
     if bearish_lines:
@@ -1666,6 +1679,7 @@ def send_telegram_summary(report):
                  and item.get('preopen_signal',{}).get('track')!='rebound'
                  and item.get("company_forecast", {}).get("composite_score") is not None]
     confirmed.sort(key=lambda item: (-nonchart_priority(item),
+                                     -int({'chart', 'issuer_catalyst'}.issubset(item.get('discovery_tracks', ()))),
                                      -item['company_forecast']['composite_score']))
     # A preopen price plan is not an executable live entry confirmation.
     conditional_rows = [row for row in confirmed

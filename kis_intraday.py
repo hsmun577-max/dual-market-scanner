@@ -32,7 +32,7 @@ from candidate_selection import (INVERSE_BENCHMARKS, instrument_rejection_reason
 from theme_sectors import sector_section, theme_membership, theme_sector_snapshot
 from telegram_text import rest_note, split_telegram_text
 from exit_policy import DEFAULT_EXIT_POLICY, classify_asset, exit_policy_for
-from tradable_signal import floor_order_price
+from tradable_signal import floor_order_price, support_stop_reason
 from provider_retry import call as provider_call, isolate_yfinance_cache, transient
 from scanner import (KR_SYMBOL_NAMES, MARKET_INDEX_SYMBOLS, US_SYMBOL_NAMES,
                      attach_inverse_regime, calculate_indicators, classify_signal, clean_prices,
@@ -1570,6 +1570,8 @@ def daily_candidates(previous_session, overseas=False):
                     or item.get("company_analysis",{}).get("event_analysis",{}).get(
                         "economic_graph",{}).get("expectation_links")]
                 candidates = select_analysis_candidates(fresh,"KR",event_symbols,limit=len(SYMBOLS))
+                issuer_watch = [item for item in fresh if item.get("issuer_catalyst_watch")][:2]
+                candidates = list({item["symbol"]: item for item in [*issuer_watch, *candidates]}.values())
                 for item in candidates:
                     KR_SYMBOL_NAMES[item["symbol"]] = item.get("name") or item["symbol"]
                     KR_SYMBOL_NAMES[f"{item['symbol'].split('.')[0]}.KS"] = KR_SYMBOL_NAMES[item["symbol"]]
@@ -1801,6 +1803,10 @@ def evaluate_candidate(bars, quote, closes, window, symbol, evidence, overseas, 
     stop = limit * (1 - stop_pct)
     if quote["bid"] <= stop:
         return "entry_below_fixed_stop", None
+    if require_pullback:
+        reason = support_stop_reason(quote["bid"], stop, bars[3]["low"])
+        if reason:
+            return reason, None
     label = "관찰 구간 VWAP 회복·첫 눌림 지지" if require_pullback else "종합평가 5거래일 시나리오"
     projection = (forecast["base_price"], label)
     return "buy_signal", (symbol, *metrics, limit, stop, projection)

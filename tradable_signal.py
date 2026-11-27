@@ -40,6 +40,29 @@ def number(value):
         return result if math.isfinite(result) else None
     except (ValueError,TypeError):return None
 
+def support_stop_reason(bid, stop, support):
+    support = number(support)
+    if support is None or support <= 0:
+        return 'pullback_support_unverified'
+    if bid <= support:
+        return 'pullback_support_lost'
+    if stop >= support:
+        return 'fixed_stop_above_support'
+    return None
+
+
+def live_support_rejection(quote, row, entry_cap, bid):
+    # Current execution quotes always include the field, even on a data gap.
+    # Archived quotes can still be evaluated under their historical contract.
+    if 'pullback_support' not in quote:
+        return None
+    policy = exit_policy_for(row)
+    stop = round_trigger(Decimal(str(entry_cap)) * (1 - Decimal(str(policy.stop_pct))))
+    reason = support_stop_reason(bid, stop, quote['pullback_support'])
+    return dict(reason=reason, stop_price=stop,
+                pullback_support=quote['pullback_support']) if reason else None
+
+
 def rebound_entry(plan,quote,at,result,seen,market='KR'):
     """A rebound plan is priced from the observed open, never from the prior close.
 
@@ -91,8 +114,11 @@ def early_entry(plan,quote,at,result,seen,market='KR',score=None,requirements=No
     if limit is None or limit<=0:return reject('entry_limit_missing')
     if ask>limit:return reject('waiting_for_entry_price')
     if ask<limit*.98:return reject('price_moved_requires_reanalysis')
-    policy=exit_policy_for({'asset_type':plan.get('asset_class'),
-                            'name':result.get('name')})
+    instrument = {'asset_type': plan.get('asset_class'), 'name': result.get('name')}
+    blocked = live_support_rejection(quote, instrument, limit, bid)
+    if blocked:
+        return dict(result, **blocked)
+    policy = exit_policy_for(instrument)
     return dict(result,trade_ready=True,reason='entry_conditions_met',track='early_entry',
         strategy=plan.get('strategy'),label=plan.get('label'),score=score,
         hold_sessions=plan.get('hold_sessions'),entry_requirements=requirements,
@@ -101,6 +127,7 @@ def early_entry(plan,quote,at,result,seen,market='KR',score=None,requirements=No
         day_open=number(quote.get('day_open')),entry_offset_pct=plan.get('entry_offset_pct'),
         stop_price=round_trigger(Decimal(str(ask))*Decimal(str(1-policy.stop_pct))),
         take_profit_price=round_trigger(Decimal(str(ask))*Decimal(str(1+policy.take_profit_pct))),
+        pullback_support=quote.get('pullback_support'),
         stop_pct=policy.stop_pct,take_profit_pct=policy.take_profit_pct,
         asset_class=plan.get('asset_class'),take_profit_mode=policy.take_profit_mode,
         exit_policy=policy.snapshot(),quote_at=seen.isoformat(),
@@ -188,12 +215,16 @@ def validate_entry(row,quote,at,session_open):
                     volume_ratio=quote.get('volume_ratio'),catalyst=plan.get('catalyst'))
     reward = reward_check(row, ask, base, bid)
     if not reward['allowed']:return reject('insufficient_expected_reward')
+    blocked = live_support_rejection(quote, row, limit, bid)
+    if blocked:
+        return dict(result, **blocked)
     return dict(result,trade_ready=True,reason='entry_conditions_met',score=score,
         entry_requirements=dict(min_score=required, **reward),
         reference_price=plan.get('reference_price'),reference_date=plan.get('reference_date'),
         indicative_entry=ask,entry_limit=limit,entry_floor=floor,bid=bid,
         stop_price=round_trigger(Decimal(str(ask))*Decimal(str(1-policy.stop_pct))),
         take_profit_price=round_trigger(Decimal(str(ask))*Decimal(str(1+policy.take_profit_pct))),base_target=base,bull_target=bull,
+        pullback_support=quote.get('pullback_support'),
         stop_pct=policy.stop_pct,take_profit_pct=policy.take_profit_pct,
         asset_class=classify_asset(row)[0],
         take_profit_mode=policy.take_profit_mode,exit_policy=policy.snapshot(),
@@ -205,6 +236,9 @@ def validate_entry(row,quote,at,session_open):
 
 HOLD_REASON_LABELS = {
     'market_closed': '장 마감 · 다음 거래일 시가 확인',
+    'pullback_support_unverified': '눌림 지지와 회복 확인 대기',
+    'pullback_support_lost': '눌림 지지 이탈 · 새 지지 확인 대기',
+    'fixed_stop_above_support': '손절선이 눌림 지지와 같거나 위 · 더 낮은 진입 또는 새 지지 대기',
     'wrong_plan_session': '계획 세션 아님 · 다음 세션 계획',
     'waiting_for_entry_price': '현재 호가가 매수 상한 초과',
     'price_moved_requires_reanalysis': '가격이 계획 밖으로 이동 · 재분석 필요',
@@ -306,7 +340,9 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans
             lines.extend(['',f"• {row['name']} ({code}) · 종합 {row['score']:.1f}",
                 *([f"  호재: {evidence['summary']}"] if evidence.get('summary') else []),
                 f"  매수 {row['entry_limit']:,.0f}원 · 목표 {target:,.0f}원 · 손절 −{row['stop_pct']:.0%}"
-                + (f" · {until}까지" if until else "")])
+                + (f" · {until}까지" if until else ""),
+                *([f"  눌림 지지 {row['pullback_support']:,.0f}원 · 기준 손절가 {row['stop_price']:,.0f}원"]
+                  if row.get('pullback_support') else [])])
         if len(ready) > 5:
             from telegram_text import rest_note
             lines.append(f"   {rest_note(len(ready), 5)} (분석자료 참고)")

@@ -89,6 +89,10 @@ def main():
     # 두 블록은 같은 내용을 두 번 말한다(scanner·kis_intraday와 같은 규칙).
     sector_lines=sector_section(report.get('sectors') or [], theme, 'KR',
                                 override=format_report(industry).splitlines() if industry.get('rows') else None)
+    from issuer_catalyst_discovery import format_block as format_issuer_catalysts
+    issuer_lines = format_issuer_catalysts(report.get('issuer_catalyst_discovery') or {}, 'KR')
+    if issuer_lines:
+        sector_lines = [*sector_lines, '', *issuer_lines]
     import mid_term_watch
     # 확인되지 않은 계획도 "무엇을 찾았는지"는 남긴다. 장 마감 후 요청이면 어떤 계획도
     # 호가로 확정될 수 없어 메시지가 '보류' 한 줄로 끝나기 때문이다. 계획은 계획으로만 쓴다.

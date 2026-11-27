@@ -283,6 +283,10 @@ def select_analysis_candidates(pool, market, event_symbols=(), limit=48, entry_s
     rebounds={row['symbol'] for row in rebound}; pinned_set=set(pinned_symbols)
     early_entries={row['symbol'] for row in early_entry}
     for row in selected[:limit]:
+        if row['symbol'] in entries | rebounds | early_entries:
+            tracks = row.setdefault('discovery_tracks', [])
+            if 'chart' not in tracks:
+                tracks.append('chart')
         # Only a name that arrived through its own budget is labelled with it; a reversal
         # setup is the more specific reason when both apply.
         if row['symbol'] in rebounds and row['symbol'] not in entries:

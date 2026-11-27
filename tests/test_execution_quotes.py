@@ -65,3 +65,14 @@ class ExecutionQuoteTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+def test_support_uses_completed_contiguous_minutes_and_needs_a_recovery():
+    case = ExecutionQuoteTests()
+    minutes = case.minute_payload('20261120', 200)
+    for index, row in enumerate(minutes['output2']):
+        price = 10000 if 1 <= index <= 5 or index >= 11 else 9850
+        row.update(stck_prpr=str(price), stck_lwpr=str(price - 10))
+    assert parse_execution_quote(case.book(), minutes, AT)['pullback_support'] == 9840
+    minutes['output2'].pop(7)
+    assert parse_execution_quote(case.book(), minutes, AT)['pullback_support'] is None

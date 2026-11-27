@@ -46,7 +46,8 @@ def _minute_rows(payload, zone):
         volume = _number(row.get('cntg_vol'))
         if volume is None or volume < 0:
             continue
-        rows[minute] = (volume, _number(row.get('stck_prpr')), _number(row.get('stck_oprc')))
+        rows[minute] = (volume, _number(row.get('stck_prpr')), _number(row.get('stck_oprc')),
+                        _number(row.get('stck_lwpr')))
     return rows
 
 
@@ -75,6 +76,25 @@ def _same_time_volume(today, prior, observed, anchor):
         return {}
     return dict(volume_ratio=volume / previous_volume, volume_window_minutes=len(clocks),
                 volume_window_end=end.isoformat(), volume_reference_date=previous.date().isoformat())
+
+
+def confirmed_pullback_support(rows, observed):
+    """Confirm a pullback and recovery using three completed five-minute candles."""
+    end = observed.replace(second=0, microsecond=0) - (observed.minute % 5) * MINUTE
+    prices = []
+    for offset in range(15, 0, -1):
+        clock = end - offset * MINUTE
+        row = rows.get(clock)
+        if not row or row[0] <= 0 or row[1] is None or row[3] is None or not 0 < row[3] <= row[1]:
+            return None
+        prices.append(row)
+    first, pullback, recovery = [prices[start:start + 5] for start in (0, 5, 10)]
+    support = min(row[3] for row in pullback)
+    if (support < min(row[3] for row in first)
+            and pullback[-1][1] < first[-1][1] <= recovery[-1][1]
+            and min(row[3] for row in recovery) > support):
+        return support
+    return None
 
 
 def parse_execution_quote(book, minutes, at, *, previous_minutes=None, volume_anchor=None):
@@ -109,6 +129,7 @@ def parse_execution_quote(book, minutes, at, *, previous_minutes=None, volume_an
                 ask_size=float(orderbook['askp_rsqn1']), bid_size=float(orderbook['bidp_rsqn1']),
                 observed_at=observed.isoformat(), trade_at=completed[-1].isoformat(),
                 day_open=day_open, last_price=last_price,
+                pullback_support=confirmed_pullback_support(today, min(observed, at)),
                 cumulative_volume=sum(row[0] for row in traded),
                 **comparison,
                 source='KIS orderbook plus completed current-day minute',
