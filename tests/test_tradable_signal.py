@@ -168,3 +168,17 @@ class TradableSignalTests(unittest.TestCase):
         self.assertNotIn('보류종목',message)
 
 if __name__=='__main__':unittest.main()
+
+
+def test_live_fixed_stop_waits_for_verified_support_below_bid_and_above_stop():
+    for support, reason in [(None, 'pullback_support_unverified'),
+                            (9690, 'fixed_stop_above_support'),
+                            (9700, 'fixed_stop_above_support'),
+                            (9990, 'pullback_support_lost')]:
+        row, quote = fixture()
+        signal = validate_entry(row, dict(quote, pullback_support=support), AT, True)
+        assert not signal['trade_ready']
+        assert signal['reason'] == reason
+    row, quote = fixture()
+    signal = validate_entry(row, dict(quote, pullback_support=9750), AT, True)
+    assert signal['trade_ready'] and signal['stop_price'] == 9700
