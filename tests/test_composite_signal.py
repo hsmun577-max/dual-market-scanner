@@ -152,7 +152,8 @@ class CompositeSignalTests(unittest.TestCase):
         status,candidate=evaluate_candidate(bars,quote,AT,'KRX','005930',evidence,False,
                                             company=company,sectors=sectors)
         self.assertGreaterEqual(company['forecast']['composite_score'],MIN_COMPOSITE_SCORE)
-        self.assertLess(company['forecast']['base_return_pct'],5.25)
+        # 2.84% — well under the 4.986% a −3% stop needs at the 1.42 floor (2026-11-27).
+        self.assertLess(company['forecast']['base_return_pct'],4.986)
         self.assertEqual(status,'insufficient_expected_reward')
         self.assertIsNone(candidate)
 

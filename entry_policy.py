@@ -8,7 +8,11 @@ MIN_COMPOSITE_SCORE = 56.0
 FUND_SCORE_FLOOR = 53.0
 EARLY_ENTRY_SCORE_FLOOR = 53.0
 MIN_CATALYST_COMPOSITE_SCORE = 50.0
-MIN_NET_REWARD_RISK = 1.5
+# 2026-11-27 (혜선 님 "기대수익 5프로여도 배제하지마"): 1.5 → 1.42. At the 0.30% cost floor
+# a single stock needs 1.42*(3%+0.30%)+0.30% = 4.99% (an ETF 3.57%), so a 5.0% base reward
+# clears the gate at a net ratio of 1.4242 instead of failing at 1.5. The ratio itself is
+# unchanged: a wider live spread still raises the reward it asks for.
+MIN_NET_REWARD_RISK = 1.42
 ROUND_TRIP_COST_FLOOR = .003
 NON_SPREAD_COST = .001
 
