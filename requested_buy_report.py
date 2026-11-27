@@ -89,6 +89,10 @@ def main():
     # 두 블록은 같은 내용을 두 번 말한다(scanner·kis_intraday와 같은 규칙).
     sector_lines=sector_section(report.get('sectors') or [], theme, 'KR',
                                 override=format_report(industry).splitlines() if industry.get('rows') else None)
+    from theme_priority import format_block as format_theme_priority
+    priority_lines = format_theme_priority(report.get("theme_research_priority"), "KR")
+    if priority_lines:
+        sector_lines = [*sector_lines, "", *priority_lines]
     from scheduled_event_watch import format_block as format_scheduled_events
     event_lines = format_scheduled_events(report.get("scheduled_event_watch"), "KR")
     if event_lines:

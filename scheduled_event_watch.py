@@ -33,7 +33,7 @@ EVENTS = (
 MAX_PEERS = 4
 
 
-def _flows(symbol, session):
+def session_flow(symbol, session):
     try:
         rows = naver_trend(symbol.split(".")[0], sessions=10)
     except (requests.RequestException, ValueError):
@@ -49,7 +49,7 @@ def _institution_buy(flow):
 
 def attach(report, at, reference_session, *, read_flows=None):
     """Find linked issuers with relative strength and same-session theme buying."""
-    read_flows = read_flows or _flows
+    read_flows = read_flows or session_flow
     if at.utcoffset() is None:
         raise ValueError("Event observation requires an aware time")
     rows = {}

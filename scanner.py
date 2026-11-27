@@ -465,6 +465,7 @@ def calculate_indicators(data, benchmark=None):
     relative_strength = None
     market_return = None
     market_return_5d = None
+    market_return_1d = None
     market_above_ma20 = None
     market_ma20 = None
     market_ma20_date = None
@@ -496,6 +497,11 @@ def calculate_indicators(data, benchmark=None):
                 1 for stamp in close.index
                 if (stamp.date() if hasattr(stamp, "date") else stamp) > (index_last.date()
                                                                          if hasattr(index_last, "date") else index_last))
+
+        if len(close) >= 2 and len(index_upto) >= 2:
+            if np.array_equal(pd.DatetimeIndex(close.index[-2:]).date,
+                              pd.DatetimeIndex(index_upto.index[-2:]).date):
+                market_return_1d = float(index_upto.iloc[-1] / index_upto.iloc[-2] - 1)
 
         if len(close) >= 6 and len(index_upto) >= 6:
             stock_days = pd.DatetimeIndex(close.index[-6:]).date
@@ -562,6 +568,7 @@ def calculate_indicators(data, benchmark=None):
         "atr14_pct": safe_float(100 * pd.concat([high-low, (high-close.shift()).abs(),
             (low-close.shift()).abs()],axis=1).max(axis=1).tail(14).mean()/price),
         "market_return_20d": safe_float(market_return),
+        "market_return_1d": safe_float(market_return_1d),
         "market_return_5d": safe_float(market_return_5d),
         "market_above_ma20": market_above_ma20,
         "market_ma20": safe_float(market_ma20),
@@ -864,6 +871,8 @@ def prepare_selected_analysis(report):
                         if report.get("full_market_scan") else
                         {"items": [], "coverage": {}, "complete_news_coverage": False})
     report["issuer_catalyst_discovery"] = issuer_discovery
+    from theme_priority import prioritize as prioritize_theme_research
+    report["theme_research_priority"] = {}
     for item in report["results"]:
         item.pop("issuer_catalyst_watch", None)
         item.pop("discovery_tracks", None)
@@ -876,6 +885,9 @@ def prepare_selected_analysis(report):
         selected = select_analysis_candidates(pool, market, event_symbols,
                                               pinned=promoted_sets.get(market,()))
         selected = merge_candidates(selected, pool, issuer_discovery["items"], market)
+        if pool and report.get("theme_sectors"):
+            reference = (kr_reference if market == "KR" else last_completed_session("US", event_at).isoformat())
+            selected = prioritize_theme_research(report, pool, selected, market, reference)
         watched=[item['symbol'] for item in selected if item.get('selection_reason')=='catalyst_watch']
         if watched:
             # Research budget spent before any news is read; the promotion itself only
@@ -1660,6 +1672,10 @@ def send_telegram_summary(report):
     sector_catalyst_lines = format_sector_catalysts(report.get("kr_sector_catalyst_watch"), market)
     if sector_catalyst_lines:
         lines.extend(["", *sector_catalyst_lines])
+    from theme_priority import format_block as format_theme_priority
+    priority_lines = format_theme_priority(report.get("theme_research_priority"), market)
+    if priority_lines:
+        lines.extend(["", *priority_lines])
     from scheduled_event_watch import format_block as format_scheduled_events
     event_lines = format_scheduled_events(report.get("scheduled_event_watch"), market)
     if event_lines:
