@@ -142,13 +142,19 @@ class PreopenTests(unittest.TestCase):
         result = evaluate_preopen(self.report(row), '2026-11-18', AT)
         self.assertEqual(result['recommendations'], ['352820.KS'])
         self.assertEqual(result['policy']['score_floors']['stock_trend'], 56)
-        self.assertEqual(result['policy']['minimum_gross_reward_pct']['stock'], 5.25)
+        self.assertEqual(result['policy']['minimum_gross_reward_pct']['stock'], 4.99)
 
         row['company_forecast']['composite_score'] = 55.9
         self.assertEqual(evaluate_preopen(self.report(row), '2026-11-18', AT)['recommendations'], [])
         self.assertEqual(row['preopen_decision'], 'composite_score_below_policy')
 
-        row['company_forecast'].update(composite_score=56, base_price=10520)
+        row['company_forecast'].update(composite_score=56, base_price=10500)
+        # 2026-11-27: 5.0% 기대수익은 배제하지 않는다(net 1.4242).
+        result = evaluate_preopen(self.report(row), '2026-11-18', AT)
+        self.assertEqual(result['recommendations'], ['352820.KS'])
+        self.assertEqual(row['preopen_signal']['entry_requirements']['net_reward_risk'], 1.4242)
+
+        row['company_forecast'].update(base_price=10490)
         self.assertEqual(evaluate_preopen(self.report(row), '2026-11-18', AT)['recommendations'], [])
         self.assertEqual(row['preopen_decision'], 'insufficient_expected_reward')
 
