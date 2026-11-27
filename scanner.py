@@ -853,7 +853,10 @@ def prepare_selected_analysis(report):
     event_at = datetime.now(timezone.utc)
     linked = discover(registry, shared_events, event_at, limit=None)
     from sector_catalyst_watch import attach as attach_sector_catalysts
-    attach_sector_catalysts(report, shared_events, event_at, last_completed_session("KR", event_at).isoformat())
+    kr_reference = last_completed_session("KR", event_at).isoformat()
+    attach_sector_catalysts(report, shared_events, event_at, kr_reference)
+    from scheduled_event_watch import attach as attach_scheduled_events
+    attach_scheduled_events(report, event_at, kr_reference)
     report["event_discovery"] = {"profile_count":len(registry),"linked_symbols":linked,
                                  "feed_coverage":event_coverage,"universe_wide_news_coverage":False}
     from issuer_catalyst_discovery import discover as discover_issuer_catalysts, merge_candidates
@@ -1657,6 +1660,10 @@ def send_telegram_summary(report):
     sector_catalyst_lines = format_sector_catalysts(report.get("kr_sector_catalyst_watch"), market)
     if sector_catalyst_lines:
         lines.extend(["", *sector_catalyst_lines])
+    from scheduled_event_watch import format_block as format_scheduled_events
+    event_lines = format_scheduled_events(report.get("scheduled_event_watch"), market)
+    if event_lines:
+        lines.extend(["", *event_lines])
     from issuer_catalyst_discovery import format_block as format_issuer_catalysts
     issuer_lines = format_issuer_catalysts(report.get('issuer_catalyst_discovery') or {}, market)
     if issuer_lines:
