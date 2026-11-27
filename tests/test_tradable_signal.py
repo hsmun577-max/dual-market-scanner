@@ -182,3 +182,15 @@ def test_live_fixed_stop_waits_for_verified_support_below_bid_and_above_stop():
     row, quote = fixture()
     signal = validate_entry(row, dict(quote, pullback_support=9750), AT, True)
     assert signal['trade_ready'] and signal['stop_price'] == 9700
+
+
+def test_stock_buy_message_warns_when_a_two_percent_stop_precedes_support():
+    row, quote = fixture()
+    signal = validate_entry(row, dict(quote, pullback_support=9750), AT, True)
+    message = format_requested_report([], [signal], dict(completed=True), AT)
+    assert signal['trade_ready']
+    assert '−2% 손절 선택 시 대기 · 손절선 9,800원 · 눌림 지지 9,750원' in message
+
+    signal = validate_entry(row, dict(quote, pullback_support=9850), AT, True)
+    message = format_requested_report([], [signal], dict(completed=True), AT)
+    assert '손절 선택 시 대기' not in message
