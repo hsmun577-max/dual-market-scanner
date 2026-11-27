@@ -63,6 +63,17 @@ def live_support_rejection(quote, row, entry_cap, bid):
                 pullback_support=quote['pullback_support']) if reason else None
 
 
+def tighter_stock_stop_warning(row):
+    support = number(row.get('pullback_support'))
+    limit = number(row.get('entry_limit'))
+    if row.get('asset_class') != 'stock' or support is None or limit is None:
+        return []
+    stop = round_trigger(Decimal(str(limit)) * Decimal('0.98'))
+    if stop >= support:
+        return [f"  −2% 손절 선택 시 대기 · 손절선 {stop:,.0f}원 · 눌림 지지 {support:,.0f}원"]
+    return []
+
+
 def rebound_entry(plan,quote,at,result,seen,market='KR'):
     """A rebound plan is priced from the observed open, never from the prior close.
 
@@ -328,7 +339,7 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans
                 lines.extend(['',f"• {row['name']} ({code}) · 단기 상승 초입 · 종합 {row.get('score', 0):.1f}",
                     f"  시가 −1% 지정가 {row['entry_limit']:,.0f}원 (시가 {row['day_open']:,.0f}원) · 추격 없음",
                     f"  목표 +{row['take_profit_pct']:.0%} · 손절 −{row['stop_pct']:.0%} · 5거래일 보유"
-                    + (f" · {until}까지" if until else "")])
+                    + (f" · {until}까지" if until else ""), *tighter_stock_stop_warning(row)])
                 continue
             if row.get('track')=='rebound':
                 # A rebound entry has no +6% target and no -2% stop on purpose.
@@ -342,7 +353,8 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans
                 f"  매수 {row['entry_limit']:,.0f}원 · 목표 {target:,.0f}원 · 손절 −{row['stop_pct']:.0%}"
                 + (f" · {until}까지" if until else ""),
                 *([f"  눌림 지지 {row['pullback_support']:,.0f}원 · 기준 손절가 {row['stop_price']:,.0f}원"]
-                  if row.get('pullback_support') else [])])
+                  if row.get('pullback_support') else []),
+                *tighter_stock_stop_warning(row)])
         if len(ready) > 5:
             from telegram_text import rest_note
             lines.append(f"   {rest_note(len(ready), 5)} (분석자료 참고)")
