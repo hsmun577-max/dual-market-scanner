@@ -10,6 +10,11 @@ What these tests hold down: the track lifts only the momentum gate's trend confi
 (``unconfirmed_uptrend``/``weak_relative_trend``), never liquidity, a breakdown, an
 extended price or the market-regime gate; it needs the qualifier; and it keeps the owner's
 split stop (−3% stock / −2% fund) with the +6% take profit.
+
+The 20-day band the setup allows is +8% since 2026-11-27 (``early_entry_track.MAX_ABOVE_MA20``):
+the two-year Korean study found the +3~+8% band it used to refuse carried +0.84%p of excess
+return while +8~+15% carried none, so these tests hold +7.92% as a pass and +8.42% as
+refused.
 """
 from datetime import datetime, timedelta
 import unittest
@@ -123,9 +128,20 @@ class SetupTests(unittest.TestCase):
         for change in (dict(ma5_above_ma20_days=4), dict(ma5_above_ma20_days=0),
                        dict(ma5_above_ma20_days=None, ma20_cross_up=False),
                        dict(volume_ratio=1.4), dict(open=10_300.0),
-                       dict(price=10_450.0), dict(price=10_050.0),
+                       dict(price=10_950.0), dict(price=10_050.0),
                        dict(overheated=True), dict(breakdown=True)):
             self.assertIsNone(setup(early_values(**change)), change)
+
+    def test_the_band_between_three_and_eight_percent_now_qualifies(self):
+        # 10,450 is +3.47% above a 10,100 average: outside the old +3% band, inside +8%.
+        track = setup(early_values(price=10_450.0))
+        self.assertIsNotNone(track)
+        self.assertAlmostEqual(track["evidence"]["above_ma20_pct"], 0.034653, places=5)
+
+    def test_a_price_more_than_eight_percent_above_the_average_is_extended(self):
+        # The study put the band's edge at +8%: +7.92% still qualifies, +8.42% does not.
+        self.assertIsNotNone(setup(early_values(price=10_900.0)))
+        self.assertIsNone(setup(early_values(price=10_950.0)))
 
     def test_a_missing_candle_or_average_value_is_not_a_pass(self):
         for key in ("price", "open", "ma5", "ma20", "volume_ratio"):
@@ -205,11 +221,23 @@ class PreopenPlanTests(unittest.TestCase):
         self.assertEqual(result["recommendations"], [])
         self.assertNotIn("preopen_signal", item)
 
+    def test_the_widened_band_reaches_the_plan(self):
+        # +3.47% above the average used to stop here; the plan now goes out.
+        item = row(early_values(price=10_450.0))
+        result = evaluate_preopen(report(item), "2026-11-20", AT)
+        plan = item["preopen_signal"]
+        self.assertEqual(item["preopen_decision"], "conditional_buy")
+        self.assertEqual(plan["track"], "early_entry")
+        self.assertEqual(plan["evidence"]["above_ma20_pct"], 0.034653)
+        self.assertEqual(result["early_entry_candidates"], ["053210.KS"])
+        self.assertEqual(result["policy"]["early_entry"]["max_above_ma20_pct"], 8.0)
+
     def test_the_safety_blocks_and_the_regime_gate_still_hold_it_back(self):
         for change, expected in ((dict(market_above_ma20=False), "market_headwind"),
                                  (dict(average_turnover_20d=1), "insufficient_liquidity"),
                                  (dict(breakdown=True), "breakdown"),
                                  (dict(return_5d=0.13), "extended_price"),
+                                 (dict(price=10_950.0), "extended_price"),
                                  (dict(overheated=True), "extended_price")):
             item = row(early_values(**change))
             result = evaluate_preopen(report(item), "2026-11-20", AT)

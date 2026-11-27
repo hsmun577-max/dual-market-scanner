@@ -7,7 +7,7 @@ underway. The 2026-11-24 study (``evidence/dual-market-scanner/상승초입-조�
 
 * **B** — ``MA5 > MA20`` on its 1st~3rd session (or the first close above ``MA20`` after
   the averages were inverted), volume >= 1.5x the 20-day average, a bullish bar, and a
-  price within +3% of ``MA20`` (not extended).
+  price within +8% of ``MA20`` (not extended).
 * B alone is +0.069% over 5 sessions (1,851 trades, 0.28% cost), i.e. inside the random
   entry band. What pays is *who is buying*: with a measured foreign/institutional inflow
   or a fundamental score of 61+ it is +0.520% (273 trades, 5 sessions, −2% stop) and
@@ -16,6 +16,17 @@ underway. The 2026-11-24 study (``evidence/dual-market-scanner/상승초입-조�
   +0.069%; a **limit 1% below that open** (filled 83.4% of the time) gave +0.530%
   (CI +0.089~+1.007) — the one entry rule that turned a −2% stop positive in the study.
   Chasing the 16.6% that never dip back to the limit gives up that edge.
+
+The +3% band cost the track most of its chances: the 2026-11-27 two-year Korean study
+(705 names, 2024-11-26~2026-11-26, 1,222 inverted-to-aligned sessions) found the +3% band
+alone is no better than the universe (−0.44%p), while the +3~+8% band it refused carried
++0.84%p of excess return and a lower stop rate (49.1% vs 57.4%). With the regime gate on,
+widening the band to +8% moved 107 signals / 76 fills / +130.5%p to 385 / 304 / +460.9%p
+while the per-trade mean only slipped +1.72% → +1.52% (excess +1.01%p → +0.82%p; the 95%
+CI of the excess still spans 0, so this is "expansion without damage", not a proven edge).
+Past +8% the edge is gone — the +8~+15% band returned exactly the universe (0.00%p, 95
+trades) and above +15% the stop rate jumps to 66.4% — so +8% is the band's edge, and the
+surge cap (5-day +12%) and the regime gate stay exactly where they were.
 
 So this track is entered on ``open − 1%``, holds 5 sessions, and keeps the owner's own
 sell rule: the split stop of the instrument (−3% single stock, −2% fund) and +6% take
@@ -36,7 +47,9 @@ MIN_VOLUME_RATIO = 1.5
 MIN_ALIGNMENT_DAYS = 1
 MAX_ALIGNMENT_DAYS = 3
 # The study's "not extended": the close may sit at most this far above the 20-day average.
-MAX_ABOVE_MA20 = 0.03
+# +8% since 2026-11-27: the two-year study put the band's edge there (the +3~+8% band it
+# refused carried +0.84%p of excess return; +8~+15% carried none).
+MAX_ABOVE_MA20 = 0.08
 # The two qualifiers the study required beside the chart: who is already buying the
 # issuer, or how the issuer's fundamentals score today.
 QUALITY_FUNDAMENTAL_SCORE = 61.0
