@@ -1689,6 +1689,14 @@ def send_telegram_summary(report):
     urgent_lines = urgent_issues.format_urgent_block(urgent)
     if urgent_lines:
         lines.extend(['', *urgent_lines])
+    # 지수 20일선 아래라 매수 계획을 보류한 종목 중에서도 상대강도(20일 지수 대비 ≥+10%p)·
+    # 거래량(≥2.0배)이 강한 개별주만 관찰용으로 따로 보여 준다(2026-11-27 D안). 게이트·계획·
+    # 카운트는 그대로이고, 이 블록은 매수 신호가 아님을 머리줄에 밝힌다.
+    from headwind_watch import format_block as format_headwind_watch
+    headwind_lines = format_headwind_watch(
+        (report.get('buy_evaluation') or {}).get('headwind_watch'), market)
+    if headwind_lines:
+        lines.extend(['', *headwind_lines])
     # 외인·기관이 실제로 사고 있는 종목만 보낸다. 수급 미유입 대기 종목은 리포트 JSON에
     # 기록으로만 남기고 메시지 본문에는 싣지 않는다
     # (2026-11-24 지시: "수급대기우량주는 안띄워도될듯").
