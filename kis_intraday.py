@@ -1548,9 +1548,16 @@ def daily_candidates(previous_session, overseas=False):
     if not overseas and report.is_file():
         try:
             results = json.loads(report.read_text(encoding="utf-8"))["results"]
+            # 리스크 공시(최근 5세션 유증·CB·횡령·소송·최대주주변경 등)로 매수 후보에서
+            # 배제된 종목은 장중 감시에도 올리지 않는다(2026-11-27 비차트 근거 안전장치).
+            # 스캔이 남긴 `nonchart_risk`를 그대로 읽는다.
+            risky = [item for item in results if item.get("nonchart_risk")]
+            if risky:
+                print(f"리스크 공시로 장중 감시 제외 {len(risky)}종목")
             fresh = [item for item in results if item["market"] == "KR"
                      and item["symbol"].endswith((".KS", ".KQ"))
                      and item["indicators"]["data_date"] == previous_session.isoformat()
+                     and not item.get("nonchart_risk")
                      # Only the funds the scan kept as candidates (the most traded eight per
                      # market) may be watched intraday; a fund screened at fund level only is
                      # never an entry candidate.

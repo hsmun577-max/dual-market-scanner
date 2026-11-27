@@ -957,6 +957,14 @@ def prepare_selected_analysis(report):
         fund_candidate_limit=FUND_CANDIDATE_LIMIT,
         funds_demoted_after_profile=sum(1 for row in demoted if row.get('fund_demoted_after_profile')),
         funds_graded_as_operating_companies=False)
+    # 비차트 근거(2026-11-27): 분석 후보의 최근 5세션 공시를 먼저 읽어 둔다. 촉매 공시는
+    # 아래 판정이 통과시킨 후보의 텔레그램 우선순위(표시)에, 리스크 공시는 매수 후보 배제
+    # (`preopen_signals`)에 쓰인다. 차트 게이트·점수는 건드리지 않는다.
+    import nonchart_evidence
+    try:
+        nonchart_evidence.attach_candidate_evidence(report, checked)
+    except Exception as exc:
+        print('Non-chart disclosure read unavailable (' + type(exc).__name__ + ')')
     # The daily alert is the same conditional-plan path as the preopen delivery: without
     # this pass nothing in the scan could ever carry a buy plan, because a daily close is
     # never a live execution confirmation.
@@ -983,6 +991,16 @@ def prepare_selected_analysis(report):
         print('Mid-term fundamentals screen unavailable (' + type(exc).__name__ +
               '); list kept on the chart condition')
         mid_term_watch.attach(report, datetime.now(timezone.utc))
+    # 수급 선행 관찰(2026-11-27): 유동성·가격·상품 필터를 통과했지만 아직 정배열이 아닌 종목 중
+    # 5일 외인+기관 순매수 강도가 3% 이상인 이름을 별도 블록으로만 남긴다. `preopen_signal`·
+    # `buy_evaluation`은 건드리지 않으므로 매수 후보나 자동 주문 대상이 될 수 없다.
+    if report.get('supply_lead_watch') and _same_session(report.get('supply_lead_watch_at'), checked):
+        print('Supply lead watch reused from this session; no second flow read')
+    else:
+        try:
+            nonchart_evidence.attach_supply_lead_watch(report, datetime.now(timezone.utc))
+        except Exception as exc:
+            print('Supply lead watch unavailable (' + type(exc).__name__ + ')')
     # The message names conditions plans and watch names, so read their live quote once
     # here (bounded per market). A closed session or a missing credential is recorded, not
     # raised: the scan and the alert go out either way.
@@ -1217,6 +1235,22 @@ def telegram_early_entry_line(item):
             + quote_note(item))
 
 
+def _nonchart_catalyst_line(item):
+    """후보 아래에 붙는 공시 촉매 한 줄 — 없으면 빈 문자열.
+
+    공시 촉매가 붙은 후보는 목록 위로 올라오고(``send_telegram_summary``의 정렬), 근거를
+    한 줄로 보여 준다. 점수·계획은 그대로다(검증: 연 23건, 해별 부호 불안정 → 표시만).
+    """
+    from nonchart_evidence import catalyst_line
+    return catalyst_line(item)
+
+
+def nonchart_priority(item):
+    """텔레그램 정렬 우선순위 — 최근 5세션 공시 촉매가 붙은 후보가 먼저."""
+    from nonchart_evidence import priority
+    return priority(item)
+
+
 def reference_note(plan):
     """'(11/24 종가)' — the close a conditional plan's limit was built from.
 
@@ -1296,10 +1330,21 @@ def telegram_candidate_line(item):
                 f" · 손절 −{exit_policy.stop_pct:.0%}"
                 + scenario_note(upside, overseas) + reference_note(preopen) + quote_note(item))
     return (f"• {name} ({code}) · {label}{kind} · 종합 {score:.1f}\n"
+            f"{_nonchart_catalyst_line(item)}"
             f"  매수 상한 {entry_label} · {plan_target_line(exit_policy)}"
             f" · 손절 −{exit_policy.stop_pct:.0%}"
             + (scenario_note(upside, overseas) if conditional else '')
             + reference_note(preopen) + quote_note(item))
+
+
+def _nonchart_catalyst_line(item):
+    """후보 아래에 붙는 공시 촉매 한 줄 — 없으면 빈 문자열.
+
+    공시 촉매가 붙은 후보는 목록 위로 올라오고(``send_telegram_summary``의 정렬), 근거를
+    한 줄로 보여 준다. 점수·계획은 그대로다(검증: 연 23건, 해별 부호 불안정 → 표시만).
+    """
+    from nonchart_evidence import catalyst_line
+    return catalyst_line(item)
 
 
 CAVEAT_LABELS = {
@@ -1620,7 +1665,8 @@ def send_telegram_summary(report):
                  or item.get('advance_signal',{}).get('status')=='advance_candidate')
                  and item.get('preopen_signal',{}).get('track')!='rebound'
                  and item.get("company_forecast", {}).get("composite_score") is not None]
-    confirmed.sort(key=lambda item: -item['company_forecast']['composite_score'])
+    confirmed.sort(key=lambda item: (-nonchart_priority(item),
+                                     -item['company_forecast']['composite_score']))
     # A preopen price plan is not an executable live entry confirmation.
     conditional_rows = [row for row in confirmed
                         if row.get('preopen_signal', {}).get('status') == 'conditional_buy']
@@ -1697,6 +1743,13 @@ def send_telegram_summary(report):
         (report.get('buy_evaluation') or {}).get('headwind_watch'), market)
     if headwind_lines:
         lines.extend(['', *headwind_lines])
+    # 수급 선행 관찰(2026-11-27): 차트 게이트 이전 단계에서 외인·기관이 먼저 들어온 이름을
+    # `[하락장 관찰 후보]`와 구분되는 블록으로만 보여 준다. `preopen_signal`·`buy_evaluation`
+    # 카운트와 무관하며 머리줄과 안내줄에 매수 신호가 아님을 밝힌다.
+    from nonchart_evidence import format_block as format_supply_lead_watch
+    supply_lead_lines = format_supply_lead_watch(report.get('supply_lead_watch'), market)
+    if supply_lead_lines:
+        lines.extend(['', *supply_lead_lines])
     # 외인·기관이 실제로 사고 있는 종목만 보낸다. 수급 미유입 대기 종목은 리포트 JSON에
     # 기록으로만 남기고 메시지 본문에는 싣지 않는다
     # (2026-11-24 지시: "수급대기우량주는 안띄워도될듯").
@@ -1713,6 +1766,12 @@ def send_telegram_summary(report):
     notes = []
     if conditional_rows:
         notes.append("※ 익절 +6% · 급등 시 트레일링 보유 · 손절은 실제 체결가 기준")
+    # 리스크 공시로 배제한 종목은 조용히 사라지지 않는다 — 왜 후보에 없는지를 한 줄로 남긴다.
+    from nonchart_evidence import risk_exclusion_line
+    risk_line = risk_exclusion_line(
+        (report.get('buy_evaluation') or {}).get('risk_disclosure_exclusions'))
+    if risk_line:
+        notes.append(risk_line)
     thin = caveat_summary(report, [*confirmed, *rebound, *inflow])
     if thin:
         notes.append(f"※ {thin}")

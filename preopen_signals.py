@@ -129,7 +129,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
     """
     at=at or datetime.now(timezone.utc)
     if at.utcoffset() is None: raise ValueError('Timezone-aware decision time required')
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]; rebound_picks=[]; early_picks=[]; observations=[]; watch=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]; rebound_picks=[]; early_picks=[]; observations=[]; watch=[]; risk_exclusions=[]
     for row in report.get('results',[]):
         if market is not None and row.get('market')!=market: continue
         row.pop('preopen_signal',None)
@@ -199,6 +199,13 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         # price and the market regime — is read beside it, so "early" never means "unsafe".
         early=early_entry_track.setup(values)
         if reason: status=reason
+        elif row.get('nonchart_risk'):
+            # 리스크 공시 안전장치(2026-11-27): 최근 5세션 안에 유상증자·CB·감자, 횡령·배임·
+            # 소송·의견거절·관리종목, 최대주주변경·자사주처분 공시가 있는 종목은 어느 트랙
+            # (촉매·반등·단기 초입 포함)으로도 매수 후보가 되지 않는다. 10년 검증에서 전환
+            # 초입의 리스크 공시군은 10일 −1.28~−0.38%p, 승률 45%(기준 48%)였다. 필터가 아니라
+            # 안전장치이므로 배제 사유를 `buy_evaluation.risk_disclosure_exclusions`에 남긴다.
+            status='risk_disclosure_excluded'
         elif headwind and is_inverse(row['symbol'], row.get('name'), row.get('asset_type')):
             status=headwind
         elif values['ma20']<=0: status='invalid_average_price'
@@ -291,6 +298,11 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
                 **stop_basis(row))
             recommendations.append(row['symbol'])
         counts[status]+=1; row['preopen_decision']=status
+        if status=='risk_disclosure_excluded':
+            risk=row.get('nonchart_risk') or {}
+            risk_exclusions.append(dict(symbol=row.get('symbol'),market=row.get('market'),
+                name=row.get('name'),kind=risk.get('kind'),label=risk.get('label'),
+                title=risk.get('title'),published_at=risk.get('published_at')))
         # 하락장 게이트가 보류한 종목 중 상대강도·거래량이 강한 이름은 관찰용으로만 남긴다
         # (2026-11-27 D안). 계획·카운트·`preopen_signal`은 그대로다.
         if status=='market_headwind':
@@ -310,6 +322,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         advance_candidates=advance,
         catalyst_candidates=catalyst_picks,
         catalyst_observation=observations,
+        risk_disclosure_exclusions=risk_exclusions,
         early_entry_candidates=early_picks,
         rebound_candidates=rebound_picks,
         headwind_watch=watch,
@@ -337,7 +350,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
 
 
 def _merge(parts):
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]; rebound=[]; early=[]; observations=[]; watch=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]; rebound=[]; early=[]; observations=[]; watch=[]; risk_exclusions=[]
     for part in parts.values():
         counts.update(part['counts']); missing.update(part['missing_dimensions'])
         caveats.update(part.get('caveats',{}))
@@ -347,6 +360,7 @@ def _merge(parts):
         early.extend(part.get('early_entry_candidates',[]))
         observations.extend(part.get('catalyst_observation',[]))
         watch.extend(part.get('headwind_watch',[]))
+        risk_exclusions.extend(part.get('risk_disclosure_exclusions',[]))
     evaluated=sum(counts.values()); excluded=sum(counts[s] for s in INCOMPLETE_REASONS)
     policy=next(iter(parts.values()))['policy'] if parts else {}
     return dict(completed=bool(evaluated) and not excluded,
@@ -358,6 +372,7 @@ def _merge(parts):
         caveats=dict(caveats),recommendations=recommendations,advance_candidates=advance,
         catalyst_candidates=catalyst,early_entry_candidates=early,rebound_candidates=rebound,
         catalyst_observation=observations,headwind_watch=watch,policy=policy,
+        risk_disclosure_exclusions=risk_exclusions,
         live_execution_confirmed=False)
 
 
@@ -382,7 +397,7 @@ def evaluate_preopen_markets(report, at=None):
             previous_session={},markets=[],generated_at=at.isoformat(),evaluated=0,
             counts={},missing_dimensions={},caveats={},recommendations=[],advance_candidates=[],
             catalyst_candidates=[],early_entry_candidates=[],rebound_candidates=[],
-            catalyst_observation=[],headwind_watch=[],policy=dict(**entry_policy_snapshot(),
+            catalyst_observation=[],headwind_watch=[],risk_disclosure_exclusions=[],policy=dict(**entry_policy_snapshot(),
                         stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                         take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
                         early_entry=dict(entry_offset_pct=early_entry_track.ENTRY_OFFSET_PCT,
