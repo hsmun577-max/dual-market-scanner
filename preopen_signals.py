@@ -8,6 +8,7 @@ from candidate_selection import (EVENT_SUPPORT_LIFTABLE_REASONS,
                                  EARLY_ENTRY_LIFTABLE_REASONS,MIN_DEMAND_VOLUME_RATIO)
 import rebound_track
 import early_entry_track
+import headwind_watch
 from advance_policy import ADVANCE_SCORE_FLOOR, advance_context,eligible_for_advance_research
 from catalyst_track import confirmed_catalyst,liftable_reason,stamp
 from entry_policy import entry_policy_snapshot, reward_check, score_floor
@@ -128,7 +129,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
     """
     at=at or datetime.now(timezone.utc)
     if at.utcoffset() is None: raise ValueError('Timezone-aware decision time required')
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]; rebound_picks=[]; early_picks=[]; observations=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst_picks=[]; rebound_picks=[]; early_picks=[]; observations=[]; watch=[]
     for row in report.get('results',[]):
         if market is not None and row.get('market')!=market: continue
         row.pop('preopen_signal',None)
@@ -290,6 +291,11 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
                 **stop_basis(row))
             recommendations.append(row['symbol'])
         counts[status]+=1; row['preopen_decision']=status
+        # 하락장 게이트가 보류한 종목 중 상대강도·거래량이 강한 이름은 관찰용으로만 남긴다
+        # (2026-11-27 D안). 계획·카운트·`preopen_signal`은 그대로다.
+        if status=='market_headwind':
+            item=headwind_watch.observation(row)
+            if item: watch.append(item)
         if ready_evidence:
             observations.append(catalyst_observation(row,catalyst_evidence,at,status,score,lift_reason))
     evaluated=sum(counts.values())
@@ -306,6 +312,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         catalyst_observation=observations,
         early_entry_candidates=early_picks,
         rebound_candidates=rebound_picks,
+        headwind_watch=watch,
         policy=dict(**entry_policy_snapshot(),
                     stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                     take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
@@ -330,7 +337,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
 
 
 def _merge(parts):
-    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]; rebound=[]; early=[]; observations=[]
+    counts=Counter(); missing=Counter(); caveats=Counter(); recommendations=[]; advance=[]; catalyst=[]; rebound=[]; early=[]; observations=[]; watch=[]
     for part in parts.values():
         counts.update(part['counts']); missing.update(part['missing_dimensions'])
         caveats.update(part.get('caveats',{}))
@@ -339,6 +346,7 @@ def _merge(parts):
         rebound.extend(part.get('rebound_candidates',[]))
         early.extend(part.get('early_entry_candidates',[]))
         observations.extend(part.get('catalyst_observation',[]))
+        watch.extend(part.get('headwind_watch',[]))
     evaluated=sum(counts.values()); excluded=sum(counts[s] for s in INCOMPLETE_REASONS)
     policy=next(iter(parts.values()))['policy'] if parts else {}
     return dict(completed=bool(evaluated) and not excluded,
@@ -349,7 +357,7 @@ def _merge(parts):
         evaluated=evaluated,counts=dict(counts),missing_dimensions=dict(missing),
         caveats=dict(caveats),recommendations=recommendations,advance_candidates=advance,
         catalyst_candidates=catalyst,early_entry_candidates=early,rebound_candidates=rebound,
-        catalyst_observation=observations,policy=policy,
+        catalyst_observation=observations,headwind_watch=watch,policy=policy,
         live_execution_confirmed=False)
 
 
@@ -374,7 +382,7 @@ def evaluate_preopen_markets(report, at=None):
             previous_session={},markets=[],generated_at=at.isoformat(),evaluated=0,
             counts={},missing_dimensions={},caveats={},recommendations=[],advance_candidates=[],
             catalyst_candidates=[],early_entry_candidates=[],rebound_candidates=[],
-            catalyst_observation=[],policy=dict(**entry_policy_snapshot(),
+            catalyst_observation=[],headwind_watch=[],policy=dict(**entry_policy_snapshot(),
                         stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                         take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
                         early_entry=dict(entry_offset_pct=early_entry_track.ENTRY_OFFSET_PCT,
