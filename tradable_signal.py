@@ -326,7 +326,7 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans
     regime_lines=asset_regime.header_lines(regime)
     lines=[*([*regime_lines,''] if regime_lines else []),*sector_lines,*([*market_note] if market_note else []),'']
     if ready:
-        lines.append(f'매수 신호 · {at:%m/%d %H:%M:%S} KST')
+        lines.append(f'🟢 매수 신호 · {at:%m/%d %H:%M:%S} KST')
         for row in ready[:5]:
             code = str(row.get('symbol','')).split('.')[0]
             target = row.get('bull_target') or row.get('base_target')
@@ -361,18 +361,18 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans
         lines.append('')
         lines.append('※ 익절 +6%, 급등 시 트레일링 보유 · 실제 체결가 기준')
     elif any(row.get('reason')=='waiting_for_entry_price' for row in signals):
-        lines.extend([f'매수 대기 · {at:%m/%d %H:%M} KST','분석 조건 충족 · 현재 호가가 매수 상한 초과'])
+        lines.extend([f'🟡 매수 대기 · {at:%m/%d %H:%M} KST','분석 조건 충족 · 현재 호가가 매수 상한 초과'])
     elif evaluation.get('decision_completed',0)>0 and not signals:
-        lines.extend([f'분석 결과 · {at:%m/%d %H:%M} KST',
+        lines.extend([f'🟡 분석 결과 · {at:%m/%d %H:%M} KST',
             f"판정 완료 {evaluation['decision_completed']}종목 · 매수 조건 충족 없음"])
         if evaluation.get('data_excluded'):
             lines.append(f"자료 부족 {evaluation['data_excluded']}종목 제외")
     elif evaluation.get('completed') is False:
-        lines.extend([f'분석 상태 · {at:%m/%d %H:%M} KST','매수 판정 보류 · 분석자료 미확인'])
+        lines.extend([f'🟡 분석 상태 · {at:%m/%d %H:%M} KST','매수 판정 보류 · 분석자료 미확인'])
     elif signals:
         # No entry is confirmed right now (a closed session, a quote above the limit), but
         # the analysis did produce plans. They are printed as plans, never as a signal.
-        lines.extend([f'조건부 계획 · {at:%m/%d %H:%M} KST',
+        lines.extend([f'🟡 조건부 계획 · {at:%m/%d %H:%M} KST',
                       '지금 체결 기준 미확인 · 매수 신호 아님'])
         shown = [plan for plan in (plans or [])][:5]
         lines.extend(['', *[plan_line(plan) for plan in shown]] if shown else
@@ -384,5 +384,8 @@ def format_requested_report(sector_lines,signals,evaluation,at,regime=None,plans
             from telegram_text import rest_note
             lines.append(f"   {rest_note(plan_total, len(shown))} (분석자료 참고)")
     else:
-        lines.extend([f'분석 결과 · {at:%m/%d %H:%M} KST','매수 조건 충족 종목 없음'])
+        lines.extend([f'🟡 분석 결과 · {at:%m/%d %H:%M} KST','매수 조건 충족 종목 없음'])
+    if evaluation.get("risk_disclosure_exclusions"):
+        from nonchart_evidence import risk_exclusion_line
+        lines.extend(["", risk_exclusion_line(evaluation["risk_disclosure_exclusions"])])
     return '\n'.join(lines)

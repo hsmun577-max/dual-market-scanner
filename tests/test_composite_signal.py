@@ -173,3 +173,32 @@ class CompositeSignalTests(unittest.TestCase):
 
 if __name__=='__main__':
     unittest.main()
+
+
+def test_only_dated_issuer_matched_policy_raises_the_event_score():
+    company, indicators, sectors = inputs()
+    baseline = build_company_forecast(company, indicators, 100., AT, sectors=sectors)
+    graph = company['event_analysis']['economic_graph'] = {'links': [
+        dict(kind='market_access', status='announced_policy', publication_verified=True, direction=1,
+             source_url='https://example.com/policy', matched_products=['games'], matched_regions=['CN'],
+             available_at=(AT + timedelta(hours=1)).isoformat())]}
+    future = build_company_forecast(company, indicators, 100., AT, sectors=sectors)
+    assert not future['evidence']['events']['verified_policy_benefit']
+    assert future['composite_score'] == baseline['composite_score']
+    graph['links'][0]['available_at'] = (AT - timedelta(hours=1)).isoformat()
+    supported = build_company_forecast(company, indicators, 100., AT, sectors=sectors)
+    assert supported['evidence']['events']['verified_policy_benefit']
+    assert supported['composite_score'] > baseline['composite_score']
+
+
+def test_dated_strong_theme_can_improve_the_strength_component():
+    company, indicators, sectors = inputs()
+    indicators['data_date'] = '2026-11-17'
+    baseline = build_company_forecast(company, indicators, 100., AT, sectors=sectors)
+    theme = dict(priority=2, session='2026-11-17', market_excess_pct=4.0)
+    forecast = build_company_forecast(company, indicators, 100., AT, sectors=sectors, theme_strength=theme)
+    assert forecast['components']['sector_pressure'] > baseline['components']['sector_pressure']
+    assert sum(forecast['weights'].values()) == 1.
+    theme['session'] = '2026-11-16'
+    stale = build_company_forecast(company, indicators, 100., AT, sectors=sectors, theme_strength=theme)
+    assert stale['composite_score'] == baseline['composite_score']

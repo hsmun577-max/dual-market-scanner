@@ -15,6 +15,8 @@ def refresh_report(report,at,industry):
     if not selected:raise ValueError('No verified issuer analysis to refresh')
     events,coverage=world_events(at)
     report['sectors']=industry_sector_evidence(industry)
+    themes = {item['symbol']: item for rows in (report.get('theme_research_priority') or {}).values()
+              for item in rows}
     def refresh(row):
         company=dict(row['company_analysis'])
         symbol=row['symbol'].split('.')[0]
@@ -29,7 +31,7 @@ def refresh_report(report,at,industry):
         # Original financial/profile timestamps are deliberately retained.
         row['company_analysis']=company
         row['company_forecast']=build_company_forecast(company,row['indicators'],row['indicators']['price'],at,
-            row.get('risk_evidence',[]),report['sectors'])
+            row.get('risk_evidence',[]),report['sectors'],theme_strength=themes.get(row['symbol']))
         return row
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(refresh,selected))

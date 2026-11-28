@@ -5,8 +5,10 @@ These are uncalibrated scenarios. Data coverage is not a probability of profit.
 
 import math
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import re
 
+from catalyst_track import confirmed_catalyst, stamp as evidence_stamp
 from catalyst_policy import SECTOR_PROXIES,catalyst_context
 from entry_policy import entry_policy_snapshot
 from research_asset import is_fund_company
@@ -34,9 +36,9 @@ SCENARIO_THRESHOLD_SCORE = 60.0
 # of each market are candidate-grade instruments; graded as operating companies they were
 # stopped at "analysis incomplete" for every ETF (QQQ, SPY, BIL...) and never planned.
 FUND_WEIGHTS = {"price_and_demand": .50, "sector_pressure": .20, "events": .30}
-COMPANY_WEIGHTS = {"growth": .24, "earnings_quality": .18, "balance_sheet": .12,
-                   "valuation_outlook": .10, "price_and_demand": .14,
-                   "sector_pressure": .10, "events": .12}
+COMPANY_WEIGHTS = {"growth": .18, "earnings_quality": .14, "balance_sheet": .09,
+                   "valuation_outlook": .06, "price_and_demand": .18,
+                   "sector_pressure": .15, "events": .20}
 # A broker screen (Reuters focus, 2026-11-23 on 롯데정밀화학) scores what the company is
 # worth apart from who is buying it, and the owner asked for that separation
 # ("수급확인도필요해"). The two axes below are reported beside the composite score, whose
@@ -190,7 +192,7 @@ def financial_period_missing(company):
 
 
 def build_company_forecast(company, indicators, price, at, events=(), sectors=(),
-                           supply=None, consensus=None):
+                           supply=None, consensus=None, theme_strength=None):
     """Combine available evidence without treating missing observations as neutral.
 
     A listed fund is read on the fund model (:data:`FUND_WEIGHTS`) instead of the issuer
@@ -307,11 +309,30 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     if not matched and official_matched:
         matched=official_matched
         sector_method='official_matching_industry_relative_leadership'
+    theme = theme_strength or {}
+    theme_excess = _number(theme, "market_excess_pct")
+    market_zone = ZoneInfo("America/New_York" if company.get("market") == "US" else "Asia/Seoul")
+    if (not fund and theme.get("session") == indicators.get("data_date")
+            and theme.get("session", "9999") <= at.astimezone(market_zone).date().isoformat()
+            and _number(theme, "priority") in (1, 2) and theme_excess is not None and theme_excess > 0
+            and strength is not None and strength > 0):
+        matched.append(math.tanh(theme_excess / 3))
+        sector_method = "dated_theme_relative_strength_and_turnover"
     if matched and market_return is not None:
-        components["sector_pressure"] = .5*sum(matched)/len(matched)+.5*math.tanh(market_return/.1)
+        sector_score = sum(matched) / len(matched)
+        if fund:
+            value = .5 * sector_score + .5 * math.tanh(market_return / .1)
+        else:
+            value = .6 * sector_score + .2 * math.tanh((strength or 0) / .10)
+            value += .2 * math.tanh(market_return / .1)
+        components["sector_pressure"] = value
         evidence["sector_pressure"] = {"sector":company.get("sector"),"matching_proxies":len(matched),
-            'method':sector_method,'domestic_industry':company.get('domestic_industry_name')}
+            "method":sector_method,"domestic_industry":company.get("domestic_industry_name")}
+    elif matched and sector_method == "dated_theme_relative_strength_and_turnover":
+        components["sector_pressure"] = .6 * (sum(matched) / len(matched)) + .2 * math.tanh(strength / .10)
+        evidence["sector_pressure"] = {"method": sector_method, "matching_proxies": len(matched)}
     event_terms = []
+    contract_terms = []
     uncertainty = 0.
     unquantified_events = 0
     for filing in company.get("filings",[]):
@@ -324,7 +345,7 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         if ratio is not None and 0 <= age <= 14:
             if not any(word in filing.get("form", "") for word in ("해지","취소","정정")):
                 conversion_quality = .5+.5*math.tanh((margin or 0)/15)
-                event_terms.append(.6*math.tanh(ratio/20)*conversion_quality)
+                contract_terms.append(.6*math.tanh(ratio/20)*conversion_quality)
                 uncertainty=max(uncertainty,.3)
     for row in events:
         if row.get("available_at"):
@@ -350,11 +371,32 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
     causal_score = _number(causal, "score")
     causal_stamp = datetime.fromisoformat(causal["generated_at"]) if causal.get("generated_at") else None
     causal_valid = causal_stamp is not None and causal_stamp.utcoffset() is not None and at-timedelta(hours=24)<=causal_stamp<=at
+    unread_required = sum(1 for row in causal.get("unread_events", []) if row.get("required", True))
     if causal_valid and causal_score is not None:
-        event_terms.append(max(-1, min(1, causal_score)))
+        event_terms.append(max(-1, min(0 if unread_required else 1, causal_score)))
         # Automatic causal rules remain hypotheses: preserve uncertainty in the range.
         uncertainty = max(uncertainty, .4)
-    expectation_links = causal.get('economic_graph', {}).get('expectation_links', []) if causal_valid else []
+    verified = confirmed_catalyst(company, at, company.get("market")) if not fund else {}
+    kind = verified.get("kind") if verified.get("eligible") else None
+    if kind == "confirmed_contract":
+        event_terms.append(max([.45, *contract_terms]))
+    else:
+        event_terms.extend(contract_terms)
+        if kind in ("earnings_surprise", "confirmed_news"):
+            event_terms.append(.45 if kind == "earnings_surprise" else .30)
+    graph = causal.get("economic_graph", {}) if causal_valid else {}
+    verified_policy = any(
+        link.get("kind") == "market_access" and link.get("status") == "announced_policy"
+        and link.get("publication_verified") is True and link.get("direction") == 1
+        and link.get("source_url") and link.get("matched_products") and link.get("matched_regions")
+        and (known := evidence_stamp(link.get("available_at"))) is not None
+        and at - timedelta(days=14) <= known <= at
+        for link in graph.get("links", ())
+    )
+    if verified_policy:
+        event_terms.append(.30)
+        uncertainty = max(uncertainty, .4)
+    expectation_links = graph.get("expectation_links", [])
     positive_expectations = [row for row in expectation_links
         if row.get('watch_bias') == 'positive_policy_sympathy' and row.get('source_url')]
     if positive_expectations:
@@ -371,13 +413,13 @@ def build_company_forecast(company, indicators, price, at, events=(), sectors=()
         components["events"] = math.tanh(sum(event_terms))
     elif (causal_valid and causal.get("status") == "no_material_events_identified" and feeds_checked):
         components["events"] = 0.
-    evidence["events"] = {"event_direction_terms":len(event_terms),"quantified_earnings_events":0,"unquantified_events":unquantified_events,
+    evidence["events"] = {"event_direction_terms":len(event_terms),"quantified_earnings_events":int(kind == "earnings_surprise"),"unquantified_events":unquantified_events,
+                          "verified_policy_benefit":verified_policy,"confirmed_catalyst_kind":kind,
                           "policy_expectation_present":bool(positive_expectations),
                           "pre_event_exposure_present":bool(advance_expectations),
                           "feeds_checked":feeds_checked,"uncertainty":uncertainty,
                           "causal_analysis":causal if causal_valid else {"status":"unavailable_or_stale"},
                           "meaning":"rule based event direction; not quantified earnings impact"}
-    unread_required = sum(1 for row in causal.get("unread_events", []) if row.get("required", True))
     if unread_required:
         # A body we could not read removes positive event credit; it does not erase the
         # financial and price evidence we did verify. Keep the score and widen it.

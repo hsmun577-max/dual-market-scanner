@@ -619,4 +619,4 @@ def risk_exclusion_line(exclusions):
         label = row.get("label")
         names.append(f"{name} {label}" if label else str(name))
     more = f" 외 {len(rows) - 2}종목" if len(rows) > 2 else ""
-    return f"※ 리스크 공시로 매수 후보 제외 {len(rows)}종목: " + ", ".join(names) + more
+    return f"🔴 리스크 공시로 매수 후보 제외 {len(rows)}종목: " + ", ".join(names) + more

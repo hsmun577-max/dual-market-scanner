@@ -148,19 +148,20 @@ def liquidity_rejection_reason(item, market):
 
 
 def market_headwind_reason(indicators, item=None):
-    """The entries have no edge while the market index is below its 20-day average.
-
-    Compared same-day (so market direction is already removed), individual-stock
-    candidates were -1.11%p against their own universe on those days and +0.14%p on the
-    other days. ``None`` means the regime was not observed: an archived report or a
-    missing benchmark must not be read as a headwind.
-    """
+    """Report the benchmark regime for diagnostics and inverse direction checks."""
     if item and is_inverse(item["symbol"], item.get("name"), item.get("asset_type")):
         underlying = indicators.get("inverse_underlying_below_ma20")
         if underlying is None:
             return "inverse_underlying_unverified"
         return "market_headwind" if not underlying else None
     return "market_headwind" if indicators.get("market_above_ma20") is False else None
+
+
+def market_entry_rejection_reason(indicators, item):
+    """An inverse instrument must have verified downside in its own benchmark."""
+    if is_inverse(item["symbol"], item.get("name"), item.get("asset_type")):
+        return market_headwind_reason(indicators, item)
+    return None
 
 
 def candidate_rejection_reason(item, market):
@@ -180,8 +181,7 @@ def candidate_rejection_reason(item, market):
         return "unconfirmed_demand"
     if values["volume_ratio"] < MIN_EXPANSION_VOLUME_RATIO:
         return "insufficient_demand_expansion"
-    # A stock that passes every own-signal test is still held back by its market.
-    return market_headwind_reason(values, item)
+    return market_entry_rejection_reason(values, item)
 
 
 # The short-term early-entry track (``early_entry_track``) buys the first one-to-three
@@ -189,7 +189,7 @@ def candidate_rejection_reason(item, market):
 # ``unconfirmed_uptrend`` (price > ma20 >= ma60) and ``weak_relative_trend`` (5- and
 # 20-day returns plus relative strength already positive) — is exactly what it is meant to
 # see past. What it may never lift is the safety around it: instrument, liquidity, price,
-# a breakdown, an extended price, and the market regime. Those stay here, in one place, so
+# a breakdown, an extended price, and inverse direction verification. Those stay here, in one place, so
 # the two paths cannot drift apart.
 EARLY_ENTRY_LIFTABLE_REASONS = frozenset({"unconfirmed_uptrend", "weak_relative_trend"})
 
@@ -223,7 +223,7 @@ def early_entry_block_reason(item, market):
                                     and not isinstance(return_5d, bool)
                                     and return_5d > 0.12):
         return "extended_price"
-    return market_headwind_reason(values, item)
+    return market_entry_rejection_reason(values, item)
 
 
 def rank_market_candidates(candidates, market, limit=5):

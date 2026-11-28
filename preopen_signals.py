@@ -4,7 +4,7 @@ from collections import Counter
 import math
 from candidate_selection import (EVENT_SUPPORT_LIFTABLE_REASONS,
                                  liquidity_rejection_reason,candidate_rejection_reason,
-                                 market_headwind_reason,early_entry_block_reason,is_inverse,
+                                 market_entry_rejection_reason,early_entry_block_reason,
                                  EARLY_ENTRY_LIFTABLE_REASONS,MIN_DEMAND_VOLUME_RATIO)
 import rebound_track
 import early_entry_track
@@ -85,11 +85,7 @@ def catalyst_plan(row, forecast, evidence, at, reference_date, expires_session, 
         caveats=list(forecast.get('caveats',[])),
         entry_basis='source_dated_catalyst_pullback_band',fresh_execution_quote_required=True,
         target_basis='upside_scenario_not_expected_return',expires_session=expires_session,
-        # A market headwind is no longer lifted by this track (2026-11-26), so a promoted
-        # catalyst plan carries this as False. The field stays on the plan because archived
-        # records and `validate_entry` read it: if the exception is ever re-opened, the
-        # message shows it again instead of a plan appearing under a '하락 국면' line.
-        market_regime_lifted=market_headwind_reason(values, row) == 'market_headwind',
+        market_regime_lifted=False,
         # The stop follows the instrument: −2% on a fund, −3% on a single stock.
         take_profit_pct=policy.take_profit_pct,
         take_profit_mode=policy.take_profit_mode,exit_policy=policy_snapshot(policy),
@@ -166,10 +162,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             link.get('watch_bias')=='positive_policy_sympathy' and link.get('source_url')
             for link in graph.get('expectation_links',[]))
         trend_reason=candidate_rejection_reason(row,row['market'])
-        # Read the regime on its own, not as the last item of the trend check: the trend
-        # check reports the chart reason it finds first, so a name that is misaligned or
-        # thin still has to be held back by the market it trades in.
-        headwind=market_headwind_reason(values,row)
+        inverse_rejection = market_entry_rejection_reason(values, row)
         catalyst=forecast.get('catalyst_context',{}).get('eligible') is True
         # A confirmed, quantified disclosure may override a soft chart rejection. The
         # safety blocks (liquidity, price, breakdown, extended, fund) are checked inside
@@ -206,8 +199,8 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             # 초입의 리스크 공시군은 10일 −1.28~−0.38%p, 승률 45%(기준 48%)였다. 필터가 아니라
             # 안전장치이므로 배제 사유를 `buy_evaluation.risk_disclosure_exclusions`에 남긴다.
             status='risk_disclosure_excluded'
-        elif headwind and is_inverse(row['symbol'], row.get('name'), row.get('asset_type')):
-            status=headwind
+        elif inverse_rejection:
+            status=inverse_rejection
         elif values['ma20']<=0: status='invalid_average_price'
         elif values.get('breakdown'): status='breakdown'
         elif not catalyst and (values.get('overheated') or values.get('return_5d',0)>.12 or price/values['ma20']>1.08):
@@ -248,20 +241,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
                     plan['entry_requirements'] = dict(min_score=score_floor(row, strategy), **early_reward)
                 else:
                     status, plan = 'insufficient_expected_reward', None
-        elif headwind and (event_support or not trend_reason):
-            # Event support may soften the chart (it can plan a name before the 60-day
-            # average turns up), but it may not walk a plan through a market headwind. The
-            # 2026-11-23 run sent NHN/LG유플러스/NC while the index was below its 20-day
-            # average: their first rejection was a chart one, so the trend check never
-            # returned ``market_headwind`` and the event-support branch below skipped the
-            # regime gate. This branch sits before it, so no plan reaches it under a
-            # headwind. A name that the chart alone already refuses keeps that reason, so
-            # the rejection counts still say why it failed on its own. No track lifts a
-            # headwind any more: the confirmed-disclosure track was the last one and its
-            # entry is closed (`catalyst_track.liftable_reason`, 2026-11-26).
-            status=headwind
-        elif trend_reason and (trend_reason == 'market_headwind' or not event_support
-                               or trend_reason not in EVENT_SUPPORT_LIFTABLE_REASONS):
+        elif trend_reason and (not event_support or trend_reason not in EVENT_SUPPORT_LIFTABLE_REASONS):
             # 규칙 기반 가설(event_support)이 차트를 부드럽게 할 수 있는 범위는 수요(거래량)
             # 쪽으로 좁힌다. 추세 확인(`unconfirmed_uptrend`·`weak_relative_trend`)은 이 가설로
             # 넘기지 않는다 — 그 둘을 넘기는 길은 단기 초입 트랙 하나이고, 그 트랙은 자기
@@ -303,11 +283,10 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
             risk_exclusions.append(dict(symbol=row.get('symbol'),market=row.get('market'),
                 name=row.get('name'),kind=risk.get('kind'),label=risk.get('label'),
                 title=risk.get('title'),published_at=risk.get('published_at')))
-        # 하락장 게이트가 보류한 종목 중 상대강도·거래량이 강한 이름은 관찰용으로만 남긴다
-        # (2026-11-27 D안). 계획·카운트·`preopen_signal`은 그대로다.
-        if status=='market_headwind':
-            item=headwind_watch.observation(row)
-            if item: watch.append(item)
+        if values.get('market_above_ma20') is False and status != 'conditional_buy':
+            item = headwind_watch.observation(row)
+            if item:
+                watch.append(item)
         if ready_evidence:
             observations.append(catalyst_observation(row,catalyst_evidence,at,status,score,lift_reason))
     evaluated=sum(counts.values())
@@ -327,6 +306,7 @@ def evaluate_preopen(report, previous_session, at=None, market=None):
         rebound_candidates=rebound_picks,
         headwind_watch=watch,
         policy=dict(**entry_policy_snapshot(),
+                    market_direction_gate="inverse_only",
                     stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                     take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
                     early_entry=dict(entry_offset_pct=early_entry_track.ENTRY_OFFSET_PCT,
@@ -398,6 +378,7 @@ def evaluate_preopen_markets(report, at=None):
             counts={},missing_dimensions={},caveats={},recommendations=[],advance_candidates=[],
             catalyst_candidates=[],early_entry_candidates=[],rebound_candidates=[],
             catalyst_observation=[],headwind_watch=[],risk_disclosure_exclusions=[],policy=dict(**entry_policy_snapshot(),
+                    market_direction_gate="inverse_only",
                         stop_pct=dict(fund=FUND_STOP_PCT,stock=STOCK_STOP_PCT),take_profit_pct=6,
                         take_profit_mode=DEFAULT_EXIT_POLICY.take_profit_mode,
                         early_entry=dict(entry_offset_pct=early_entry_track.ENTRY_OFFSET_PCT,

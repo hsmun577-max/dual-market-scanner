@@ -232,9 +232,8 @@ class PreopenPlanTests(unittest.TestCase):
         self.assertEqual(result["early_entry_candidates"], ["053210.KS"])
         self.assertEqual(result["policy"]["early_entry"]["max_above_ma20_pct"], 8.0)
 
-    def test_the_safety_blocks_and_the_regime_gate_still_hold_it_back(self):
-        for change, expected in ((dict(market_above_ma20=False), "market_headwind"),
-                                 (dict(average_turnover_20d=1), "insufficient_liquidity"),
+    def test_the_early_plan_keeps_its_individual_safety_checks(self):
+        for change, expected in ((dict(average_turnover_20d=1), "insufficient_liquidity"),
                                  (dict(breakdown=True), "breakdown"),
                                  (dict(return_5d=0.13), "extended_price"),
                                  (dict(price=10_950.0), "extended_price"),
@@ -270,8 +269,7 @@ class PreopenPlanTests(unittest.TestCase):
 
     def test_the_block_helper_keeps_the_regime_gate_apart_from_the_chart(self):
         self.assertIsNone(early_entry_block_reason(row(), "KR"))
-        self.assertEqual(early_entry_block_reason(row(early_values(market_above_ma20=False)), "KR"),
-                         "market_headwind")
+        self.assertIsNone(early_entry_block_reason(row(early_values(market_above_ma20=False)), "KR"))
 
 
 class AlertSectionTests(unittest.TestCase):
