@@ -5,7 +5,7 @@ from unittest.mock import Mock, call
 import pytest
 
 from telegram_symbol_analysis import KST, matches, render
-from telegram_symbol_bot import RECEIPT, Telegram, TelegramError, handle_requests, has_requests
+from telegram_symbol_bot import Telegram, TelegramError, handle_requests, has_requests
 
 
 def message(update_id, chat_id, text, chat_type="private"):
@@ -26,10 +26,10 @@ def test_exact_ticker_and_stock_name_precede_partial_name_matches():
     assert len(matches("삼성", listings)) == 2
 
 
-def test_only_configured_chat_is_processed_and_offset_advances_after_reply():
+def test_only_configured_chat_receives_one_analysis_result_before_acknowledgement():
     bot = Telegram("test", "10")
     bot.call = Mock(side_effect=[
-        [message(4, 20, "다른 대화"), message(5, 10, "NVDA")], [], {}, {}, [],
+        [message(4, 20, "다른 대화"), message(5, 10, "NVDA")], [], {}, [],
     ])
     analyse = Mock(return_value="관찰")
     assert handle_requests(bot, analyse) == 1
@@ -37,8 +37,6 @@ def test_only_configured_chat_is_processed_and_offset_advances_after_reply():
     assert bot.call.call_args_list == [
         call("getUpdates", timeout=0, limit=25, allowed_updates=["message"]),
         call("getUpdates", timeout=0, limit=1, allowed_updates=["message"], offset=5),
-        call("sendMessage", chat_id=10, text=RECEIPT,
-             reply_parameters={"message_id": 105, "allow_sending_without_reply": True}),
         call("sendMessage", chat_id=10, text="관찰",
              reply_parameters={"message_id": 105, "allow_sending_without_reply": True}),
         call("getUpdates", timeout=0, limit=1, allowed_updates=["message"], offset=6),
@@ -47,19 +45,18 @@ def test_only_configured_chat_is_processed_and_offset_advances_after_reply():
 
 def test_failed_delivery_leaves_the_request_pending():
     bot = Telegram("test", "10")
-    bot.call = Mock(side_effect=[[message(4, 10, "삼성전자")], {}, TelegramError("unavailable")])
+    bot.call = Mock(side_effect=[[message(4, 10, "삼성전자")], TelegramError("unavailable")])
     with pytest.raises(TelegramError):
         handle_requests(bot, Mock(return_value="관찰"))
-    assert [record.args[0] for record in bot.call.call_args_list] == ["getUpdates", "sendMessage", "sendMessage"]
+    assert [record.args[0] for record in bot.call.call_args_list] == ["getUpdates", "sendMessage"]
 
 
 def test_analysis_timeout_reports_status_before_acknowledgement():
     bot = Telegram("test", "10")
-    bot.call = Mock(side_effect=[[message(4, 10, "삼성전자")], {}, {}, []])
+    bot.call = Mock(side_effect=[[message(4, 10, "삼성전자")], {}, []])
     analyse = Mock(side_effect=TimeoutExpired("analysis", 240))
     assert handle_requests(bot, analyse) == 1
-    receipt, fallback, ack = bot.call.call_args_list[1:]
-    assert receipt.kwargs["text"] == RECEIPT
+    fallback, ack = bot.call.call_args_list[1:]
     assert "4분" in fallback.kwargs["text"]
     assert ack.kwargs["offset"] == 5
 
