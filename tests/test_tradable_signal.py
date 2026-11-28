@@ -194,3 +194,16 @@ def test_stock_buy_message_warns_when_a_two_percent_stop_precedes_support():
     signal = validate_entry(row, dict(quote, pullback_support=9850), AT, True)
     message = format_requested_report([], [signal], dict(completed=True), AT)
     assert '손절 선택 시 대기' not in message
+
+
+def test_traffic_light_distinguishes_executable_waiting_and_risk_exclusion():
+    row, quote = fixture()
+    ready = validate_entry(row, quote, AT, True)
+    assert '🟢 매수 신호' in format_requested_report([], [ready], dict(completed=True), AT)
+    quote.update(ask=10050, bid=10040)
+    waiting = validate_entry(row, quote, AT, True)
+    message = format_requested_report([], [waiting], dict(completed=True,
+        risk_disclosure_exclusions=[dict(symbol='000001.KS', name='검증종목', label='유상증자')]), AT)
+    assert '🟡 매수 대기' in message
+    assert '🔴 리스크 공시' in message
+    assert '🟢 매수 신호' not in message

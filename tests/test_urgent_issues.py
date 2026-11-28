@@ -63,7 +63,7 @@ class UrgentIssueSelectionTests(unittest.TestCase):
         self.assertEqual([item['symbol'] for item in issues['US']], ['NVDA'])
         item = issues['US'][0]
         self.assertAlmostEqual(item['change_pct'], 31.5)
-        self.assertIn('시장 역풍', item['reason_labels'])
+        self.assertNotIn('시장 역풍', item['reason_labels'])
         self.assertIn('이탈/반등 구간', item['reason_labels'])
         self.assertIn('CEO', item['headline'])
         # 참고 블록일 뿐 매수 계획을 만들지 않는다.
@@ -166,7 +166,7 @@ class UrgentIssueSelectionTests(unittest.TestCase):
         text = '\n'.join(lines)
         self.assertNotIn('게이트에 막혀 매수 후보에서 빠진 당일 급등', text)
         self.assertIn('엔비디아 (NVDA) +31.5%', text)
-        self.assertIn('보류: 시장 역풍', text)
+        self.assertIn('보류: 이탈/반등 구간', text)
         self.assertIn('이슈: US stocks surge', text)
         self.assertEqual(format_urgent_block({}), [])
 
@@ -204,7 +204,7 @@ class DailyMessageIntegrationTests(unittest.TestCase):
         message = post.call_args.kwargs['json']['text']
         self.assertIn(HEADING, message)
         self.assertIn('휴림로봇 (090710) +30.0%', message)
-        self.assertIn('시장 역풍', message)
+        self.assertIn('유동성 미달', message)
         self.assertLess(message.index('분석 결과'), message.index(HEADING))
         self.assertEqual(report_data['urgent_issues']['KR'][0]['symbol'], '090710.KQ')
 

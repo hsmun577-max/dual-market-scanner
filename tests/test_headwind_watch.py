@@ -62,14 +62,15 @@ class QualifiesTests(unittest.TestCase):
 
 
 class EvaluateTests(unittest.TestCase):
-    """게이트는 그대로: 관찰 후보는 계획도 카운트도 만들지 않는다."""
+    """Relative strength under a falling index stays visible when there is no buy plan."""
 
-    def test_a_strong_name_held_by_the_headwind_is_listed_for_watching_only(self):
+    def test_a_strong_name_under_a_falling_index_can_be_watched_after_a_score_rejection(self):
         row = stock_row()
+        row['company_forecast']['composite_score'] = 50
         result = evaluate_preopen(report([row]), '2026-11-18', AT)
         self.assertEqual(result['recommendations'], [])
-        self.assertEqual(result['counts'].get('market_headwind'), 1)
-        self.assertEqual(row['preopen_decision'], 'market_headwind')
+        self.assertEqual(result['counts'].get('composite_score_below_policy'), 1)
+        self.assertEqual(row['preopen_decision'], 'composite_score_below_policy')
         self.assertNotIn('preopen_signal', row)
         self.assertEqual(len(result['headwind_watch']), 1)
         item = result['headwind_watch'][0]
@@ -81,8 +82,9 @@ class EvaluateTests(unittest.TestCase):
     def test_a_weak_name_held_by_the_headwind_is_not_listed(self):
         row = stock_row()
         row['indicators']['relative_strength'] = .05
+        row['company_forecast']['composite_score'] = 50
         result = evaluate_preopen(report([row]), '2026-11-18', AT)
-        self.assertEqual(row['preopen_decision'], 'market_headwind')
+        self.assertEqual(row['preopen_decision'], 'composite_score_below_policy')
         self.assertEqual(result['headwind_watch'], [])
 
     def test_a_name_that_never_reaches_the_gate_is_not_listed(self):
@@ -102,9 +104,10 @@ class EvaluateTests(unittest.TestCase):
 
     def test_the_watch_list_survives_the_multi_market_merge(self):
         kr = stock_row()
+        kr['company_forecast']['composite_score'] = 50
         us = stock_row('NVDA', 'NVIDIA', 'US')
         us['indicators'].update(price=180.0, ma20=175.0, ma60=170.0, data_date='2026-11-18')
-        us['company_forecast'].update(generated_at=AT.isoformat())
+        us['company_forecast'].update(generated_at=AT.isoformat(), composite_score=50)
         merged = dict(results=[kr, us], preopen_session='2026-11-19', sectors=[])
         from preopen_signals import evaluate_preopen_markets
         with patch('preopen_signals.session_dates', return_value={'KR': '2026-11-18',
@@ -175,6 +178,7 @@ class FormatTests(unittest.TestCase):
 class MessageTests(unittest.TestCase):
     def test_the_telegram_message_carries_the_watch_block(self):
         row = stock_row()
+        row['company_forecast']['composite_score'] = 50
         message = report([row])
         evaluate_preopen(message, '2026-11-18', AT)
         with patch.dict('os.environ', {'TELEGRAM_BOT_TOKEN': 'fake', 'TELEGRAM_CHAT_ID': 'fake',

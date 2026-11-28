@@ -194,14 +194,13 @@ class PreopenPlanTests(unittest.TestCase):
         self.assertEqual(result["recommendations"], [])
         self.assertEqual(item["preopen_decision"], "unconfirmed_uptrend")
         self.assertNotIn("preopen_signal", item)
-        # And the regime gate itself is untouched: a chart that passes every own test is
-        # still held back by a market under its 20-day average.
+        # An ordinary momentum setup still needs positive projected reward.
         momentum = row(dict(r2_values(), price=11_000.0, ma20=10_800.0, ma60=10_500.0,
                             ma5=10_300.0, prev_close=10_200.0, return_5d=0.04,
                             return_20d=0.09, relative_strength=0.05, market_above_ma20=False))
         momentum["indicators"]["rebound"] = False
         result = evaluate_preopen(report(momentum), "2026-11-20", AT)
-        self.assertEqual(momentum["preopen_decision"], "market_headwind")
+        self.assertEqual(momentum["preopen_decision"], "insufficient_expected_reward")
         self.assertEqual(result["recommendations"], [])
 
     def test_an_observed_gap_down_cancels_the_plan_before_it_is_sent(self):

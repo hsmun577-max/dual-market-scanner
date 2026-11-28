@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import price_sanity
 from candidate_selection import (MIN_AVERAGE_TURNOVER, MIN_PRICE, average_turnover,
-                                 instrument_rejection_reason, regime_above_ma20)
+                                 instrument_rejection_reason)
 from research_asset import is_fund
 
 HEADING = '🚨 긴급 이슈 참고 · 매수 신호 아님'
@@ -245,11 +245,8 @@ def _liquid(row, market):
     return bool(average and average >= MIN_AVERAGE_TURNOVER[market])
 
 
-def _reason_codes(row, market, regime):
+def _reason_codes(row):
     codes = []
-    # 국내는 종목이 상장된 시장의 지수(코스피/코스닥)로 판정한다.
-    if regime_above_ma20(regime, market, (row or {}).get('symbol')) is False:
-        codes.append('market_headwind')
     for key in ('preopen_decision', 'selection_filter'):
         code = (row or {}).get(key)
         if isinstance(code, str) and code and code not in codes:
@@ -289,7 +286,6 @@ def _theme_issue(theme):
 def _collect(report, now):
     """근거별 후보를 모아 기호별로 합친다(테마 대표주 + 스캔 결과 뉴스)."""
     report = report or {}
-    regime = report.get('market_regime') or {}
     index = _result_index(report)
     found = {}
 
@@ -297,7 +293,7 @@ def _collect(report, now):
         symbol = row.get('symbol')
         if not symbol:
             return
-        codes = _reason_codes(gate_row if gate_row is not None else row, market, regime)
+        codes = _reason_codes(gate_row if gate_row is not None else row)
         found.setdefault(symbol, []).append(dict(
             symbol=symbol, market=market, name=name or row.get('name') or symbol,
             change_pct=round(change_pct, 1), reasons=codes,

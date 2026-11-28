@@ -63,6 +63,7 @@ def prioritize(report, pool, selected, market, session, *, read_flows=None):
                                       session=session, theme=theme["name"], theme_rank=rank,
                                       priority=1, outperformers=outperformers,
                                       turnover_multiple=theme["inflow_multiple"],
+                                      market_excess_pct=theme["market_excess_pct"],
                                       peers=[peer for peer in members if peer != symbol])
 
     selected_by_symbol = {row["symbol"]: row for row in selected}

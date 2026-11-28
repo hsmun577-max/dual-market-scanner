@@ -57,9 +57,9 @@ def prices(days=80, last=100.0, slope=0.0):
 
 
 class MarketRegimeTests(unittest.TestCase):
-    def test_a_candidate_that_passes_every_own_test_is_held_back_by_its_market(self):
+    def test_a_candidate_that_passes_every_own_test_can_plan_in_a_headwind(self):
         item = stock(market_above_ma20=False)
-        self.assertEqual(candidate_rejection_reason(item, "KR"), "market_headwind")
+        self.assertIsNone(candidate_rejection_reason(item, "KR"))
 
     def test_a_market_above_its_average_does_not_reject(self):
         self.assertIsNone(candidate_rejection_reason(stock(market_above_ma20=True), "KR"))

@@ -316,7 +316,7 @@ def main():
                 row = dict(symbol=s, name=names[s], indicators=values)
                 rank = rank_key(row, round(values["return_5d"] - values["market_return_5d"], 4))
                 detail = (rank, s, bars.loc[day, "close"])
-                if candidate_rejection_reason(row, market) == "market_headwind":
+                if candidate_rejection_reason(row, market) is None:
                     picks["trend"][day].append(detail)
                 if resilience_setup(row, market) is None:
                     continue

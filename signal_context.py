@@ -36,12 +36,8 @@ def context_status(records, market, symbol, decision_at, *, inverse_market_verif
         return "event_risk"
     if any(value in {"risk", "caution"} for _, value in evidence["research"]):
         return "research_negative"
-    if not inverse_market_verified:
-        if not evidence["market"]:
-            return "missing_market"
-        latest = max(at for at, _ in evidence["market"])
-        if any(value != "supportive" for at, value in evidence["market"] if at == latest):
-            return "market_not_supportive"
+    if not inverse_market_verified and not evidence["market"]:
+        return "missing_market"
     # Require a positive coverage marker from the event feed as well.
     if not any(value == "clear" for _, value in evidence["event"]):
         return "missing_event"

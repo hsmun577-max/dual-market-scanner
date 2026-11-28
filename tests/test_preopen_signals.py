@@ -199,29 +199,28 @@ class MarketHeadwindGateTests(unittest.TestCase):
             rows.append(self.event_support(row))
         result=evaluate_preopen(self.report(rows),'2026-11-18',AT)
         self.assertEqual(result['recommendations'],[])
-        self.assertEqual(result['counts'].get('market_headwind'),3)
-        for row in rows:
-            self.assertEqual(row['preopen_decision'],'market_headwind',row['symbol'])
-            self.assertNotIn('preopen_signal',row)
-    def test_event_support_does_not_skip_the_regime_for_any_soft_chart_reason(self):
+        self.assertEqual([r['preopen_decision'] for r in rows],
+                         ['weak_relative_trend','unconfirmed_uptrend','unconfirmed_uptrend'])
+        self.assertTrue(all('preopen_signal' not in row for row in rows))
+    def test_event_support_can_only_lift_the_permitted_demand_chart_reason(self):
         for chart in ['unconfirmed_uptrend','weak_relative_trend','insufficient_demand_expansion']:
             row=self.row();ind=row['indicators'];ind['market_above_ma20']=False
             if chart=='unconfirmed_uptrend':ind['ma60']=11000
             if chart=='weak_relative_trend':ind['return_20d']=-.05
             if chart=='insufficient_demand_expansion':ind['volume_ratio']=1.5
             result=evaluate_preopen(self.report([self.event_support(row)]),'2026-11-18',AT)
-            self.assertEqual(result['recommendations'],[],chart)
-            self.assertEqual(row['preopen_decision'],'market_headwind',chart)
-            self.assertNotIn('preopen_signal',row)
-    def test_an_event_eligible_catalyst_is_not_sent_in_a_headwind(self):
+            permitted = chart == 'insufficient_demand_expansion'
+            self.assertEqual(result['recommendations'], ['352820.KS'] if permitted else [], chart)
+            self.assertEqual(row['preopen_decision'], 'conditional_buy' if permitted else chart, chart)
+    def test_an_event_eligible_catalyst_can_plan_in_a_headwind(self):
         row=self.row();row['indicators']['market_above_ma20']=False
         row['company_analysis']['price_tick']=100
         row['company_forecast']['catalyst_context']=dict(eligible=True)
         self.event_support(row)
         result=evaluate_preopen(self.report([row]),'2026-11-18',AT)
-        self.assertEqual(result['recommendations'],[])
-        self.assertEqual(row['preopen_decision'],'market_headwind')
-        # The same row outside a headwind is the event track the policy intends.
+        self.assertEqual(result['recommendations'], ['352820.KS'])
+        self.assertEqual(row['preopen_signal']['strategy'], 'event_catalyst')
+        # The same row outside a headwind follows the same event track.
         row=self.row();row['company_analysis']['price_tick']=100
         row['company_forecast']['catalyst_context']=dict(eligible=True)
         result=evaluate_preopen(self.report([self.event_support(row)]),'2026-11-18',AT)

@@ -2182,7 +2182,7 @@ def format_notification(market, candidates, closes, companies=None, sectors=None
     assessed=sum(c.get('forecast',{}).get('assessment_status')=='complete'
                  and c.get('forecast',{}).get('composite_score') is not None for c in companies.values())
     incomplete=len(companies)-assessed
-    heading='매수 신호' if confirmed else '분석 상태' if incomplete and not assessed else '분석 결과'
+    heading='🟢 매수 신호' if confirmed else '🟡 분석 상태' if incomplete and not assessed else '🟡 분석 결과'
     # 대분류 ETF 한 단어 대신 세부 테마 블록을 붙인다. 테마 자료가 없으면 기존 머리줄 그대로다.
     header = sector_section(sectors, themes, "US" if overseas else "KR")
     from premarket_signals import format_block as format_premarket_block

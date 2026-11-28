@@ -888,6 +888,7 @@ def prepare_selected_analysis(report):
         if pool and report.get("theme_sectors"):
             reference = (kr_reference if market == "KR" else last_completed_session("US", event_at).isoformat())
             selected = prioritize_theme_research(report, pool, selected, market, reference)
+        theme_evidence = {item["symbol"]: item for item in report["theme_research_priority"].get(market, ())}
         watched=[item['symbol'] for item in selected if item.get('selection_reason')=='catalyst_watch']
         if watched:
             # Research budget spent before any news is read; the promotion itself only
@@ -952,7 +953,8 @@ def prepare_selected_analysis(report):
             item["company_forecast"] = build_company_forecast(company, item["indicators"],
                 item["indicators"]["price"], datetime.now(timezone.utc),
                 [row for row in risks if row.get("symbol") == symbol], report.get("sectors", []),
-                supply=supply, consensus=consensus)
+                supply=supply, consensus=consensus,
+                theme_strength=theme_evidence.get(item["symbol"]))
             item["risk_headlines"] = list(dict.fromkeys(
                 row.get("headline", "") for row in risks if row.get("symbol") == symbol))[:2]
             item['risk_evidence']=[row for row in risks if row.get('symbol')==symbol]
@@ -1561,6 +1563,8 @@ def market_regime_note(report, market=None):
     reader cannot act on in this message.
     """
     names = {"KR": "KOSPI", "US": "S&P500(SPY)"}
+    inverse_only = (report.get("buy_evaluation", {}).get("policy", {}).get("market_direction_gate")
+                    == "inverse_only")
     lines = []
     for name, data in sorted((report.get("market_regime") or {}).items()):
         if market and name != market:
@@ -1579,7 +1583,7 @@ def market_regime_note(report, market=None):
             label = INDEX_LABELS.get(symbol, symbol)
             note += (f" · {label} "
                      + ("상승 국면" if item["above_ma20"] else "하락 국면"))
-        if data.get("above_ma20") is False and data.get("headwind_skipped"):
+        if not inverse_only and data.get("above_ma20") is False and data.get("headwind_skipped"):
             note += f" · 추세 통과 {data['headwind_skipped']}종목은 시장 역풍으로 보류"
         # 지수 봉이 종목 봉보다 한 세션 늦으면 그 사실을 말한다. 전일 국면이 오늘 국면으로 읽히지 않게.
         lag = data.get("lag_sessions")
@@ -1707,9 +1711,9 @@ def send_telegram_summary(report):
     # A preopen price plan is not an executable live entry confirmation.
     conditional_rows = [row for row in confirmed
                         if row.get('preopen_signal', {}).get('status') == 'conditional_buy']
-    heading = '조건부 매수 계획' if conditional_rows else '사전 관찰' if confirmed else '분석 결과' if (
+    heading = '🟡 조건부 매수 계획' if conditional_rows else '🟡 사전 관찰' if confirmed else '🟡 분석 결과' if (
         report.get('buy_evaluation', {}).get('completed') is True
-        or report.get('buy_evaluation', {}).get('decision_completed', 0) > 0) else '분석 상태'
+        or report.get('buy_evaluation', {}).get('decision_completed', 0) > 0) else '🟡 분석 상태'
     lines.extend(["", heading])
     if not confirmed:
         evaluation=evaluation_view(report, market)
@@ -1721,7 +1725,8 @@ def send_telegram_summary(report):
             if evaluation.get('data_excluded'):
                 lines.append(f"자료 부족 {evaluation['data_excluded']}종목 제외")
             blocked = (evaluation.get('counts') or {}).get('market_headwind')
-            if blocked and not (report.get('market_regime') or {}):
+            if blocked and not (report.get('market_regime') or {}) and (
+                    evaluation.get('policy', {}).get('market_direction_gate') != 'inverse_only'):
                 # Stored preopen reports do not carry the regime block; the count still
                 # says why nothing qualified instead of leaving a silent zero.
                 lines.append(f"시장 역풍 보류 {blocked}종목 (지수 < 20일선)")
@@ -1734,8 +1739,6 @@ def send_telegram_summary(report):
     catalysts = [row for row in conditional_rows
                  if row['preopen_signal'].get('strategy') in ('event_catalyst', 'earnings_catalyst')]
     if catalysts:
-        # 지수 20일선 아래(하락장)에서도 촉매 계획이 나가던 예외는 2026-11-26에 닫혔다. 이 줄에
-        # '지수 20일선 아래는 이 종목만 예외'가 다시 붙는다면 그 예외가 되살아난 것이다.
         from catalyst_track import MIN_ENTRY_VOLUME_RATIO
         lines.append(f"확정 공시 근거 · 장초반 시가 아래·거래량 {MIN_ENTRY_VOLUME_RATIO:.1f}배 미달이면 진입 안 함")
     for item in confirmed[:5]:
@@ -1743,7 +1746,7 @@ def send_telegram_summary(report):
     if len(confirmed) > 5:
         lines.append(f"   {rest_note(len(confirmed), 5)} (분석자료 참고)")
     if rebound:
-        lines.extend(["", "[반등 눌림 후보] · 시장 국면 게이트 미적용"])
+        lines.extend(["", "🟡 [반등 눌림 후보]"])
         for item in rebound[:5]:
             lines.append(telegram_rebound_line(item))
         if len(rebound) > 5:
