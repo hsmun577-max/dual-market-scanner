@@ -1,6 +1,10 @@
 """On-demand analysis using the scanner's existing evidence and entry policies."""
+from contextlib import redirect_stdout
 from datetime import datetime
 from functools import lru_cache
+import json
+import os
+import sys
 import unicodedata
 from zoneinfo import ZoneInfo
 
@@ -202,3 +206,10 @@ def analyse(query):
     at = now_for(market)
     entry = validate_entry(row, quote, at, live_quote.session_state(market, at)=="open")
     return render(row, at, entry, reason=None if entry.get("trade_ready") else entry.get("reason"))
+
+
+if __name__ == "__main__":
+    query = sys.stdin.read()
+    with open(os.devnull, "w") as diagnostics, redirect_stdout(diagnostics):
+        reply = analyse(query)
+    print(json.dumps(reply))

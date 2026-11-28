@@ -2,12 +2,16 @@
 import argparse
 import json
 import os
+import subprocess
+import sys
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from telegram_text import split_telegram_text
 
 HELP = "종목명이나 티커 하나를 보내주세요. 예) 삼성전자, 005930, NVDA"
+RECEIPT = "🔎 종목 분석 요청을 받았습니다. 조회가 끝나면 이 대화에 결과를 답장하겠습니다."
+ANALYSIS_TIMEOUT = 240
 
 
 class TelegramError(RuntimeError):
@@ -87,8 +91,12 @@ def handle_requests(bot, analyse, limit=3):
             if not query or query in {"/start", "/help"} or len(query) > 80:
                 text = HELP
             else:
+                bot.reply(update, RECEIPT)
                 try:
                     text = analyse(query)
+                except subprocess.TimeoutExpired:
+                    print("Symbol analysis time limit reached", flush=True)
+                    text = "🟡 자료 조회가 4분을 넘겨 매수 조건을 확인하지 못했습니다. 같은 종목을 다시 요청할 수 있습니다."
                 except Exception as exc:
                     print(f"Symbol analysis unavailable ({type(exc).__name__})", flush=True)
                     text = "🟡 분석 자료를 가져오지 못했습니다. 잠시 후 같은 종목명을 다시 보내주세요."
@@ -98,6 +106,18 @@ def handle_requests(bot, analyse, limit=3):
         if processed >= limit:
             break
     return processed
+
+
+def analyse_with_deadline(query):
+    # Isolate network calls so a stalled data provider cannot keep the Telegram queue busy.
+    # The worker reads the request over stdin and emits only the finished report.
+    env = {key: value for key, value in os.environ.items()
+           if key not in {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}}
+    result = subprocess.run([sys.executable, "-m", "telegram_symbol_analysis"],
+                            input=query, encoding="utf-8", env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            timeout=ANALYSIS_TIMEOUT, check=True)
+    return json.loads(result.stdout)
 
 
 def main():
@@ -110,8 +130,7 @@ def main():
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             print(f"pending={str(pending).lower()}", file=output)
     else:
-        from telegram_symbol_analysis import analyse
-        print(f"Telegram stock replies: {handle_requests(bot, analyse)}", flush=True)
+        print(f"Telegram stock replies: {handle_requests(bot, analyse_with_deadline)}", flush=True)
 
 
 if __name__ == "__main__":
