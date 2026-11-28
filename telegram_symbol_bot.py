@@ -10,7 +10,6 @@ from urllib.request import Request, urlopen
 from telegram_text import split_telegram_text
 
 HELP = "종목명이나 티커 하나를 보내주세요. 예) 삼성전자, 005930, NVDA"
-RECEIPT = "🔎 종목 분석 요청을 받았습니다. 조회가 끝나면 이 대화에 결과를 답장하겠습니다."
 ANALYSIS_TIMEOUT = 240
 
 
@@ -91,7 +90,6 @@ def handle_requests(bot, analyse, limit=3):
             if not query or query in {"/start", "/help"} or len(query) > 80:
                 text = HELP
             else:
-                bot.reply(update, RECEIPT)
                 try:
                     text = analyse(query)
                 except subprocess.TimeoutExpired:
