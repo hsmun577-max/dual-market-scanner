@@ -1,0 +1,46 @@
+name: Telegram stock analysis replies
+
+on:
+  schedule:
+    - cron: '2-57/5 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/telegram-symbol-analysis.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-stock-analysis
+  cancel-in-progress: false
+
+jobs:
+  reply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for requests from the configured chat
+        id: telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 telegram_symbol_bot.py --check
+      - uses: actions/setup-python@v5
+        if: steps.telegram.outputs.pending == 'true'
+        with:
+          python-version: '3.11'
+          cache: pip
+      - if: steps.telegram.outputs.pending == 'true'
+        run: pip install -r requirements.txt
+      - name: Analyse and reply
+        if: steps.telegram.outputs.pending == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: python -u telegram_symbol_bot.py
