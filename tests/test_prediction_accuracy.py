@@ -11,7 +11,7 @@ from candidate_selection import (MIN_DEMAND_VOLUME_RATIO, MIN_EXPANSION_VOLUME_R
                                  candidate_rejection_reason)
 from company_forecast import build_company_forecast
 from kis_intraday import KST
-from scanner import calculate_indicators, market_regime_note, telegram_candidate_line
+from scanner import calculate_indicators, classify_signal, market_regime_note, telegram_candidate_line
 
 AT = datetime(2026, 11, 18, 9, 15, tzinfo=KST)
 
@@ -76,6 +76,20 @@ class MarketRegimeTests(unittest.TestCase):
         falling = calculate_indicators(prices(slope=.5), prices(last=200.0, slope=-.5))
         self.assertFalse(falling["market_above_ma20"])
         self.assertIsNone(calculate_indicators(prices(), None)["market_above_ma20"])
+
+    def test_chart_score_credits_only_confirmed_20_50_alignment(self):
+        aligned = calculate_indicators(prices(days=50, slope=.5))
+        self.assertEqual(aligned["ma50"], 87.75)
+        self.assertTrue(aligned["ma20_ma50_aligned"])
+        signal = classify_signal(aligned)
+        self.assertIn("종가 > 20일선 > 50일선", signal["reasons"])
+        self.assertEqual(signal["score"], classify_signal(dict(aligned, ma20_ma50_aligned=False))["score"] + 1)
+
+        short_history = calculate_indicators(prices(days=49, slope=.5))
+        self.assertIsNone(short_history["ma50"])
+        self.assertFalse(short_history["ma20_ma50_aligned"])
+        self.assertIn("20일선 상회", classify_signal(short_history)["reasons"])
+        self.assertFalse(calculate_indicators(prices(days=50))["ma20_ma50_aligned"])
 
     def test_report_line_shows_the_regime_and_what_it_held_back(self):
         lines = market_regime_note({"market_regime": {

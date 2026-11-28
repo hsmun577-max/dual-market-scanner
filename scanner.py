@@ -393,7 +393,9 @@ def calculate_indicators(data, benchmark=None):
     price = float(close.iloc[-1])
     ma5 = float(close.tail(5).mean())
     ma20 = float(close.tail(20).mean())
+    ma50 = float(close.tail(50).mean(skipna=False)) if len(close) >= 50 else math.nan
     ma60 = float(close.tail(60).mean())
+    ma20_ma50_aligned = bool(math.isfinite(ma50) and price > ma20 > ma50)
 
     # How young the 5/20-day alignment is: the short-term early-entry track buys the first
     # one-to-three sessions of it (or the first close back above the 20-day average), which
@@ -556,7 +558,9 @@ def calculate_indicators(data, benchmark=None):
         "prev_close": safe_float(previous_close),
         "ma5": safe_float(ma5),
         "ma20": safe_float(ma20),
+        "ma50": safe_float(ma50),
         "ma60": safe_float(ma60),
+        "ma20_ma50_aligned": ma20_ma50_aligned,
         "ma5_above_ma20_days": aligned_days,
         "ma20_cross_up": ma20_cross_up,
         "return_1d": safe_float(return_1d),
@@ -615,6 +619,10 @@ def classify_signal(indicators, inverse=False):
     if indicators["price"] > indicators["ma20"]:
         score += 1
         reasons.append("20일선 상회")
+
+    if indicators.get("ma20_ma50_aligned") is True:
+        score += 1
+        reasons.append("종가 > 20일선 > 50일선")
 
     if indicators["breakout"]:
         score += 2
